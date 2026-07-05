@@ -386,23 +386,20 @@ main() {
   }
   END {
     printf "  \033[1m统计摘要\033[0m\n"
-    printf "  ┌─────────────────────────────────────────────┐\n"
-    printf "  │ \033[0;32m零丢包   %3d\033[0m  │ \033[0;33m1-5%%     %3d\033[0m  │ \033[0;35m6-20%%    %3d\033[0m  │ \033[0;31m>20%%     %3d\033[0m │\n", z, l, m, h
-    printf "  └─────────────────────────────────────────────┘\n"
+    printf "  \033[0;32m零丢包:%3d\033[0m    \033[0;33m1-5%%:%3d\033[0m    \033[0;35m6-20%%:%3d\033[0m    \033[0;31m>20%%:%3d\033[0m\n", z, l, m, h
     printf "\n"
   }' "$sorted_file"
 
   show_provider_summary "$sorted_file"
 
   echo -e "  ${BOLD}详细结果${NC}"
-  echo -e "  ${DIM}┌──────────────────────┬──────────┬──────────┬──────────┐${NC}"
-  echo -e "  ${DIM}│ 省份            运营商 │ 丢包率   │ 收包     │ 延迟     │${NC}"
-  echo -e "  ${DIM}├──────────────────────┼──────────┼──────────┼──────────┤${NC}"
+  printf "  ${DIM}%-8s %-4s %-10s %-8s %-8s${NC}\n" "省份" "运营商" "丢包率" "收包" "延迟"
+  printf "  ${DIM}%-8s %-4s %-10s %-8s %-8s${NC}\n" "--------" "----" "----------" "--------" "--------"
 
   # 按运营商+省份排序展示
   sort -t'|' -k3,3 -k2,2 "$sorted_file" | while IFS='|' read -r status prov isp host ip snd rcv loss lat; do
     [ "$status" = "FAIL" ] && {
-      printf "  ${DIM}│${NC} ${RED}●${NC} ${CYAN}%-8s${NC} %-4s ${DIM}│${NC} ${RED}DNS/失败${NC}     ${DIM}│${NC} %4s/%-3s ${DIM}│${NC} %6sms ${DIM}│${NC}\n" "$prov" "$isp" "-" "-" "-"
+      printf "  ${CYAN}%-8s${NC} %-4s ${RED}%-10s${NC} %-8s %-8s\n" "$prov" "$isp" "DNS/失败" "-" "-"
       continue
     }
 
@@ -410,23 +407,16 @@ main() {
     lv=$(awk -v x="$loss" 'BEGIN { printf "%d", x }' 2>/dev/null)
     lv=${lv:-0}
 
-    if   [ "$lv" -eq 0 ]; then local icon="${GREEN}●${NC}"
-    elif [ "$lv" -le 5 ]; then local icon="${YELLOW}●${NC}"
-    elif [ "$lv" -le 20 ]; then local icon="${MAGENTA}●${NC}"
-    else                       local icon="${RED}●${NC}"
-    fi
-
     local ld
     ld=$(loss_color "$loss")
 
-    printf "  ${DIM}│${NC} $icon ${CYAN}%-8s${NC} %-4s ${DIM}│${NC} %8b ${DIM}│${NC} %4s/%-3s ${DIM}│${NC} %6sms ${DIM}│${NC}\n" \
+    printf "  ${CYAN}%-8s${NC} %-4s %8b %4s/%-3s %8sms\n" \
       "$prov" "$isp" "$ld" "$rcv" "$snd" "$lat"
   done
 
-  echo -e "  ${DIM}└──────────────────────┴──────────┴──────────┴──────────┘${NC}"
   echo ""
 
-  echo -e "  ${DIM}图例: ${GREEN}●零丢包${NC}  ${YELLOW}●≤5%${NC}  ${MAGENTA}●≤20%${NC}  ${RED}●>20%${NC}"
+  echo -e "  ${DIM}图例: ${GREEN}零丢包${NC}  ${YELLOW}≤5%${NC}  ${MAGENTA}≤20%${NC}  ${RED}>20%${NC}"
   echo -e "  ${DIM}CSV: $CSV${NC}"
   echo ""
 
