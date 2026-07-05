@@ -42,6 +42,33 @@ check_nping() {
   fi
 }
 
+# ===================== 检测并安装 dig =====================
+check_dig() {
+  if command -v dig &>/dev/null; then
+    return 0
+  fi
+  echo -e "${YELLOW}[!] dig 未安装，正在自动安装...${NC}"
+  if command -v apt-get &>/dev/null; then
+    apt-get update -qq && apt-get install -y -qq dnsutils 2>/dev/null
+  elif command -v dnf &>/dev/null; then
+    dnf install -y -q bind-utils 2>/dev/null
+  elif command -v yum &>/dev/null; then
+    yum install -y -q bind-utils 2>/dev/null
+  elif command -v brew &>/dev/null; then
+    brew install bind 2>/dev/null
+    export PATH="$(brew --prefix bind)/bin:$PATH"
+  else
+    echo -e "${RED}[X] 无法自动安装 dig，请手动安装 dnsutils、bind-utils 或 bind${NC}"
+    exit 1
+  fi
+  if command -v dig &>/dev/null; then
+    echo -e "${GREEN}[√] dig 安装成功${NC}"
+  else
+    echo -e "${RED}[X] dig 安装失败${NC}"
+    exit 1
+  fi
+}
+
 # ===================== 节点数据 =====================
 NODES=(
   "河北 联通 he-cu-v4.ip.zstaticcdn.com"
@@ -316,18 +343,29 @@ test_one() {
     return
   fi
 
-  local raw
-  raw=$(nping --tcp -p 80 --flags syn -c "$PACKETS" --delay 1s "$ip" 2>&1)
+  local raw nping_rc
+  if raw=$(nping --tcp -p 80 --flags syn -c "$PACKETS" --delay 1s "$ip" 2>&1); then
+    nping_rc=0
+  else
+    nping_rc=$?
+  fi
+
   local sent rcvd loss_pct avg_rtt
   sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
   rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
   loss_pct=$(printf "%s\n" "$raw" | sed -nE 's/.*\(([0-9.]+)%\).*/\1/p' | head -1)
   avg_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
 
-  loss_pct=${loss_pct:-100.00}
+  if [ "$nping_rc" -ne 0 ] ||
+     ! [[ "$sent" =~ ^[0-9]+$ ]] || [ "$sent" -ne "$PACKETS" ] ||
+     ! [[ "$rcvd" =~ ^[0-9]+$ ]] ||
+     ! [[ "$loss_pct" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+     { [ "$rcvd" -gt 0 ] && ! [[ "$avg_rtt" =~ ^[0-9]+([.][0-9]+)?$ ]]; }; then
+    echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|NPING_ERROR" > "$outfile"
+    return
+  fi
+
   avg_rtt=${avg_rtt:-0}
-  sent=${sent:-$PACKETS}
-  rcvd=${rcvd:-0}
 
   echo "OK|$prov|$isp|$host|$ip|$sent|$rcvd|$loss_pct|$avg_rtt" > "$outfile"
 }
@@ -343,6 +381,7 @@ main() {
   echo ""
 
   check_nping
+  check_dig
   echo ""
 
   # 并行测试
