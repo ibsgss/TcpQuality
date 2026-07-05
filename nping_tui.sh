@@ -272,7 +272,7 @@ show_provider_summary() {
     data[prov SUBSEP isp] = cell(status, loss, lat, rcv)
   }
   END {
-    printf "  %s%s三网概览%s %s(电信 | 联通 | 移动，Step=80ms)%s\n", bold, cyan, nc, dim, nc
+    printf "  %s%s三网概览%s %s(电信 | 联通 | 移动)%s\n", bold, cyan, nc, dim, nc
     printf "  %s%-8s  %-15s %-15s %-15s%s\n", dim, "省份", "电信", "联通", "移动", nc
     for (i = 1; i <= n; i++) {
       prov = order[i]
