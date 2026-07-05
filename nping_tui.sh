@@ -347,6 +347,8 @@ main() {
   echo ""
 
   # 收集结果并写入 CSV
+  local report_time
+  report_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
   local CSV="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$CSV"
   echo "省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms" >> "$CSV"
@@ -365,6 +367,7 @@ main() {
   # ---- TUI 结果展示 ----
   clear
   print_header
+  echo -e "  ${DIM}报告时间：${report_time}${NC}"
   echo ""
 
   # 用 awk 做统计（避免 bash 浮点/空值问题）
