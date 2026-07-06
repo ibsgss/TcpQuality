@@ -370,7 +370,7 @@ print_header() {
   echo -e "${DIM}------------------------------------------------------------${NC}"
 }
 
-# 返回“出口网卡|源IPv6”，避免 nping 使用未指定源地址 ::。
+# 返回“出口网卡|源IPv6”，用于确认目标具备有效公网 IPv6 路由。
 get_ipv6_route() {
   local target="$1" route_info iface source_ip
 
@@ -429,15 +429,16 @@ test_one() {
     return
   fi
 
-  local raw nping_rc iface source_ip route_data
+  local raw nping_rc iface route_data
   local -a nping_args=(--tcp -p 80 --flags syn -c "$PACKETS" --delay 1s "$ip")
   if [ "$family" = "6" ]; then
     if ! route_data=$(get_ipv6_route "$ip"); then
       echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|IPV6_ROUTE_ERROR" > "$outfile"
       return
     fi
-    IFS='|' read -r iface source_ip <<< "$route_data"
-    nping_args=(-6 -e "$iface" -S "$source_ip" "${nping_args[@]}")
+    IFS='|' read -r iface _ <<< "$route_data"
+    # IPv6 模式传入 -S 会要求同时指定二层 MAC；让内核按路由选择源地址。
+    nping_args=(-6 -e "$iface" "${nping_args[@]}")
   fi
   if raw=$(nping "${nping_args[@]}" 2>&1); then
     nping_rc=0
