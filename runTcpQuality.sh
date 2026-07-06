@@ -185,7 +185,7 @@ NODES=(
 
 PACKETS=60
 NODE_TOTAL=${#NODES[@]}
-TOTAL=$((NODE_TOTAL * 2))
+TOTAL=$NODE_TOTAL
 PARALLEL=31
 RESULT_DIR=$(mktemp -d)
 trap "rm -rf $RESULT_DIR" EXIT
@@ -207,7 +207,7 @@ TcpQuality 节点 TCP 丢包探测脚本
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
 
 默认行为:
-  - 节点范围: 全国 TcpQuality IPv4/IPv6 节点，各 ${NODE_TOTAL} 个省份/运营商组合
+  - 节点范围: 全国 TcpQuality IPv4 节点；检测到可用 IPv6 时增加 IPv6 节点
   - 探测方式: 每节点发送 ${PACKETS} 个裸 TCP SYN 包，无内核重传
   - 并发数量: ${PARALLEL}
   - 目标端口: 80/tcp
@@ -312,7 +312,7 @@ show_provider_summary() {
   function cell(status, loss, lat, rcv,   l, v, color) {
     l = loss + 0
     v = lat + 0
-    if (status != "OK" || rcv + 0 == 0) {
+    if (status != "OK") {
       return red "          失败" nc
     }
 
@@ -391,11 +391,26 @@ get_ipv6_route() {
   fi
 
   source_ip=${source_ip%%\%*}
-  if [ -n "$iface" ] && [[ "$source_ip" == *:* ]] && [ "$source_ip" != "::" ]; then
-    printf "%s|%s\n" "$iface" "$source_ip"
-    return 0
-  fi
+  case "$source_ip" in
+    [23]*:*)
+      if [ -n "$iface" ]; then
+        printf "%s|%s\n" "$iface" "$source_ip"
+        return 0
+      fi
+      ;;
+  esac
   return 1
+}
+
+ipv6_available() {
+  local host target
+  read -r _ _ host <<< "${NODES[0]}"
+  host=${host/-v4./-v6.}
+  target=$(dig +short "$host" AAAA 2>/dev/null | grep -E '^[0-9A-Fa-f:]+$' | head -1)
+  case "$target" in
+    [23]*:*) get_ipv6_route "$target" >/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 # ===================== 单节点测试 =====================
@@ -458,11 +473,20 @@ export RESULT_DIR PACKETS
 main() {
   clear
   print_header
-  echo -e "${DIM}  双栈节点: $TOTAL  每节点发包: $PACKETS  并行: $PARALLEL  端口: 80/tcp${NC}"
-  echo ""
 
   check_nping
   check_dig
+
+  local ipv6_enabled=0
+  if ipv6_available; then
+    ipv6_enabled=1
+    TOTAL=$((NODE_TOTAL * 2))
+    echo -e "${GREEN}[√] 检测到可用 IPv6，启用双栈探测${NC}"
+  else
+    TOTAL=$NODE_TOTAL
+    echo -e "${YELLOW}[!] 未检测到可用 IPv6，仅探测 IPv4${NC}"
+  fi
+  echo -e "${DIM}  探测节点: $TOTAL  每节点发包: $PACKETS  并行: $PARALLEL  端口: 80/tcp${NC}"
   echo ""
 
   # 并行测试
@@ -470,7 +494,9 @@ main() {
   echo -e "  ${DIM}正在探测，请稍候...${NC}"
   show_progress
   local family entry prov isp host
-  for family in 4 6; do
+  local -a families=(4)
+  if [ "$ipv6_enabled" -eq 1 ]; then families+=(6); fi
+  for family in "${families[@]}"; do
     for entry in "${NODES[@]}"; do
       read -r prov isp host <<< "$entry"
       if [ "$family" = "6" ]; then
@@ -503,7 +529,7 @@ main() {
   local sorted_v4 sorted_v6 sorted_file f i status ip snd rcv loss lat
   sorted_v4=$(mktemp)
   sorted_v6=$(mktemp)
-  for family in 4 6; do
+  for family in "${families[@]}"; do
     if [ "$family" = "4" ]; then sorted_file="$sorted_v4"; else sorted_file="$sorted_v6"; fi
     for i in $(seq 1 "$TOTAL"); do
       f="${RESULT_DIR}/${family}_${i}"
@@ -522,7 +548,9 @@ main() {
   echo ""
 
   show_family_results "IPv4" "$sorted_v4"
-  show_family_results "IPv6" "$sorted_v6"
+  if [ "$ipv6_enabled" -eq 1 ]; then
+    show_family_results "IPv6" "$sorted_v6"
+  fi
 
   echo -e "  ${DIM}CSV: $CSV${NC}"
   echo ""
