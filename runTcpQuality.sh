@@ -13,6 +13,7 @@ set -e
 RED='\033[0;31m';    GREEN='\033[0;32m';    YELLOW='\033[0;33m'
 BLUE='\033[0;34m';   CYAN='\033[0;36m';     MAGENTA='\033[0;35m'
 WHITE='\033[1;37m';  BOLD='\033[1m';        DIM='\033[2m'
+UNDERLINE='\033[4m'
 NC='\033[0m'
 BG_RED='\033[41m';   BG_GREEN='\033[42m';   BG_YELLOW='\033[43m'
 
@@ -258,10 +259,10 @@ TOTAL=$NODE_TOTAL
 PARALLEL=31
 TEST_CERNET=0
 TEST_ALL=0
-UPLOAD_REPORT=0
+UPLOAD_REPORT=1
 ONLY_IPV4=0
 ONLY_IPV6=0
-REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/api/reports}
+REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
 trap "rm -rf $RESULT_DIR" EXIT
 
@@ -284,7 +285,6 @@ TcpQuality 节点 TCP 丢包探测脚本
   -v6, --v6         仅探测 IPv6
   --cernet          在三网基础上增加 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
-  --upload          生成并上传 SVG 报告，返回公开链接
 
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
@@ -299,6 +299,7 @@ TcpQuality 节点 TCP 丢包探测脚本
   - 目标端口: 80/tcp
   - 结果展示: 统计摘要、三网概览
   - CSV 输出: /tmp/zstatic_nping_YYYYmmdd_HHMMSS.csv
+  - 报告上传: 默认生成并上传 SVG 报告，返回公开链接
 
 依赖:
   - nping: 随 nmap 安装
@@ -372,10 +373,6 @@ parse_args() {
         TEST_ALL=1
         shift
         ;;
-      --upload)
-        UPLOAD_REPORT=1
-        shift
-        ;;
       *)
         echo -e "${RED}[X] 不支持的参数: $1${NC}" >&2
         echo "使用 -h 或 --help 查看帮助。" >&2
@@ -435,14 +432,14 @@ show_provider_summary() {
     l = loss + 0
     v = lat + 0
     if (status != "OK") {
-      return red "          失败" nc
+      return red "            失败" nc
     }
 
     if      (l > 20 || v > 240) color = red
     else if (l > 0  || v > 150) color = yellow
     else                        color = green
 
-    return color sprintf("%4.0fms/%7s", v, compact_loss(loss) "%") nc
+    return color sprintf("%4.0fms / %4s", v, compact_loss(loss) "%") nc
   }
   {
     status = $1
@@ -494,13 +491,13 @@ show_education_results() {
     return v
   }
   function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "          失败" nc
+    if (status != "OK") return red "            失败" nc
     l = loss + 0
     v = lat + 0
     if      (l > 20 || v > 240) color = red
     else if (l > 0  || v > 150) color = yellow
     else                        color = green
-    return color sprintf("%4.0fms/%7s", v, compact_loss(loss) "%") nc
+    return color sprintf("%4.0fms / %4s", v, compact_loss(loss) "%") nc
   }
   {
     status = $1
@@ -535,13 +532,13 @@ show_education_combined() {
     return v
   }
   function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "          失败" nc
+    if (status != "OK") return red "            失败" nc
     l = loss + 0
     v = lat + 0
     if      (l > 20 || v > 240) color = red
     else if (l > 0  || v > 150) color = yellow
     else                        color = green
-    return color sprintf("%4.0fms/%7s", v, compact_loss(loss) "%") nc
+    return color sprintf("%4.0fms / %4s", v, compact_loss(loss) "%") nc
   }
   {
     generation = (FILENAME == ARGV[1]) ? 1 : 2
@@ -703,7 +700,7 @@ ipv4_available() {
 }
 
 upload_report() {
-  local csv="$1" response_file http_code report_url
+  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 未安装 curl，已跳过 SVG 报告上传${NC}"
     return
@@ -713,6 +710,7 @@ upload_report() {
   if ! http_code=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 \
     -o "$response_file" -w '%{http_code}' \
     -H 'Content-Type: text/csv; charset=utf-8' \
+    -H "X-Report-Time: $report_time" \
     --data-binary "@$csv" "$REPORT_API"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
     rm -f "$response_file"
@@ -721,9 +719,14 @@ upload_report() {
 
   if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
     report_url=$(sed -nE 's/.*"url":"([^"]+)".*/\1/p' "$response_file" | head -1)
+    today_uses=$(sed -nE 's/.*"todayUses":([0-9]+).*/\1/p' "$response_file" | head -1)
+    total_uses=$(sed -nE 's/.*"totalUses":([0-9]+).*/\1/p' "$response_file" | head -1)
   fi
   if [ -n "$report_url" ]; then
-    echo -e "  ${GREEN}SVG: $report_url${NC}"
+    echo -e "  ${WHITE}报告链接：${UNDERLINE}${report_url}${NC}"
+    if [ -n "$today_uses" ] && [ -n "$total_uses" ]; then
+      echo -e "  ${DIM}今日TCP脚本使用次数：${today_uses}；总使用次数：${total_uses}。感谢使用ibsgss网络质量检测脚本！${NC}"
+    fi
   else
     echo -e "  ${YELLOW}[!] SVG 报告上传失败（HTTP $http_code），本地 CSV 已保留${NC}"
   fi
@@ -979,9 +982,8 @@ main() {
     fi
   fi
 
-  echo -e "  ${DIM}CSV: $CSV${NC}"
   if [ "$UPLOAD_REPORT" -eq 1 ]; then
-    upload_report "$CSV"
+    upload_report "$CSV" "${report_time%%（*}"
   fi
   echo ""
 

@@ -2,7 +2,7 @@
 
 ## 使用方法
 
-默认检测三网，每个节点发送 60 个包，并行数为 31，A/AAAA 解析使用系统 DNS：
+默认检测三网，每个节点发送 60 个包，并行数为 31，A/AAAA 解析使用系统 DNS。检测完成后会自动上传报告并返回公开链接：
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
@@ -50,12 +50,6 @@ bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQ
 bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -p 16
 ```
 
-生成并上传 SVG 报告：
-
-```bash
-bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) --all --upload
-```
-
 ## 支持参数
 
 - `-h`、`--help`：显示帮助信息并退出。
@@ -65,8 +59,7 @@ bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQ
 - `-v6`、`--v6`：仅探测 IPv6。
 - `--cernet`：在三网基础上增加 CERNET IPv4 和 CERNET2 IPv6。
 - `--all`：检测三网、CERNET 和 CERNET2；出现 `--all` 时会探测全部可用 IP 协议。
-- `--upload`：将检测结果提交给 Worker，生成并返回公开 SVG 链接。
 
 脚本仅检测本机可用的 IP 协议；缺少 IPv4 或 IPv6 时会自动跳过对应节点。发送 TCP SYN 探测包通常需要使用 `root` 用户运行。IPv4 会跳过私网、保留地址和 `198.18.0.0/15` 测试网段。
 
-SVG 报告由 `https://tcpquality.ibsgss.uk` 上的 Cloudflare Worker 生成并保存。
+SVG 报告默认提交到 `https://tcpquality.ibsgss.uk/generate`，由 `https://tcpquality.ibsgss.uk` 上的报告服务生成并保存。
