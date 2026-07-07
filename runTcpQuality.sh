@@ -253,10 +253,10 @@ CERNET2_NODES=(
   "重庆 www.cqu.edu.cn 2001:da8:c800:100:caca:206::"
 )
 
-PACKETS=60
+PACKETS=30
 NODE_TOTAL=${#NODES[@]}
 TOTAL=$NODE_TOTAL
-PARALLEL=31
+PARALLEL=16
 TEST_CERNET=0
 TEST_ALL=0
 UPLOAD_REPORT=1
@@ -425,8 +425,7 @@ show_provider_summary() {
   local file="$1"
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   function compact_loss(v) {
-    sub(/\.00$/, "", v)
-    return v
+    return int(v + 0.5)
   }
   function cell(status, loss, lat, rcv,   l, v, color) {
     l = loss + 0
@@ -487,8 +486,7 @@ show_education_results() {
   local title="$1" file="$2"
   awk -F'|' -v title="$title" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   function compact_loss(v) {
-    sub(/\.00$/, "", v)
-    return v
+    return int(v + 0.5)
   }
   function cell(status, loss, lat,   l, v, color) {
     if (status != "OK") return red "            失败" nc
@@ -528,8 +526,7 @@ show_education_combined() {
   local ipv4_file="$1" ipv6_file="$2"
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   function compact_loss(v) {
-    sub(/\.00$/, "", v)
-    return v
+    return int(v + 0.5)
   }
   function cell(status, loss, lat,   l, v, color) {
     if (status != "OK") return red "            失败" nc
