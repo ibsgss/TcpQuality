@@ -258,6 +258,11 @@ TOTAL=$NODE_TOTAL
 PARALLEL=31
 TEST_CERNET=0
 TEST_ALL=0
+UPLOAD_REPORT=0
+ONLY_IPV4=0
+ONLY_IPV6=0
+DNS_SERVER=223.5.5.5
+REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/api/reports}
 RESULT_DIR=$(mktemp -d)
 trap "rm -rf $RESULT_DIR" EXIT
 
@@ -276,17 +281,22 @@ TcpQuality 节点 TCP 丢包探测脚本
   -p, --parallel NUM
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
   --parallel=NUM    同上，设置并行节点数
-  --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
+  -v4, --v4         仅探测 IPv4
+  -v6, --v6         仅探测 IPv6
+  --cernet          在三网基础上增加 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
+  --upload          生成并上传 SVG 报告，返回公开链接
 
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
 
 默认行为:
   - 节点范围: 全国 TcpQuality IPv4 节点；检测到可用 IPv6 时增加 IPv6 节点
-  - 指定教育网参数时: 不探测三网；本机有 IPv6 时合并探测 CERNET 和 CERNET2
+  - 协议选择: 可使用 -v4/--v4 或 -v6/--v6 限定 IP 版本；--all 会探测全部可用协议
+  - 指定教育网参数时: 在三网基础上增加 CERNET 和 CERNET2
   - 探测方式: 每节点发送 ${PACKETS} 个裸 TCP SYN 包，无内核重传
   - 并发数量: ${PARALLEL}
+  - DNS 解析: ${DNS_SERVER}
   - 目标端口: 80/tcp
   - 结果展示: 统计摘要、三网概览
   - CSV 输出: /tmp/zstatic_nping_YYYYmmdd_HHMMSS.csv
@@ -347,12 +357,24 @@ parse_args() {
         fi
         shift
         ;;
+      -v4|--v4)
+        ONLY_IPV4=1
+        shift
+        ;;
+      -v6|--v6)
+        ONLY_IPV6=1
+        shift
+        ;;
       --cernet)
         TEST_CERNET=1
         shift
         ;;
       --all)
         TEST_ALL=1
+        shift
+        ;;
+      --upload)
+        UPLOAD_REPORT=1
         shift
         ;;
       *)
@@ -621,18 +643,56 @@ ipv6_available() {
   local host target
   read -r _ _ host <<< "${NODES[0]}"
   host=${host/-v4./-v6.}
-  target=$(dig +short "$host" AAAA 2>/dev/null | grep -E '^[0-9A-Fa-f:]+$' | head -1)
+  target=$(dig_short "$host" AAAA | grep -E '^[0-9A-Fa-f:]+$' | head -1)
   case "$target" in
     [23]*:*) get_ipv6_route "$target" >/dev/null ;;
     *) return 1 ;;
   esac
 }
 
+dig_short() {
+  local host="$1" record_type="$2"
+  dig +short @"$DNS_SERVER" "$host" "$record_type" 2>/dev/null
+}
+
+is_public_ipv4() {
+  local ip="$1"
+  awk -F. '
+    NF != 4 { exit 1 }
+    {
+      for (i = 1; i <= 4; i++) {
+        if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
+      }
+      if ($1 == 0 || $1 == 10 || $1 == 127 || $1 >= 224) exit 1
+      if ($1 == 100 && $2 >= 64 && $2 <= 127) exit 1
+      if ($1 == 169 && $2 == 254) exit 1
+      if ($1 == 172 && $2 >= 16 && $2 <= 31) exit 1
+      if ($1 == 192 && $2 == 168) exit 1
+      if ($1 == 192 && $2 == 0 && $3 == 0) exit 1
+      if ($1 == 192 && $2 == 0 && $3 == 2) exit 1
+      if ($1 == 198 && ($2 == 18 || $2 == 19)) exit 1
+      if ($1 == 198 && $2 == 51 && $3 == 100) exit 1
+      if ($1 == 203 && $2 == 0 && $3 == 113) exit 1
+      exit 0
+    }
+  ' <<< "$ip"
+}
+
+resolve_ipv4() {
+  local host="$1" ip
+  while IFS= read -r ip; do
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_public_ipv4 "$ip"; then
+      printf "%s\n" "$ip"
+      return 0
+    fi
+  done < <(dig_short "$host" A)
+  return 1
+}
+
 ipv4_available() {
   local host target
   read -r _ _ host <<< "${NODES[0]}"
-  target=$(dig +short "$host" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-  [ -n "$target" ] || return 1
+  target=$(resolve_ipv4 "$host") || return 1
 
   if command -v ip &>/dev/null; then
     ip -4 route get "$target" >/dev/null 2>&1
@@ -643,6 +703,34 @@ ipv4_available() {
   fi
 }
 
+upload_report() {
+  local csv="$1" response_file http_code report_url
+  if ! command -v curl &>/dev/null; then
+    echo -e "  ${YELLOW}[!] 未安装 curl，已跳过 SVG 报告上传${NC}"
+    return
+  fi
+
+  response_file=$(mktemp)
+  if ! http_code=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 \
+    -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: text/csv; charset=utf-8' \
+    --data-binary "@$csv" "$REPORT_API"); then
+    echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
+    rm -f "$response_file"
+    return
+  fi
+
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    report_url=$(sed -nE 's/.*"url":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  fi
+  if [ -n "$report_url" ]; then
+    echo -e "  ${GREEN}SVG: $report_url${NC}"
+  else
+    echo -e "  ${YELLOW}[!] SVG 报告上传失败（HTTP $http_code），本地 CSV 已保留${NC}"
+  fi
+  rm -f "$response_file"
+}
+
 # ===================== 单节点测试 =====================
 test_one() {
   local group="$1" family="$2" prov="$3" isp="$4" host="$5" idx="$6"
@@ -651,9 +739,11 @@ test_one() {
 
   local ip="$fixed_ip"
   if [ -z "$ip" ] && [ "$family" = "6" ]; then
-    ip=$(dig +short "$host" AAAA 2>/dev/null | grep -E '^[0-9A-Fa-f:]+$' | head -1)
+    ip=$(dig_short "$host" AAAA | grep -E '^[0-9A-Fa-f:]+$' | head -1)
   elif [ -z "$ip" ]; then
-    ip=$(dig +short "$host" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    ip=$(resolve_ipv4 "$host") || ip=""
+  elif [ "$family" = "4" ] && ! is_public_ipv4 "$ip"; then
+    ip=""
   fi
   if [ -z "$ip" ]; then
     echo "FAIL|$prov|$isp|$host|DNS|0|0|100.00|0" > "$outfile"
@@ -698,7 +788,10 @@ test_one() {
 
 export -f test_one
 export -f get_ipv6_route
-export RESULT_DIR PACKETS
+export -f dig_short
+export -f is_public_ipv4
+export -f resolve_ipv4
+export RESULT_DIR PACKETS DNS_SERVER
 
 # ===================== 主流程 =====================
 main() {
@@ -713,30 +806,44 @@ main() {
   check_nping
   check_dig
 
-  local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 test_edu=0
-  if ipv4_available; then
-    ipv4_enabled=1
-    echo -e "${GREEN}[√] 检测到可用 IPv4${NC}"
-  else
-    echo -e "${YELLOW}[!] 未检测到可用 IPv4，已跳过 IPv4${NC}"
+  local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 test_edu=0 want_ipv4=1 want_ipv6=1
+  if [ "$TEST_ALL" -eq 1 ]; then
+    want_ipv4=1
+    want_ipv6=1
+  elif [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
+    want_ipv6=0
+  elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
+    want_ipv4=0
   fi
 
-  if [ "$TEST_CERNET" -eq 1 ]; then test_cdn=0; fi
+  if [ "$want_ipv4" -eq 1 ] && ipv4_available; then
+    ipv4_enabled=1
+    echo -e "${GREEN}[√] 检测到可用 IPv4${NC}"
+  elif [ "$want_ipv4" -eq 1 ]; then
+    echo -e "${YELLOW}[!] 未检测到可用 IPv4，已跳过 IPv4${NC}"
+  fi
+  if [ "$want_ipv4" -eq 0 ]; then
+    echo -e "${DIM}[i] 已按参数跳过 IPv4${NC}"
+  fi
+
   if [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then test_edu=1; fi
 
   TOTAL=0
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + NODE_TOTAL)); fi
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + ${#CERNET_NODES[@]})); fi
-  if ipv6_available; then
+  if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
     if [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + NODE_TOTAL)); fi
     if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + ${#CERNET2_NODES[@]})); fi
     echo -e "${GREEN}[√] 检测到可用 IPv6${NC}"
-  else
+  elif [ "$want_ipv6" -eq 1 ]; then
     echo -e "${YELLOW}[!] 未检测到可用 IPv6，已跳过 IPv6${NC}"
     if [ "$test_edu" -eq 1 ]; then
       echo -e "${YELLOW}[!] 二代教育网需要 IPv6，已跳过${NC}"
     fi
+  fi
+  if [ "$want_ipv6" -eq 0 ]; then
+    echo -e "${DIM}[i] 已按参数跳过 IPv6${NC}"
   fi
   if [ "$TOTAL" -eq 0 ]; then
     echo -e "${RED}[X] 没有可执行的探测任务${NC}"
@@ -874,6 +981,9 @@ main() {
   fi
 
   echo -e "  ${DIM}CSV: $CSV${NC}"
+  if [ "$UPLOAD_REPORT" -eq 1 ]; then
+    upload_report "$CSV"
+  fi
   echo ""
 
   rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2"

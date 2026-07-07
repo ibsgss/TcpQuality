@@ -1,0 +1,7 @@
+# Local contributor and deployment files
+AGENTS.md
+worker/
+
+# Local reports and editor metadata
+*.svg
+.DS_Store
