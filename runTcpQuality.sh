@@ -87,6 +87,33 @@ check_dig() {
   fi
 }
 
+# ===================== 检测线路探测依赖 =====================
+check_traceroute() {
+  if command -v traceroute &>/dev/null; then
+    return 0
+  fi
+  echo -e "${YELLOW}[!] traceroute 未安装，正在自动安装...${NC}"
+  if command -v apt-get &>/dev/null; then
+    if apt-get update -qq && apt-get install -y -qq traceroute 2>/dev/null; then :; fi
+  elif command -v dnf &>/dev/null; then
+    if dnf install -y -q traceroute 2>/dev/null; then :; fi
+  elif command -v yum &>/dev/null; then
+    if yum install -y -q traceroute 2>/dev/null; then :; fi
+  elif command -v apk &>/dev/null; then
+    if apk add --no-cache traceroute 2>/dev/null; then :; fi
+  elif command -v pacman &>/dev/null; then
+    if pacman -Sy --noconfirm traceroute 2>/dev/null; then :; fi
+  elif command -v brew &>/dev/null; then
+    if brew install traceroute 2>/dev/null; then :; fi
+  fi
+  if command -v traceroute &>/dev/null; then
+    echo -e "${GREEN}[√] traceroute 安装成功${NC}"
+  else
+    echo -e "${RED}[X] traceroute 安装失败${NC}"
+    exit 1
+  fi
+}
+
 # ===================== 节点数据 =====================
 NODES=(
   "河北 联通 he-cu-v4.ip.zstaticcdn.com"
@@ -262,9 +289,110 @@ TEST_ALL=0
 UPLOAD_REPORT=1
 ONLY_IPV4=0
 ONLY_IPV6=0
+ROUTE_MODE=0
+ROUTE_PROTOCOL="tcp"
+SELECTED_PROVINCES=""
+DEBUG_MODE=0
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
-trap "rm -rf $RESULT_DIR" EXIT
+cleanup_result_dir() {
+  if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
+    echo -e "${DIM}Debug 目录：$RESULT_DIR${NC}"
+  else
+    rm -rf "$RESULT_DIR"
+  fi
+}
+trap cleanup_result_dir EXIT
+
+# ===================== 省份筛选 =====================
+province_from_code() {
+  local code="$1"
+  code=$(printf "%s" "$code" | tr '[:upper:]' '[:lower:]')
+  code=${code#-}
+  case "$code" in
+    he|河北) echo "河北" ;;
+    sx|山西) echo "山西" ;;
+    ln|辽宁) echo "辽宁" ;;
+    jl|吉林) echo "吉林" ;;
+    hl|黑龙江) echo "黑龙江" ;;
+    js|江苏) echo "江苏" ;;
+    zj|浙江) echo "浙江" ;;
+    ah|安徽) echo "安徽" ;;
+    fj|福建) echo "福建" ;;
+    jx|江西) echo "江西" ;;
+    sd|山东) echo "山东" ;;
+    ha|河南) echo "河南" ;;
+    hb|湖北) echo "湖北" ;;
+    hn|湖南) echo "湖南" ;;
+    gd|广东) echo "广东" ;;
+    hi|海南) echo "海南" ;;
+    sc|四川) echo "四川" ;;
+    gz|贵州) echo "贵州" ;;
+    yn|云南) echo "云南" ;;
+    sn|陕西) echo "陕西" ;;
+    gs|甘肃) echo "甘肃" ;;
+    qh|青海) echo "青海" ;;
+    nm|内蒙古) echo "内蒙古" ;;
+    gx|广西) echo "广西" ;;
+    xz|西藏) echo "西藏" ;;
+    nx|宁夏) echo "宁夏" ;;
+    xj|新疆) echo "新疆" ;;
+    bj|北京) echo "北京" ;;
+    tj|天津) echo "天津" ;;
+    sh|上海) echo "上海" ;;
+    cq|重庆) echo "重庆" ;;
+    *) return 1 ;;
+  esac
+}
+
+add_province_filter() {
+  local province
+  province=$(province_from_code "$1") || return 1
+  case "$SELECTED_PROVINCES" in
+    *"|$province|"*) ;;
+    *) SELECTED_PROVINCES="${SELECTED_PROVINCES}|${province}|" ;;
+  esac
+}
+
+province_selected() {
+  local province="$1"
+  [ -z "$SELECTED_PROVINCES" ] || [[ "$SELECTED_PROVINCES" == *"|$province|"* ]]
+}
+
+province_filter_text() {
+  if [ -z "$SELECTED_PROVINCES" ]; then
+    echo "全国"
+  else
+    printf "%s" "$SELECTED_PROVINCES" | sed 's/^|//; s/|$//; s/||/、/g; s/|/、/g'
+  fi
+}
+
+count_cdn_nodes() {
+  local entry prov isp host count=0
+  for entry in "${NODES[@]}"; do
+    read -r prov isp host <<< "$entry"
+    province_selected "$prov" && count=$((count + 1))
+  done
+  echo "$count"
+}
+
+count_cernet_nodes() {
+  local entry prov host ip count=0
+  for entry in "${CERNET_NODES[@]}"; do
+    read -r prov host ip <<< "$entry"
+    province_selected "$prov" && count=$((count + 1))
+  done
+  echo "$count"
+}
+
+count_cernet2_nodes() {
+  local entry prov host ip count=0
+  for entry in "${CERNET2_NODES[@]}"; do
+    read -r prov host ip <<< "$entry"
+    province_selected "$prov" && count=$((count + 1))
+  done
+  echo "$count"
+}
 
 # ===================== 参数与帮助 =====================
 show_help() {
@@ -277,6 +405,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 选项:
   -h, --help        显示帮助信息并退出
   -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
+  -cNUM             同上，例如 -c10 表示每节点发送 10 个包
   --count=NUM       同上，设置每节点发包数
   -p, --parallel NUM
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
@@ -285,15 +414,20 @@ TcpQuality 节点 TCP 丢包探测脚本
   -v6, --v6         仅探测 IPv6
   --cernet          在三网基础上增加 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
+  --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
+                     注意: 山西使用 -sx，陕西使用 -sn
+  --debug           保留临时文件并输出调试信息，便于排查线路识别问题
 
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
+  bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -bj -v4 --cernet
 
 默认行为:
   - 节点范围: 全国 TcpQuality IPv4 节点；检测到可用 IPv6 时增加 IPv6 节点
   - 协议选择: 可使用 -v4/--v4 或 -v6/--v6 限定 IP 版本；--all 会探测全部可用协议
   - 指定教育网参数时: 在三网基础上增加 CERNET 和 CERNET2
   - 探测方式: 每节点单发 ${PACKETS} 次裸 TCP SYN 包，无内核重传
+  - 线路识别: 三网 IPv4/IPv6 自动执行 TCP 回程线路识别
   - 并发数量: ${PARALLEL}
   - DNS 解析: 使用系统 DNS
   - 目标端口: 80/tcp
@@ -304,6 +438,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 依赖:
   - nping: 随 nmap 安装
   - dig: 用于解析节点域名
+  - traceroute: 用于自动识别三网 TCP 回程线路
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -332,6 +467,14 @@ parse_args() {
         fi
         PACKETS="$2"
         shift 2
+        ;;
+      -c[0-9]*)
+        PACKETS="${1#-c}"
+        if ! [[ "$PACKETS" =~ ^[0-9]+$ ]] || [ "$PACKETS" -lt 1 ]; then
+          echo -e "${RED}[X] 发包数必须是大于 0 的整数${NC}" >&2
+          exit 1
+        fi
+        shift
         ;;
       --count=*)
         PACKETS="${1#*=}"
@@ -373,6 +516,33 @@ parse_args() {
         TEST_ALL=1
         shift
         ;;
+      --debug)
+        DEBUG_MODE=1
+        shift
+        ;;
+      --province)
+        if [ -z "${2:-}" ] || ! add_province_filter "$2"; then
+          echo -e "${RED}[X] 不支持的省份代码: ${2:-}${NC}" >&2
+          exit 1
+        fi
+        shift 2
+        ;;
+      --province=*)
+        if ! add_province_filter "${1#*=}"; then
+          echo -e "${RED}[X] 不支持的省份代码: ${1#*=}${NC}" >&2
+          exit 1
+        fi
+        shift
+        ;;
+      -??|-???)
+        if add_province_filter "$1"; then
+          shift
+        else
+          echo -e "${RED}[X] 不支持的参数: $1${NC}" >&2
+          echo "使用 -h 或 --help 查看帮助。" >&2
+          exit 1
+        fi
+        ;;
       *)
         echo -e "${RED}[X] 不支持的参数: $1${NC}" >&2
         echo "使用 -h 或 --help 查看帮助。" >&2
@@ -410,25 +580,30 @@ bar() {
 }
 
 count_results() {
-  find "$RESULT_DIR" -type f 2>/dev/null | wc -l | tr -d ' '
+  if [ "${ROUTE_MODE:-0}" -eq 1 ]; then
+    find "$RESULT_DIR" -type f -name 'route_[0-9]*' 2>/dev/null | wc -l | tr -d ' '
+  else
+    find "$RESULT_DIR" -type f 2>/dev/null | wc -l | tr -d ' '
+  fi
 }
 
 show_progress() {
   local done
   done=$(count_results)
+  [ "$done" -gt "$TOTAL" ] && done="$TOTAL"
   echo -ne "\r  ${CYAN}探测进度${NC} "
   bar "$done" "$TOTAL"
   echo -ne "   "
 }
 
 show_provider_summary() {
-  local file="$1"
+  local file="$1" route_file="${2:-}"
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   function compact_loss(v) {
     return int(v + 0.5)
   }
   function fail_cell() {
-    return red "失败         " nc
+    return red sprintf("%-9s", "失败") nc
   }
   function latency_color(v) {
     if (v > 240) return red
@@ -447,7 +622,15 @@ show_provider_summary() {
       return fail_cell()
     }
 
-    return latency_color(v) sprintf("%4.0fms", v) nc " / " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
+    return latency_color(v) sprintf("%4.0fms", v) nc " " loss_color(l) sprintf("%3s", compact_loss(loss) "%") nc
+  }
+  function route_label(prov, isp) {
+    return ((prov SUBSEP isp) in route) ? route[prov SUBSEP isp] : isp
+  }
+  FILENAME == ARGV[1] && NF >= 6 {
+    if ($1 == "OK") route[$2 SUBSEP $3] = $6
+    else route[$2 SUBSEP $3] = "Hidden"
+    next
   }
   {
     status = $1
@@ -463,18 +646,18 @@ show_provider_summary() {
     data[prov SUBSEP isp] = cell(status, loss, lat, rcv)
   }
   END {
-    printf "  %s%s三网概览%s %s(电信 | 联通 | 移动)%s\n", bold, cyan, nc, dim, nc
+    printf "  %s%s%-8s%s  %s(%s%16s%s / %s%16s%s / %s%16s%s)%s\n", bold, cyan, "三网概览", nc, dim, cyan, "电信", dim, cyan, "联通", dim, cyan, "移动", dim, nc
     for (i = 1; i <= n; i++) {
       prov = order[i]
       prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
-      printf "  %s%s%s%s  电信 %s  联通 %s  移动 %s\n", cyan, prov, nc, prov_pad, data[prov SUBSEP "电信"], data[prov SUBSEP "联通"], data[prov SUBSEP "移动"]
+      printf "  %s%s%s%s  %-6s %s / %-6s %s / %-6s %s\n", cyan, prov, nc, prov_pad, route_label(prov, "电信"), data[prov SUBSEP "电信"], route_label(prov, "联通"), data[prov SUBSEP "联通"], route_label(prov, "移动"), data[prov SUBSEP "移动"]
     }
     printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
-  }' "$file"
+  }' "${route_file:-/dev/null}" "$file"
 }
 
 show_family_results() {
-  local family="$1" file="$2"
+  local family="$1" file="$2" route_file="${3:-}"
   awk -F'|' -v family="$family" '
   BEGIN { z=0; y=0; h=0; }
   $1 == "OK" {
@@ -488,7 +671,7 @@ show_family_results() {
     printf "  \033[1m\033[0;36m%s 统计摘要\033[0m  ", family
     printf "\033[0;32m零丢包:%3d\033[0m    \033[0;33m1-20%%:%3d\033[0m    \033[0;31m>20%%:%3d\033[0m\n\n", z, y, h
   }' "$file"
-  show_provider_summary "$file"
+  show_provider_summary "$file" "$route_file"
 }
 
 show_education_results() {
@@ -753,6 +936,405 @@ upload_report() {
   rm -f "$response_file"
 }
 
+# ===================== 三网回程线路识别 =====================
+extract_trace_ips() {
+  local trace_file="$1"
+  awk '
+    function public_v4(ip, parts, k) {
+      if (split(ip, parts, ".") != 4) return 0
+      for (k = 1; k <= 4; k++) if (parts[k] !~ /^[0-9]+$/ || parts[k] < 0 || parts[k] > 255) return 0
+      if (parts[1] == 0 || parts[1] == 10 || parts[1] == 127 || parts[1] >= 224) return 0
+      if (parts[1] == 100 && parts[2] >= 64 && parts[2] <= 127) return 0
+      if (parts[1] == 169 && parts[2] == 254) return 0
+      if (parts[1] == 172 && parts[2] >= 16 && parts[2] <= 31) return 0
+      if (parts[1] == 192 && parts[2] == 168) return 0
+      if (parts[1] == 198 && (parts[2] == 18 || parts[2] == 19)) return 0
+      return 1
+    }
+    function public_v6(ip) {
+      if (ip !~ /:/ || ip !~ /^[0-9A-Fa-f:]+$/) return 0
+      if (ip ~ /^::1$/ || ip ~ /^fe80:/ || ip ~ /^fc/ || ip ~ /^fd/) return 0
+      return 1
+    }
+    {
+      for (i = 1; i <= NF; i++) {
+        field = $i
+        gsub(/[^0-9A-Fa-f:.%]/, " ", field)
+        count = split(field, tokens, /[[:space:]]+/)
+        for (j = 1; j <= count; j++) {
+          token = tokens[j]
+          sub(/%.*/, "", token)
+          gsub(/^:+|:+$/, "", token)
+          if (public_v4(token)) print token
+          else if (public_v6(token)) print token
+        }
+      }
+    }
+  ' "$trace_file"
+}
+
+query_cymru_asn() {
+  local ip_file="$1" out_file="$2" req_file
+  req_file=$(mktemp)
+  {
+    echo "begin"
+    echo "verbose"
+    sort -u "$ip_file"
+    echo "end"
+  } > "$req_file"
+
+  if command -v timeout &>/dev/null; then
+    timeout 35 bash -c 'exec 3<>/dev/tcp/whois.cymru.com/43; cat "$1" >&3; cat <&3' _ "$req_file" > "$out_file" 2>/dev/null || true
+  else
+    bash -c 'exec 3<>/dev/tcp/whois.cymru.com/43; cat "$1" >&3; cat <&3' _ "$req_file" > "$out_file" 2>/dev/null || true
+  fi
+  rm -f "$req_file"
+}
+
+build_asn_map() {
+  local cymru_file="$1" map_file="$2"
+  awk -F'|' '
+    NR == 1 { next }
+    {
+      asn = $1
+      ip = $2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", asn)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", ip)
+      if (asn ~ /^[0-9]+$/ && ip ~ /^[0-9A-Fa-f:.]+$/) print ip "|" asn
+    }
+  ' "$cymru_file" > "$map_file"
+}
+
+resolve_route_target_ip() {
+  local family="$1" host="$2" rr="A"
+  [ "$family" = "6" ] && rr="AAAA"
+  dig +time=3 +tries=1 +short "$host" "$rr" 2>/dev/null | awk '
+    /^[0-9.]+$/ || /^[0-9a-fA-F:]+$/ { print; exit }
+  '
+}
+
+route_label_from_ip_trace() {
+  local trace_file="$1" asn_map_file="$2" trace_ip_file="$3"
+  awk -F'|' '
+    function infer_asn_from_ip(ip) {
+      if (ip ~ /^59\.43\./) return "4809"
+      if (ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./) return "4134"
+      if (ip ~ /^219\.158\./) return "4837"
+      if (ip ~ /^223\.120\./ || ip ~ /^223\.119\./) return "58453"
+      if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./) return "9808"
+      if (ip ~ /^162\.219\.85\./ || ip ~ /^118\.26\.151\./) return "10099"
+      if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./) return "9929"
+      if (ip ~ /^101\.4\./ || ip ~ /^202\.112\./) return "4538"
+      if (ip ~ /^159\.226\./) return "7497"
+      return ""
+    }
+    function has_asn(v) { return index(all_asn, "AS" v " ") > 0 }
+    function add_asn(asn) {
+      if (asn != "" && index(all_asn, "AS" asn " ") == 0) all_asn = all_asn "AS" asn " "
+    }
+    function classify(   hop, label) {
+      if (has_asn("58807")) return "CMIN2"
+      if (has_asn("10099")) return "10099"
+      if (has_asn("9929")) return "9929"
+      if (has_asn("4809")) {
+        label = has_asn("23764") ? "CTGGIA" : "CN2GIA"
+        for (hop = 1; hop <= max_hop; hop++) {
+          if (asns[hop] == "4809" || asns[hop] == "23764" || asns[hop] == "") continue
+          if (ips[hop] ~ /^202\.97\./) label = "CN2GT"
+          break
+        }
+        return label
+      }
+      if (has_asn("23764")) return "CTGGIA"
+      if (has_asn("4134") || has_asn("4847")) return "163"
+      if (has_asn("4837") || has_asn("4808")) return "4837"
+      if (has_asn("58453") || has_asn("9808") || has_asn("56040") || has_asn("56041") || has_asn("56042") || has_asn("56044") || has_asn("56045") || has_asn("56046") || has_asn("56047") || has_asn("56048")) return "CMI"
+      if (has_asn("4538")) return "CERNET"
+      if (has_asn("7497")) return "CSTNET"
+      return "Hidden"
+    }
+    FILENAME == ARGV[1] {
+      asn_by_ip[$1] = $2
+      next
+    }
+    FILENAME == ARGV[2] {
+      ip = $0
+      if (seen_ip[ip]++) next
+      asn = asn_by_ip[ip]
+      if (asn == "") asn = infer_asn_from_ip(ip)
+      max_hop++
+      ips[max_hop] = ip
+      asns[max_hop] = asn
+      add_asn(asn)
+      next
+    }
+    {
+      while (match($0, /[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/)) {
+        ip = substr($0, RSTART, RLENGTH)
+        $0 = substr($0, RSTART + RLENGTH)
+        if (seen_ip[ip]++) continue
+        asn = asn_by_ip[ip]
+        if (asn == "") asn = infer_asn_from_ip(ip)
+        max_hop++
+        ips[max_hop] = ip
+        asns[max_hop] = asn
+        add_asn(asn)
+      }
+    }
+    END { print classify() }
+  ' "$asn_map_file" "$trace_ip_file" "$trace_file"
+}
+
+route_trace_one() {
+  local family="$1" protocol="$2" prov="$3" isp="$4" host="$5" idx="$6"
+  local outfile="${RESULT_DIR}/route_${idx}" trace_file="${RESULT_DIR}/route_trace_${idx}"
+  local probe_arg="-T"
+  [ "$protocol" = "udp" ] && probe_arg="-U"
+  local -a args=(-n "-${family}" "$probe_arg" -p 80 -q 3 -w 2 -m 30 "$host" 44)
+  local output rc target_ip
+
+  target_ip=$(resolve_route_target_ip "$family" "$host")
+
+  if output=$(traceroute "${args[@]}" 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  {
+    printf "# %s|%s|%s|%s|%s|%s\n" "$prov" "$isp" "$protocol" "$host" "$idx" "$target_ip"
+    [ -n "$target_ip" ] && printf "target %s\n" "$target_ip"
+    printf "%s\n" "$output"
+  } > "$trace_file"
+  if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
+    printf "%s|%s|%s|%s|%s|%s|%s\n" "$idx" "$prov" "$isp" "$protocol" "$host" "${target_ip:-DNS_FAIL}" "$rc" >> "${RESULT_DIR}/route_debug_meta.txt"
+  fi
+  if extract_trace_ips "$trace_file" | grep -q .; then
+    echo "TRACE|$prov|$isp|$protocol|$host|$idx" > "$outfile"
+    return
+  fi
+  if [[ "$output" == *"Operation not permitted"* || "$output" == *"operation not permitted"* ]]; then
+    echo "FAIL|$prov|$isp|$protocol|$host|PERMISSION" > "$outfile"
+  elif [ "$rc" -ne 0 ]; then
+    echo "FAIL|$prov|$isp|$protocol|$host|TRACE_ERROR" > "$outfile"
+  else
+    echo "FAIL|$prov|$isp|$protocol|$host|NO_HOPS" > "$outfile"
+  fi
+}
+
+show_route_results() {
+  local file="$1"
+  awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+    function color(status, label) {
+      if (status == "LIMIT") return yellow
+      if (status != "OK") return red
+      if (label == "Hidden" || label == "NoData") return yellow
+      return green
+    }
+    function cell(status, label,   c) {
+      c = color(status, label)
+      return c sprintf("%-10s", label) nc
+    }
+    {
+      status = $1
+      prov = $2
+      isp = $3
+      proto = toupper($4)
+      label = $6
+      if (status == "LIMIT") label = "LIMIT"
+      if (status == "FAIL") label = label == "" ? "FAIL" : label
+      if (!(proto in proto_seen)) {
+        proto_seen[proto] = 1
+        proto_order[++pn] = proto
+      }
+      if (!(prov in seen)) {
+        seen[prov] = 1
+        order[++n] = prov
+      }
+      result[proto SUBSEP prov SUBSEP isp] = cell(status, label)
+      if (status == "LIMIT") limit_count++
+    }
+    END {
+      for (p = 1; p <= pn; p++) {
+        proto = proto_order[p]
+        printf "  %s%s%s 回程线路%s %s(-- 电信 -- | -- 联通 -- | -- 移动 --)%s\n", bold, cyan, proto, nc, dim, nc
+        for (i = 1; i <= n; i++) {
+          prov = order[i]
+          prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
+          printf "  %s%s%s%s  %s  %s  %s\n", cyan, prov, nc, prov_pad, result[proto SUBSEP prov SUBSEP "电信"], result[proto SUBSEP prov SUBSEP "联通"], result[proto SUBSEP prov SUBSEP "移动"]
+        }
+        printf "\n"
+      }
+      if (limit_count > 0) {
+        printf "  %s[!] 检测到 %d 次线路识别受限。%s\n\n", yellow, limit_count, nc
+      }
+    }
+  ' "$file"
+}
+
+run_route_mode() {
+  local family=4 idx=0 entry prov isp host protocol route_raw_file route_file ip_file cymru_file asn_map_file
+  local route_parallel="$PARALLEL"
+  local -a protocols=()
+  if [ "$ROUTE_PROTOCOL" = "both" ]; then
+    protocols=(tcp udp)
+  else
+    protocols=("$ROUTE_PROTOCOL")
+  fi
+
+  check_dig
+  check_traceroute
+  if ! ipv4_available; then
+    echo -e "${RED}[X] 未检测到可用 IPv4，暂不执行线路识别${NC}"
+    exit 1
+  fi
+
+  local route_node_count
+  route_node_count=$(count_cdn_nodes)
+  TOTAL=$((route_node_count * ${#protocols[@]}))
+  if [ "$TOTAL" -eq 0 ]; then
+    echo -e "${RED}[X] 指定省份没有可执行的线路检测任务${NC}"
+    exit 1
+  fi
+  echo -e "${DIM}  检测范围: $(province_filter_text)  线路检测节点: $TOTAL  协议: $ROUTE_PROTOCOL  并行: $route_parallel${NC}"
+  echo -e "${YELLOW}  [!] 线路检测使用 traceroute，本地探测完成后批量查询 Team Cymru ASN。${NC}"
+  echo ""
+
+  show_progress
+  for protocol in "${protocols[@]}"; do
+    for entry in "${NODES[@]}"; do
+      read -r prov isp host <<< "$entry"
+      province_selected "$prov" || continue
+      idx=$((idx + 1))
+      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
+        show_progress
+        sleep 0.2
+      done
+      route_trace_one "$family" "$protocol" "$prov" "$isp" "$host" "$idx" &
+      show_progress
+    done
+  done
+  while [ "$(jobs -pr | wc -l | tr -d ' ')" -gt 0 ]; do
+    show_progress
+    sleep 0.2
+  done
+  wait
+  show_progress
+  echo ""
+
+  route_raw_file=$(mktemp)
+  route_file=$(mktemp)
+  ip_file=$(mktemp)
+  cymru_file=$(mktemp)
+  asn_map_file=$(mktemp)
+  for idx in $(seq 1 "$TOTAL"); do
+    [ -f "${RESULT_DIR}/route_${idx}" ] && cat "${RESULT_DIR}/route_${idx}" >> "$route_raw_file"
+    [ -f "${RESULT_DIR}/route_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/route_trace_${idx}" >> "$ip_file"
+  done
+  sort -u "$ip_file" -o "$ip_file" 2>/dev/null || true
+
+  if [ -s "$ip_file" ]; then
+    query_cymru_asn "$ip_file" "$cymru_file"
+    build_asn_map "$cymru_file" "$asn_map_file"
+  fi
+
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$route_raw_file" "${RESULT_DIR}/route_raw.txt"
+    cp "$ip_file" "${RESULT_DIR}/route_ips.txt"
+    cp "$cymru_file" "${RESULT_DIR}/route_cymru.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map.txt"
+  fi
+
+  while IFS='|' read -r status prov isp protocol host value; do
+    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/route_trace_${value}" ]; then
+      trace_ip_file="${RESULT_DIR}/route_trace_${value}.ips"
+      extract_trace_ips "${RESULT_DIR}/route_trace_${value}" > "$trace_ip_file"
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/route_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      echo "OK|$prov|$isp|$protocol|$host|$label" >> "$route_file"
+    elif [ -n "$status" ]; then
+      echo "$status|$prov|$isp|$protocol|$host|$value" >> "$route_file"
+    fi
+  done < "$route_raw_file"
+
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$route_file" "${RESULT_DIR}/route_final.txt"
+  fi
+
+  clear
+  print_header
+  echo -e "  ${DIM}报告时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')${NC}"
+  echo ""
+  show_route_results "$route_file"
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    echo -e "  ${DIM}Debug: traces=$(ls "${RESULT_DIR}"/route_trace_* 2>/dev/null | wc -l | tr -d ' ') ips=$(wc -l < "$ip_file" | tr -d ' ') cymru=$(grep -c '|' "$cymru_file" 2>/dev/null || echo 0) asn_map=$(wc -l < "$asn_map_file" | tr -d ' ')${NC}"
+    echo -e "  ${DIM}Debug 目录：$RESULT_DIR${NC}"
+    echo ""
+  fi
+  rm -f "$route_raw_file" "$route_file" "$ip_file" "$cymru_file" "$asn_map_file"
+}
+
+collect_route_labels() {
+  local family="$1" out_file="$2" idx=0 entry prov isp host route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label
+  local route_parallel="$PARALLEL"
+  route_total=$(count_cdn_nodes)
+  [ "$route_total" -eq 0 ] && return 0
+
+  check_traceroute
+  echo -e "  ${DIM}正在识别 IPv${family} TCP 回程线路，请稍候...${NC}"
+  for entry in "${NODES[@]}"; do
+    read -r prov isp host <<< "$entry"
+    province_selected "$prov" || continue
+    if [ "$family" = "6" ]; then
+      host=${host/-v4./-v6.}
+    fi
+    idx=$((idx + 1))
+    while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
+      sleep 0.2
+    done
+    route_trace_one "$family" tcp "$prov" "$isp" "$host" "$idx" &
+  done
+  wait
+
+  route_raw_file=$(mktemp)
+  ip_file=$(mktemp)
+  cymru_file=$(mktemp)
+  asn_map_file=$(mktemp)
+  for idx in $(seq 1 "$route_total"); do
+    [ -f "${RESULT_DIR}/route_${idx}" ] && cat "${RESULT_DIR}/route_${idx}" >> "$route_raw_file"
+    [ -f "${RESULT_DIR}/route_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/route_trace_${idx}" >> "$ip_file"
+  done
+  sort -u "$ip_file" -o "$ip_file" 2>/dev/null || true
+
+  if [ -s "$ip_file" ]; then
+    query_cymru_asn "$ip_file" "$cymru_file"
+    build_asn_map "$cymru_file" "$asn_map_file"
+  fi
+
+  while IFS='|' read -r status prov isp protocol host value; do
+    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/route_trace_${value}" ]; then
+      trace_ip_file="${RESULT_DIR}/route_trace_${value}.ips"
+      extract_trace_ips "${RESULT_DIR}/route_trace_${value}" > "$trace_ip_file"
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/route_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
+    elif [ -n "$status" ]; then
+      echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
+    fi
+  done < "$route_raw_file"
+
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$route_raw_file" "${RESULT_DIR}/route_raw_summary.txt"
+    cp "$ip_file" "${RESULT_DIR}/route_ips_summary.txt"
+    cp "$cymru_file" "${RESULT_DIR}/route_cymru_summary.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map_summary.txt"
+    cp "$out_file" "${RESULT_DIR}/route_final_summary.txt"
+  fi
+
+  rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
+}
+
+export -f route_trace_one
+export -f extract_trace_ips
+export -f resolve_route_target_ip
+
 # ===================== 单节点测试 =====================
 test_one() {
   local group="$1" family="$2" prov="$3" isp="$4" host="$5" idx="$6"
@@ -841,6 +1423,11 @@ main() {
     exit 1
   fi
 
+  if [ "$ROUTE_MODE" -eq 1 ]; then
+    run_route_mode
+    exit 0
+  fi
+
   check_nping
   check_dig
 
@@ -866,13 +1453,18 @@ main() {
 
   if [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then test_edu=1; fi
 
+  local cdn_node_count cernet_node_count cernet2_node_count
+  cdn_node_count=$(count_cdn_nodes)
+  cernet_node_count=$(count_cernet_nodes)
+  cernet2_node_count=$(count_cernet2_nodes)
+
   TOTAL=0
-  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + NODE_TOTAL)); fi
-  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + ${#CERNET_NODES[@]})); fi
+  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + cdn_node_count)); fi
+  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet_node_count)); fi
   if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
-    if [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + NODE_TOTAL)); fi
-    if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + ${#CERNET2_NODES[@]})); fi
+    if [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + cdn_node_count)); fi
+    if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet2_node_count)); fi
     echo -e "${GREEN}[√] 检测到可用 IPv6${NC}"
   elif [ "$want_ipv6" -eq 1 ]; then
     echo -e "${YELLOW}[!] 未检测到可用 IPv6，已跳过 IPv6${NC}"
@@ -887,7 +1479,7 @@ main() {
     echo -e "${RED}[X] 没有可执行的探测任务${NC}"
     exit 1
   fi
-  echo -e "${DIM}  探测节点: $TOTAL  每节点发包: $PACKETS  并行: $PARALLEL  端口: 80/tcp${NC}"
+  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  并行: $PARALLEL  端口: 80/tcp${NC}"
   echo ""
 
   # 并行测试
@@ -902,6 +1494,7 @@ main() {
     for family in "${families[@]}"; do
       for entry in "${NODES[@]}"; do
         read -r prov isp host <<< "$entry"
+        province_selected "$prov" || continue
         if [ "$family" = "6" ]; then
           host=${host/-v4./-v6.}
         fi
@@ -918,6 +1511,7 @@ main() {
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
     for entry in "${CERNET_NODES[@]}"; do
       read -r prov host fixed_ip <<< "$entry"
+      province_selected "$prov" || continue
       idx=$((idx + 1))
       while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLEL" ]; do
         show_progress
@@ -930,6 +1524,7 @@ main() {
   if [ "$test_edu" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
     for entry in "${CERNET2_NODES[@]}"; do
       read -r prov host fixed_ip <<< "$entry"
+      province_selected "$prov" || continue
       idx=$((idx + 1))
       while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLEL" ]; do
         show_progress
@@ -947,26 +1542,37 @@ main() {
   show_progress
   echo ""
 
+  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
+  sorted_v4=$(mktemp)
+  sorted_v6=$(mktemp)
+  sorted_cernet=$(mktemp)
+  sorted_cernet2=$(mktemp)
+  route_labels_v4=$(mktemp)
+  route_labels_v6=$(mktemp)
+  if [ "$test_cdn" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
+    collect_route_labels 4 "$route_labels_v4"
+  fi
+  if [ "$test_cdn" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
+    collect_route_labels 6 "$route_labels_v6"
+  fi
+
   # 收集结果并写入 CSV
   local report_time
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   local CSV="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$CSV"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms" >> "$CSV"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$CSV"
 
-  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 sorted_file f i status ip snd rcv loss lat
-  sorted_v4=$(mktemp)
-  sorted_v6=$(mktemp)
-  sorted_cernet=$(mktemp)
-  sorted_cernet2=$(mktemp)
   if [ "$test_cdn" -eq 1 ]; then
     for family in "${families[@]}"; do
       if [ "$family" = "4" ]; then sorted_file="$sorted_v4"; else sorted_file="$sorted_v6"; fi
+      if [ "$family" = "4" ]; then route_file="$route_labels_v4"; else route_file="$route_labels_v6"; fi
       for i in $(seq 1 "$TOTAL"); do
         f="${RESULT_DIR}/cdn${family}_${i}"
         if [ -f "$f" ]; then
           IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
-          echo "三网,IPv${family},$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat" >> "$CSV"
+          route_label=$(awk -F'|' -v p="$prov" -v i="$isp" '$2 == p && $3 == i { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$route_file")
+          echo "三网,IPv${family},$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
           echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_file"
         fi
       done
@@ -977,7 +1583,7 @@ main() {
       f="${RESULT_DIR}/cernet_${i}"
       if [ -f "$f" ]; then
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
-        echo "CERNET,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat" >> "$CSV"
+        echo "CERNET,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat," >> "$CSV"
         echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_cernet"
       fi
     done
@@ -987,7 +1593,7 @@ main() {
       f="${RESULT_DIR}/cernet2_${i}"
       if [ -f "$f" ]; then
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
-        echo "CERNET2,IPv6,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat" >> "$CSV"
+        echo "CERNET2,IPv6,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat," >> "$CSV"
         echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_cernet2"
       fi
     done
@@ -1001,10 +1607,10 @@ main() {
 
   if [ "$test_cdn" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then
-      show_family_results "IPv4" "$sorted_v4"
+      show_family_results "IPv4" "$sorted_v4" "$route_labels_v4"
     fi
     if [ "$ipv6_enabled" -eq 1 ]; then
-      show_family_results "IPv6" "$sorted_v6"
+      show_family_results "IPv6" "$sorted_v6" "$route_labels_v6"
     fi
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
@@ -1023,7 +1629,7 @@ main() {
   fi
   echo ""
 
-  rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2"
+  rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6"
 }
 
 parse_args "$@"
