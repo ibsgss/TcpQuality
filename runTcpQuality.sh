@@ -422,19 +422,6 @@ TcpQuality 节点 TCP 丢包探测脚本
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -bj -v4 --cernet
 
-默认行为:
-  - 节点范围: 全国 TcpQuality IPv4 节点；检测到可用 IPv6 时增加 IPv6 节点
-  - 协议选择: 可使用 -v4/--v4 或 -v6/--v6 限定 IP 版本；--all 会探测全部可用协议
-  - 指定教育网参数时: 在三网基础上增加 CERNET 和 CERNET2
-  - 探测方式: 每节点单发 ${PACKETS} 次裸 TCP SYN 包，无内核重传
-  - 线路识别: 三网 IPv4/IPv6 自动执行 TCP 回程线路识别
-  - 并发数量: ${PARALLEL}
-  - DNS 解析: 使用系统 DNS
-  - 目标端口: 80/tcp
-  - 结果展示: 统计摘要、三网概览
-  - CSV 输出: /tmp/zstatic_nping_YYYYmmdd_HHMMSS.csv
-  - 报告上传: 默认生成并上传 SVG 报告，返回公开链接
-
 依赖:
   - nping: 随 nmap 安装
   - dig: 用于解析节点域名
@@ -442,10 +429,10 @@ TcpQuality 节点 TCP 丢包探测脚本
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
-  - Debian/Ubuntu: sudo apt-get install -y nmap dnsutils
-  - RHEL/Fedora:   sudo dnf install -y nmap bind-utils
-  - Alpine Linux:  sudo apk add nmap-nping bind-tools
-  - Arch Linux:    sudo pacman -S nmap bind
+  - Debian/Ubuntu: apt-get install -y nmap dnsutils
+  - RHEL/Fedora:   dnf install -y nmap bind-utils
+  - Alpine Linux:  apk add nmap-nping bind-tools
+  - Arch Linux:    pacman -S nmap bind
   - macOS:         brew install nmap bind
 
 说明:
