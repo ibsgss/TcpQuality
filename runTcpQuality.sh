@@ -603,7 +603,7 @@ show_provider_summary() {
     return int(v + 0.5)
   }
   function fail_cell() {
-    return red sprintf("%-9s", "失败") nc
+    return red "失败       " nc
   }
   function latency_color(v) {
     if (v > 240) return red
@@ -622,7 +622,7 @@ show_provider_summary() {
       return fail_cell()
     }
 
-    return latency_color(v) sprintf("%4.0fms", v) nc " " loss_color(l) sprintf("%3s", compact_loss(loss) "%") nc
+    return latency_color(v) sprintf("%4.0fms", v) nc " " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
   }
   function route_label(prov, isp) {
     return ((prov SUBSEP isp) in route) ? route[prov SUBSEP isp] : isp
@@ -646,7 +646,7 @@ show_provider_summary() {
     data[prov SUBSEP isp] = cell(status, loss, lat, rcv)
   }
   END {
-    printf "  %s%s%-8s%s  %s(%s%16s%s / %s%16s%s / %s%16s%s)%s\n", bold, cyan, "三网概览", nc, dim, cyan, "电信", dim, cyan, "联通", dim, cyan, "移动", dim, nc
+    printf "  %s%s三网概览%s %s(%s       电信       %s / %s       联通       %s / %s       移动       %s)%s\n", bold, cyan, nc, dim, cyan, dim, cyan, dim, cyan, dim, nc
     for (i = 1; i <= n; i++) {
       prov = order[i]
       prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
