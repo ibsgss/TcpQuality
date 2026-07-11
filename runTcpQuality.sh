@@ -17,35 +17,90 @@ UNDERLINE='\033[4m'
 NC='\033[0m'
 BG_RED='\033[41m';   BG_GREEN='\033[42m';   BG_YELLOW='\033[43m'
 
-# ===================== 检测并安装 nping =====================
+USE_SUDO=""
+IPV4_PUBLIC=""
+IPV6_PUBLIC=""
+IPV4_WORK=0
+IPV6_WORK=0
+
+# ===================== 依赖与权限检查 =====================
+init_privilege() {
+  USE_SUDO=""
+  if [ "$(uname)" != "Darwin" ] && [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo &>/dev/null; then
+      USE_SUDO="sudo"
+    fi
+  fi
+}
+
+install_with_package_manager() {
+  local dep="$1"
+  local apt_pkg="$2"
+  local dnf_pkg="$3"
+  local yum_pkg="$4"
+  local apk_pkg="$5"
+  local pacman_pkg="$6"
+  local brew_pkg="$7"
+
+  if [ "$(uname)" != "Darwin" ] && [ "$(id -u)" -ne 0 ] && [ -z "$USE_SUDO" ]; then
+    echo -e "${RED}[X] 运行权限不足，请切换到 root 用户后运行${NC}"
+    exit 1
+  fi
+
+  if command -v apt-get &>/dev/null; then
+    $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $USE_SUDO apt-get install -y -qq "$apt_pkg" >/dev/null 2>&1 || return 1
+  elif command -v dnf &>/dev/null; then
+    $USE_SUDO dnf install -y -q "$dnf_pkg" >/dev/null 2>&1 || {
+      $USE_SUDO dnf install -y -q epel-release >/dev/null 2>&1 || true
+      $USE_SUDO dnf install -y -q "$dnf_pkg" >/dev/null 2>&1 || return 1
+    }
+  elif command -v yum &>/dev/null; then
+    $USE_SUDO yum install -y -q "$yum_pkg" >/dev/null 2>&1 || {
+      $USE_SUDO yum install -y -q epel-release >/dev/null 2>&1 || true
+      $USE_SUDO yum install -y -q "$yum_pkg" >/dev/null 2>&1 || return 1
+    }
+  elif command -v apk &>/dev/null; then
+    $USE_SUDO apk add --no-cache "$apk_pkg" >/dev/null 2>&1 || return 1
+  elif command -v pacman &>/dev/null; then
+    $USE_SUDO pacman -Sy --noconfirm "$pacman_pkg" >/dev/null 2>&1 || return 1
+  elif command -v brew &>/dev/null; then
+    brew install "$brew_pkg" >/dev/null 2>&1 || return 1
+  else
+    echo -e "${RED}[X] 无法自动安装 $dep，请手动安装后重试${NC}"
+    exit 1
+  fi
+}
+
+check_command() {
+  local cmd="$1" desc="$2" apt_pkg="$3" dnf_pkg="$4" yum_pkg="$5" apk_pkg="$6" pacman_pkg="$7" brew_pkg="$8"
+  if command -v "$cmd" &>/dev/null; then
+    return 0
+  fi
+  echo -e "${YELLOW}[!] $desc 未安装，正在自动安装...${NC}"
+  if install_with_package_manager "$desc" "$apt_pkg" "$dnf_pkg" "$yum_pkg" "$apk_pkg" "$pacman_pkg" "$brew_pkg" && command -v "$cmd" &>/dev/null; then
+    echo -e "${GREEN}[√] $desc 安装成功${NC}"
+  else
+    echo -e "${RED}[X] $desc 安装失败${NC}"
+    exit 1
+  fi
+}
+
+check_curl() {
+  check_command curl curl curl curl curl curl curl curl
+}
+
 check_nping() {
   if command -v nping &>/dev/null; then
     return 0
   fi
   echo -e "${YELLOW}[!] nping 未安装，正在自动安装...${NC}"
-  if command -v apt-get &>/dev/null; then
-    if apt-get update -qq && apt-get install -y -qq nmap 2>/dev/null; then :; fi
-  elif command -v dnf &>/dev/null; then
-    if ! dnf install -y -q nmap 2>/dev/null; then
-      echo -e "${YELLOW}[!] 默认软件源未提供 nmap，正在尝试启用 EPEL...${NC}"
-      if dnf install -y -q epel-release 2>/dev/null && dnf install -y -q nmap 2>/dev/null; then :; fi
+  if command -v apk &>/dev/null; then
+    if ! install_with_package_manager nping nmap nmap nmap nmap-nping nmap nmap; then
+      install_with_package_manager nping nmap nmap nmap nmap nmap nmap || true
     fi
-  elif command -v yum &>/dev/null; then
-    if ! yum install -y -q nmap 2>/dev/null; then
-      echo -e "${YELLOW}[!] 默认软件源未提供 nmap，正在尝试启用 EPEL...${NC}"
-      if yum install -y -q epel-release 2>/dev/null && yum install -y -q nmap 2>/dev/null; then :; fi
-    fi
-  elif command -v apk &>/dev/null; then
-    if ! apk add --no-cache nmap-nping 2>/dev/null; then
-      if apk add --no-cache nmap 2>/dev/null; then :; fi
-    fi
-  elif command -v pacman &>/dev/null; then
-    if pacman -Sy --noconfirm nmap 2>/dev/null; then :; fi
-  elif command -v brew &>/dev/null; then
-    if brew install nmap 2>/dev/null; then :; fi
   else
-    echo -e "${RED}[X] 无法自动安装 nping，请手动安装 nmap 包${NC}"
-    exit 1
+    install_with_package_manager nping nmap nmap nmap nmap nmap nmap || true
   fi
   if command -v nping &>/dev/null; then
     echo -e "${GREEN}[√] nping 安装成功${NC}"
@@ -55,29 +110,18 @@ check_nping() {
   fi
 }
 
-# ===================== 检测并安装 dig =====================
 check_dig() {
   if command -v dig &>/dev/null; then
     return 0
   fi
   echo -e "${YELLOW}[!] dig 未安装，正在自动安装...${NC}"
-  if command -v apt-get &>/dev/null; then
-    if apt-get update -qq && apt-get install -y -qq dnsutils 2>/dev/null; then :; fi
-  elif command -v dnf &>/dev/null; then
-    if dnf install -y -q bind-utils 2>/dev/null; then :; fi
-  elif command -v yum &>/dev/null; then
-    if yum install -y -q bind-utils 2>/dev/null; then :; fi
-  elif command -v apk &>/dev/null; then
-    if apk add --no-cache bind-tools 2>/dev/null; then :; fi
-  elif command -v pacman &>/dev/null; then
-    if pacman -Sy --noconfirm bind 2>/dev/null; then :; fi
-  elif command -v brew &>/dev/null; then
-    if brew install bind 2>/dev/null; then
+  if install_with_package_manager dig dnsutils bind-utils bind-utils bind-tools bind bind; then
+    if ! command -v dig &>/dev/null && command -v brew &>/dev/null; then
       export PATH="$(brew --prefix bind)/bin:$PATH"
     fi
-  else
-    echo -e "${RED}[X] 无法自动安装 dig，请手动安装 dnsutils、bind-utils 或 bind${NC}"
-    exit 1
+  fi
+  if ! command -v dig &>/dev/null && command -v brew &>/dev/null; then
+    export PATH="$(brew --prefix bind)/bin:$PATH"
   fi
   if command -v dig &>/dev/null; then
     echo -e "${GREEN}[√] dig 安装成功${NC}"
@@ -87,29 +131,13 @@ check_dig() {
   fi
 }
 
-# ===================== 检测线路探测依赖 =====================
 check_traceroute() {
-  if command -v traceroute &>/dev/null; then
-    return 0
-  fi
-  echo -e "${YELLOW}[!] traceroute 未安装，正在自动安装...${NC}"
-  if command -v apt-get &>/dev/null; then
-    if apt-get update -qq && apt-get install -y -qq traceroute 2>/dev/null; then :; fi
-  elif command -v dnf &>/dev/null; then
-    if dnf install -y -q traceroute 2>/dev/null; then :; fi
-  elif command -v yum &>/dev/null; then
-    if yum install -y -q traceroute 2>/dev/null; then :; fi
-  elif command -v apk &>/dev/null; then
-    if apk add --no-cache traceroute 2>/dev/null; then :; fi
-  elif command -v pacman &>/dev/null; then
-    if pacman -Sy --noconfirm traceroute 2>/dev/null; then :; fi
-  elif command -v brew &>/dev/null; then
-    if brew install traceroute 2>/dev/null; then :; fi
-  fi
-  if command -v traceroute &>/dev/null; then
-    echo -e "${GREEN}[√] traceroute 安装成功${NC}"
-  else
-    echo -e "${RED}[X] traceroute 安装失败${NC}"
+  check_command traceroute traceroute traceroute traceroute traceroute traceroute traceroute traceroute
+}
+
+require_raw_socket_privilege() {
+  if [ "$(uname)" != "Darwin" ] && [ "$(id -u)" -ne 0 ]; then
+    echo -e "${RED}[X] 运行权限不足，请切换到 root 用户后运行${NC}"
     exit 1
   fi
 }
@@ -281,6 +309,7 @@ CERNET2_NODES=(
 )
 
 PACKETS=30
+PACKET_SIZES=(40 80 160 320 640 1200)
 NODE_TOTAL=${#NODES[@]}
 TOTAL=$NODE_TOTAL
 PARALLEL=16
@@ -405,6 +434,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 选项:
   -h, --help        显示帮助信息并退出
   -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
+                     每次随机目标包长: ${PACKET_SIZES[*]}B
   -p, --parallel NUM
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
   -v4, --v4         仅探测 IPv4
@@ -421,19 +451,20 @@ TcpQuality 节点 TCP 丢包探测脚本
 
 依赖:
   - nping: 随 nmap 安装
+  - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - dig: 用于解析节点域名
   - traceroute: 用于自动识别三网 TCP 回程线路
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
-  - Debian/Ubuntu: apt-get install -y nmap dnsutils
-  - RHEL/Fedora:   dnf install -y nmap bind-utils
-  - Alpine Linux:  apk add nmap-nping bind-tools
-  - Arch Linux:    pacman -S nmap bind
-  - macOS:         brew install nmap bind
+  - Debian/Ubuntu: apt-get install -y curl nmap dnsutils traceroute
+  - RHEL/Fedora:   dnf install -y curl nmap bind-utils traceroute
+  - Alpine Linux:  apk add curl nmap-nping bind-tools traceroute
+  - Arch Linux:    pacman -S curl nmap bind traceroute
+  - macOS:         brew install curl nmap bind traceroute
 
 说明:
-  发送裸 TCP SYN 包通常需要 root/sudo 权限；如果 nping 权限不足，请使用 sudo 运行。
+  发送裸 TCP SYN 包通常需要 root 权限；请切换到 root 用户后运行。
 EOF
 }
 
@@ -792,14 +823,7 @@ get_ipv6_route() {
 }
 
 ipv6_available() {
-  local host target
-  read -r _ _ host <<< "${NODES[0]}"
-  host=${host/-v4./-v6.}
-  target=$(dig_short "$host" AAAA | grep -E '^[0-9A-Fa-f:]+$' | head -1)
-  case "$target" in
-    [23]*:*) get_ipv6_route "$target" >/dev/null ;;
-    *) return 1 ;;
-  esac
+  [ "$IPV6_WORK" -eq 1 ]
 }
 
 dig_short() {
@@ -841,18 +865,55 @@ resolve_ipv4() {
   return 1
 }
 
-ipv4_available() {
-  local host target
-  read -r _ _ host <<< "${NODES[0]}"
-  target=$(resolve_ipv4 "$host") || return 1
+is_valid_ipv6() {
+  local ip="$1"
+  [[ "$ip" =~ : ]] || return 1
+  [[ "$ip" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  case "$ip" in
+    ""|::1|fe80:*|fc00:*|fd00:*|2001:db8:*|::ffff:*|2002:*) return 1 ;;
+  esac
+  return 0
+}
 
-  if command -v ip &>/dev/null; then
-    ip -4 route get "$target" >/dev/null 2>&1
-  elif command -v route &>/dev/null; then
-    route -n get "$target" >/dev/null 2>&1
-  else
-    return 1
-  fi
+get_public_ipv4() {
+  local api response
+  local apis=("ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
+  for api in "${apis[@]}"; do
+    response=$(curl -s4 --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+    if [[ "$response" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_public_ipv4 "$response"; then
+      IPV4_PUBLIC="$response"
+      IPV4_WORK=1
+      return 0
+    fi
+  done
+  IPV4_PUBLIC=""
+  IPV4_WORK=0
+  return 1
+}
+
+get_public_ipv6() {
+  local api response
+  local apis=("ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
+  for api in "${apis[@]}"; do
+    response=$(curl -s6k --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+    if is_valid_ipv6 "$response"; then
+      IPV6_PUBLIC="$response"
+      IPV6_WORK=1
+      return 0
+    fi
+  done
+  IPV6_PUBLIC=""
+  IPV6_WORK=0
+  return 1
+}
+
+detect_ip_stack() {
+  get_public_ipv4 || true
+  get_public_ipv6 || true
+}
+
+ipv4_available() {
+  [ "$IPV4_WORK" -eq 1 ]
 }
 
 upload_report() {
@@ -1330,9 +1391,14 @@ test_one() {
     nping_base_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" "${nping_base_args[@]}")
   fi
 
-  local sent=0 rcvd=0 loss_pct avg_rtt rtt_sum="0" one_sent one_rcvd one_rtt one_success i
+  local sent=0 rcvd=0 loss_pct avg_rtt rtt_sum="0" one_sent one_rcvd one_rtt one_success i packet_size payload_size header_size
+  header_size=40
+  [ "$family" = "6" ] && header_size=60
   for ((i = 1; i <= PACKETS; i++)); do
-    if raw=$(nping "${nping_base_args[@]}" -c 1 "$ip" 2>&1); then
+    packet_size="${PACKET_SIZES[$((RANDOM % ${#PACKET_SIZES[@]}))]}"
+    payload_size=$((packet_size - header_size))
+    [ "$payload_size" -lt 0 ] && payload_size=0
+    if raw=$(nping "${nping_base_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
       nping_rc=0
     else
       nping_rc=$?
@@ -1383,18 +1449,21 @@ main() {
   clear
   print_header
 
-  if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}[X] 运行权限不足，请切换到 root 用户后运行${NC}"
-    exit 1
-  fi
+  init_privilege
 
   if [ "$ROUTE_MODE" -eq 1 ]; then
+    check_curl
+    check_dig
+    detect_ip_stack
     run_route_mode
     exit 0
   fi
 
+  require_raw_socket_privilege
+  check_curl
   check_nping
   check_dig
+  detect_ip_stack
 
   local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 test_edu=0 want_ipv4=1 want_ipv6=1
   if [ "$TEST_ALL" -eq 1 ]; then
