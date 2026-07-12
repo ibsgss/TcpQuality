@@ -239,6 +239,61 @@ NODES=(
   "重庆 电信 cq-ct-v4.ip.zstaticcdn.com"
 )
 
+fallback_city_codes() {
+  case "$1" in
+    河北) echo "sjz ts qhd hd xt bd zjk cd cz lf hs" ;;
+    山西) echo "ty dt yq cz jc sz jz yc xz lf ll" ;;
+    辽宁) echo "sy dl as fs bx dd jz yk fx ly pj tl cy hl" ;;
+    吉林) echo "cc jl sp ly th bs ss bc yb" ;;
+    黑龙江) echo "hrb qqhr jx hegang sys dq yc jms qth mdj hh suihua dxal" ;;
+    江苏) echo "nj wx xz cz sz nt lyg ha yc yz zj tz sq" ;;
+    浙江) echo "hz nb wz jx huz sx jh qz zs tz ls" ;;
+    安徽) echo "hf wh bb hn mas hb tl aq hs cz fy sz la ha cz2 xc" ;;
+    福建) echo "fz xm pt sm qz zz np ly nd" ;;
+    江西) echo "nc jdz px jj xy yt gz ja yc fz sr" ;;
+    山东) echo "jn qd zb zz dy yt wf jn2 ta wh rz lw ly dz lc bz hz" ;;
+    河南) echo "zz kf ly pds ay hb xx jz py xc lh smx ny sq xy zk zmd" ;;
+    湖北) echo "wh hs sy yc xf ez jm xg hg xn sz es" ;;
+    湖南) echo "cs zz xt hy sy yy cd zjj yyi cz yz hh ld xx" ;;
+    广东) echo "gz sz zh st fs sg zj mm hz mz sw hy yj qy dg zs cz jy yf" ;;
+    海南) echo "hk sy dz qh wzs" ;;
+    四川) echo "cd zg pzh lz dy my gy sn nj ls nc yb ga dz bz ya ms zy ab gz lsz" ;;
+    贵州) echo "gy lps zy as tr qxn bj qdn qn" ;;
+    云南) echo "km qj yx bs zt lj pe lc cx hh ws xsbn dl dh nj dq" ;;
+    陕西) echo "xa xian xy wn yl ak hz bj tc sl" ;;
+    甘肃) echo "lz jy jc by ts ww zy pl jq qx dx ln gn" ;;
+    青海) echo "xn hd hb hn hainan gl ys hx" ;;
+    内蒙古) echo "hhht bt wh cf tl eeds hlbe byne wlcb xlgl als" ;;
+    广西) echo "nn lz gl wz bh fcg qz gg yl bs hz hc lb cz" ;;
+    西藏) echo "ls rkz cd lz sn nq al" ;;
+    宁夏) echo "yc szs wz gy zw" ;;
+    新疆) echo "wlmq klmy tlf hami changji bozhou bygl aks kzls ks ht yl tc altay" ;;
+    北京) echo "bj" ;;
+    天津) echo "tj" ;;
+    上海) echo "sh" ;;
+    重庆) echo "cq" ;;
+  esac
+}
+
+isp_code() {
+  case "$1" in
+    电信) echo "ct" ;;
+    联通) echo "cu" ;;
+    移动) echo "cm" ;;
+    *) return 1 ;;
+  esac
+}
+
+fallback_hosts() {
+  local prov="$1" isp="$2" family="$3" primary_host="$4" code isp_suffix host
+  isp_suffix=$(isp_code "$isp") || return 0
+  for code in $(fallback_city_codes "$prov"); do
+    host="${code}-${isp_suffix}-v${family}.ip.zstaticcdn.com"
+    [ "$host" = "$primary_host" ] && continue
+    printf "%s\n" "$host"
+  done
+}
+
 # CERNET（AS4538，仅 IPv4）与 CERNET2（AS23910，仅 IPv6）。
 CERNET_NODES=(
   "河北 www.hebtu.edu.cn 202.206.100.34"
@@ -587,7 +642,7 @@ show_provider_summary() {
     return int(v + 0.5)
   }
   function fail_cell() {
-    return red "失败       " nc
+    return red "failed     " nc
   }
   function latency_color(v) {
     if (v > 240) return red
@@ -675,7 +730,7 @@ show_education_results() {
     return green
   }
   function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "失败         " nc
+    if (status != "OK") return red "failed       " nc
     l = loss + 0
     v = lat + 0
     return latency_color(v) sprintf("%4.0fms", v) nc " / " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
@@ -722,7 +777,7 @@ show_education_combined() {
     return green
   }
   function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "失败         " nc
+    if (status != "OK") return red "failed       " nc
     l = loss + 0
     v = lat + 0
     return latency_color(v) sprintf("%4.0fms", v) nc " / " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
@@ -1437,12 +1492,54 @@ test_one() {
   echo "OK|$prov|$isp|$host|$ip|$sent|$rcvd|$loss_pct|$avg_rtt" > "$outfile"
 }
 
+should_retry_result() {
+  local status="$1" loss="$2"
+  [ "$status" != "OK" ] && return 0
+  awk -v loss="$loss" 'BEGIN { exit !(loss + 0 >= 100) }'
+}
+
+retry_cdn_failures() {
+  local family="$1" max_idx="$2" retried=0 i f status prov isp host ip snd rcv loss lat
+  local fallback_host retry_file retry_status retry_loss original_status
+
+  for i in $(seq 1 "$max_idx"); do
+    f="${RESULT_DIR}/cdn${family}_${i}"
+    [ -f "$f" ] || continue
+    IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
+    should_retry_result "$status" "$loss" || continue
+
+    original_status="$status"
+    for fallback_host in $(fallback_hosts "$prov" "$isp" "$family" "$host"); do
+      retry_file="${RESULT_DIR}/cdn${family}_fallback_${i}"
+      test_one "cdn${family}_fallback" "$family" "$prov" "$isp" "$fallback_host" "$i"
+      [ -f "$retry_file" ] || continue
+      IFS='|' read -r retry_status _ _ _ _ _ _ retry_loss _ < "$retry_file"
+      retried=$((retried + 1))
+
+      if [ "$retry_status" = "OK" ]; then
+        mv "$retry_file" "$f"
+        break
+      fi
+
+      if [ "$original_status" != "OK" ]; then
+        mv "$retry_file" "$f"
+      else
+        rm -f "$retry_file"
+      fi
+    done
+  done
+
+  if [ "$retried" -gt 0 ]; then
+    echo -e "  ${DIM}备用节点重测: ${retried} 次${NC}"
+  fi
+}
+
 export -f test_one
 export -f get_ipv6_route
 export -f dig_short
 export -f is_public_ipv4
 export -f resolve_ipv4
-export RESULT_DIR PACKETS
+export RESULT_DIR PACKETS PACKET_SIZES
 
 # ===================== 主流程 =====================
 main() {
@@ -1580,6 +1677,12 @@ main() {
   wait
   show_progress
   echo ""
+
+  if [ "$test_cdn" -eq 1 ]; then
+    for family in "${families[@]}"; do
+      retry_cdn_failures "$family" "$idx"
+    done
+  fi
 
   local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
   sorted_v4=$(mktemp)
