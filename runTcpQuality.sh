@@ -132,7 +132,8 @@ require_raw_socket_privilege() {
 
 PACKETS=30
 PACKET_SIZES=(40 80 160 320 640 1200)
-PACKET_SIZE_OVERRIDE=""
+# 默认使用标准 TCP SYN，不携带数据；仅在显式指定 -s/--size 时构造指定长度报文。
+PACKET_SIZE_OVERRIDE="0"
 TOTAL=0
 PARALLEL=16
 TEST_CERNET=0
@@ -347,8 +348,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 选项:
   -h, --help        显示帮助信息并退出
   -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
-                     每次随机目标包长: ${PACKET_SIZES[*]}B
-  -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；未指定时随机包长
+  -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；默认 0
                      小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
@@ -1274,7 +1274,8 @@ probe_target() {
   fi
 
   local raw nping_rc iface source_ip source_mac dest_mac route_data
-  local -a nping_base_args=(--privileged --tcp -p "$port" --flags syn)
+  # 不使用 --privileged：macOS 下该选项会强制二层发包，容易因无法解析下一跳 MAC 而失败。
+  local -a nping_base_args=(--tcp -p "$port" --flags syn)
   if [ "$family" = "6" ]; then
     if ! route_data=$(get_ipv6_route "$ip"); then
       echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|IPV6_ROUTE_ERROR"
@@ -1473,8 +1474,7 @@ main() {
     echo -e "${RED}[X] 没有可执行的探测任务${NC}"
     exit 1
   fi
-  local size_text="随机(${PACKET_SIZES[*]})B"
-  [ -n "$PACKET_SIZE_OVERRIDE" ] && size_text="${PACKET_SIZE_OVERRIDE}B"
+  local size_text="${PACKET_SIZE_OVERRIDE}B"
   echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  包长: $size_text  并行: $PARALLEL  端口: 80/tcp${NC}"
   echo ""
 
