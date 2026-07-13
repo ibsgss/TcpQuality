@@ -132,6 +132,7 @@ require_raw_socket_privilege() {
 
 PACKETS=30
 PACKET_SIZES=(40 80 160 320 640 1200)
+PACKET_SIZE_OVERRIDE=""
 TOTAL=0
 PARALLEL=16
 TEST_CERNET=0
@@ -266,7 +267,7 @@ node_scope() {
 
 load_remote_nodes() {
   local scope="${1:-$(node_scope)}"
-  local tmp line type family prov isp host ip port target url sep
+  local tmp line type family prov isp host ip port target backup_host backup_ip backup_port backup_target url sep
   command -v curl &>/dev/null || return 1
   tmp=$(mktemp)
   sep="?"
@@ -282,13 +283,13 @@ load_remote_nodes() {
   REMOTE_CERNET_NODES=()
   REMOTE_CERNET2_NODES=()
 
-  while IFS=$'\t' read -r type family prov isp host ip port target; do
+  while IFS=$'\t' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target; do
     [ "$type" = "type" ] && continue
     [ -n "$ip" ] || continue
     port=${port:-80}
     case "$type:$family" in
-      cdn:4) REMOTE_CDN4_NODES+=("$prov|$isp|$host|$ip|$port") ;;
-      cdn:6) REMOTE_CDN6_NODES+=("$prov|$isp|$host|$ip|$port") ;;
+      cdn:4) REMOTE_CDN4_NODES+=("$prov|$isp|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-80}") ;;
+      cdn:6) REMOTE_CDN6_NODES+=("$prov|$isp|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-80}") ;;
       cernet:4) REMOTE_CERNET_NODES+=("$prov|$host|$ip|$port") ;;
       cernet2:6) REMOTE_CERNET2_NODES+=("$prov|$host|$ip|$port") ;;
     esac
@@ -347,6 +348,8 @@ TcpQuality 节点 TCP 丢包探测脚本
   -h, --help        显示帮助信息并退出
   -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
                      每次随机目标包长: ${PACKET_SIZES[*]}B
+  -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；未指定时随机包长
+                     小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
   -v4, --v4         仅探测 IPv4
@@ -392,6 +395,14 @@ parse_args() {
           exit 1
         fi
         PACKETS="$2"
+        shift 2
+        ;;
+      -s|--size)
+        if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -gt 65535 ]; then
+          echo -e "${RED}[X] 包长必须是 0-65535 之间的整数（单位 B）${NC}" >&2
+          exit 1
+        fi
+        PACKET_SIZE_OVERRIDE="$2"
         shift 2
         ;;
       -p|--parallel)
@@ -1252,17 +1263,13 @@ export -f route_trace_one
 export -f extract_trace_ips
 
 # ===================== 单节点测试 =====================
-test_one() {
-  local group="$1" family="$2" prov="$3" isp="$4" host="$5" idx="$6"
-  local fixed_ip="${7:-}" port="${8:-80}"
-  local outfile="${RESULT_DIR}/${group}_${idx}"
-
-  local ip="$fixed_ip"
+probe_target() {
+  local group="$1" family="$2" prov="$3" isp="$4" host="$5" ip="$6" port="${7:-80}" idx="${8:-0}" label="${9:-main}"
   if [ "$family" = "4" ] && [ -n "$ip" ] && ! is_public_ipv4 "$ip"; then
     ip=""
   fi
   if [ -z "$ip" ]; then
-    echo "FAIL|$prov|$isp|$host|GETNODES|0|0|100.00|0" > "$outfile"
+    echo "FAIL|$prov|$isp|$host|GETNODES|0|0|100.00|0"
     return
   fi
 
@@ -1270,7 +1277,7 @@ test_one() {
   local -a nping_base_args=(--privileged --tcp -p "$port" --flags syn)
   if [ "$family" = "6" ]; then
     if ! route_data=$(get_ipv6_route "$ip"); then
-      echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|IPV6_ROUTE_ERROR" > "$outfile"
+      echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|IPV6_ROUTE_ERROR"
       return
     fi
     IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
@@ -1281,10 +1288,21 @@ test_one() {
   header_size=40
   [ "$family" = "6" ] && header_size=60
   for ((i = 1; i <= PACKETS; i++)); do
-    packet_size="${PACKET_SIZES[$((RANDOM % ${#PACKET_SIZES[@]}))]}"
-    payload_size=$((packet_size - header_size))
+    if [ -n "$PACKET_SIZE_OVERRIDE" ]; then
+      packet_size="$PACKET_SIZE_OVERRIDE"
+    else
+      packet_size="${PACKET_SIZES[$((RANDOM % ${#PACKET_SIZES[@]}))]}"
+    fi
+    payload_size=0
+    [ "$packet_size" -gt 0 ] && payload_size=$((packet_size - header_size))
     [ "$payload_size" -lt 0 ] && payload_size=0
-    if raw=$(nping "${nping_base_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+    if [ "$packet_size" -eq 0 ]; then
+      if raw=$(nping "${nping_base_args[@]}" -c 1 "$ip" 2>&1); then
+        nping_rc=0
+      else
+        nping_rc=$?
+      fi
+    elif raw=$(nping "${nping_base_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
       nping_rc=0
     else
       nping_rc=$?
@@ -1294,13 +1312,12 @@ test_one() {
     one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
 
-    if ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] ||
-       ! [[ "$one_rcvd" =~ ^[0-9]+$ ]]; then
+    if ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] || ! [[ "$one_rcvd" =~ ^[0-9]+$ ]]; then
       if [ "$DEBUG_MODE" -eq 1 ]; then
-        printf "%s\n" "$raw" > "${RESULT_DIR}/nping_error_${group}_${idx}_${i}.log"
-        printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$group" "$idx" "$i" "$prov" "$isp" "$host" "$ip" "$nping_rc" >> "${RESULT_DIR}/nping_error_meta.txt"
+        printf "%s\n" "$raw" > "${RESULT_DIR}/nping_error_${group}_${idx}_${label}_${i}.log"
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$group" "$idx" "$label" "$i" "$prov" "$isp" "$host" "$ip" >> "${RESULT_DIR}/nping_error_meta.txt"
       fi
-      echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|NPING_ERROR" > "$outfile"
+      echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|NPING_ERROR"
       return
     fi
 
@@ -1309,10 +1326,9 @@ test_one() {
     if [ "$one_rcvd" -gt 0 ]; then
       if ! [[ "$one_rtt" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         if [ "$DEBUG_MODE" -eq 1 ]; then
-          printf "%s\n" "$raw" > "${RESULT_DIR}/nping_error_${group}_${idx}_${i}.log"
-          printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$group" "$idx" "$i" "$prov" "$isp" "$host" "$ip" "$nping_rc" >> "${RESULT_DIR}/nping_error_meta.txt"
+          printf "%s\n" "$raw" > "${RESULT_DIR}/nping_error_${group}_${idx}_${label}_${i}.log"
         fi
-        echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|NPING_ERROR" > "$outfile"
+        echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|NPING_ERROR"
         return
       fi
       one_success=1
@@ -1327,13 +1343,59 @@ test_one() {
   else
     avg_rtt=0
   fi
-  echo "OK|$prov|$isp|$host|$ip|$sent|$rcvd|$loss_pct|$avg_rtt" > "$outfile"
+  echo "OK|$prov|$isp|$host|$ip|$sent|$rcvd|$loss_pct|$avg_rtt"
 }
 
+combine_probe_results() {
+  local primary="$1" backup="$2"
+  local ps pp pi ph pip psent prcv ploss plat bs bp bi bh bip bsent brcv bloss blat
+  IFS='|' read -r ps pp pi ph pip psent prcv ploss plat <<< "$primary"
+  IFS='|' read -r bs bp bi bh bip bsent brcv bloss blat <<< "$backup"
+  if [ "$ps" != "OK" ] || [ "$bs" != "OK" ]; then
+    echo "$backup"
+    return
+  fi
+  local sent=$((psent + bsent)) rcv=$((prcv + brcv)) loss lat
+  loss=$(awk -v a="$ploss" -v b="$bloss" 'BEGIN { printf "%.2f", (a + b) / 2 }')
+  lat=$(awk -v a="$plat" -v b="$blat" 'BEGIN { if (a > 0 && b > 0) printf "%.3f", (a + b) / 2; else if (a > 0) printf "%.3f", a; else printf "%.3f", b }')
+  echo "OK|$pp|$pi|$ph|$pip|$sent|$rcv|$loss|$lat"
+}
+
+test_one() {
+  local group="$1" family="$2" prov="$3" isp="$4" host="$5" idx="$6"
+  local fixed_ip="${7:-}" port="${8:-80}" backup_host="${9:-}" backup_ip="${10:-}" backup_port="${11:-80}"
+  local outfile="${RESULT_DIR}/${group}_${idx}" primary_result backup_result p_status p_loss b_status b_loss
+  primary_result=$(probe_target "$group" "$family" "$prov" "$isp" "$host" "$fixed_ip" "$port" "$idx" main)
+  IFS='|' read -r p_status _ _ _ _ _ _ p_loss _ <<< "$primary_result"
+
+  if [ "$p_status" = "OK" ] && [ -n "$backup_ip" ] && awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 > 15) }'; then
+    backup_result=$(probe_target "$group" "$family" "$prov" "$isp" "$backup_host" "$backup_ip" "$backup_port" "$idx" backup)
+    IFS='|' read -r b_status _ _ _ _ _ _ b_loss _ <<< "$backup_result"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$group" "$idx" "$prov" "$isp" "$p_loss" "$backup_host" "$backup_ip" "$backup_result" >> "${RESULT_DIR}/backup_retry_meta.txt"
+    fi
+    if awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 >= 100) }'; then
+      printf "%s\n" "$backup_result" > "$outfile"
+      return
+    fi
+    if [ "$b_status" = "OK" ]; then
+      if awk -v loss="$b_loss" 'BEGIN { exit !(loss + 0 > 0) }'; then
+        combine_probe_results "$primary_result" "$backup_result" > "$outfile"
+      else
+        printf "%s\n" "$backup_result" > "$outfile"
+      fi
+      return
+    fi
+  fi
+  printf "%s\n" "$primary_result" > "$outfile"
+}
+
+export -f probe_target
+export -f combine_probe_results
 export -f test_one
 export -f get_ipv6_route
 export -f is_public_ipv4
-export RESULT_DIR PACKETS PACKET_SIZES
+export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE
 
 # ===================== 主流程 =====================
 main() {
@@ -1411,20 +1473,22 @@ main() {
     echo -e "${RED}[X] 没有可执行的探测任务${NC}"
     exit 1
   fi
-  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  并行: $PARALLEL  端口: 80/tcp${NC}"
+  local size_text="随机(${PACKET_SIZES[*]})B"
+  [ -n "$PACKET_SIZE_OVERRIDE" ] && size_text="${PACKET_SIZE_OVERRIDE}B"
+  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  包长: $size_text  并行: $PARALLEL  端口: 80/tcp${NC}"
   echo ""
 
   # 并行测试
   local idx=0
   echo -e "  ${DIM}正在探测，请稍候...${NC}"
   show_progress
-  local family entry prov isp host fixed_ip
+  local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
   local -a families=()
   if [ "$test_cdn" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then families+=(4); fi
     if [ "$ipv6_enabled" -eq 1 ]; then families+=(6); fi
     for family in "${families[@]}"; do
-      while IFS='|' read -r prov isp host fixed_ip port; do
+      while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
         port=${port:-80}
         province_selected "$prov" || continue
         idx=$((idx + 1))
@@ -1432,7 +1496,7 @@ main() {
           show_progress
           sleep 0.2
         done
-        test_one "cdn${family}" "$family" "$prov" "$isp" "$host" "$idx" "$fixed_ip" "$port" &
+        test_one "cdn${family}" "$family" "$prov" "$isp" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-80}" &
         show_progress
       done < <(print_cdn_entries "$family")
     done
