@@ -9,3 +9,4 @@ NodeQualityResult.md
 compose.yaml
 server/
 zstatic_nping_*.csv
+cloudflare-dns-node-plan.md

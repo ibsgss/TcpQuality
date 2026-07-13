@@ -26,6 +26,7 @@ https://tcpquality.ibsgss.uk/r/3-xsaeoJDH
 
 - `-h`、`--help`：显示帮助信息并退出。
 - `-c NUM`、`--count NUM`：设置每个节点的发包数量，默认 30。
+- `-s NUM`、`--size NUM`：指定 IP 包总长度，单位为 B；`0` 表示标准无负载 SYN，未指定时随机使用内置包长，过小的数值按协议最小头部发送。
 - `-p NUM`、`--parallel NUM`：设置并行节点数，范围 1-31，默认 16。
 - `-v4`、`--v4`：仅探测 IPv4。
 - `-v6`、`--v6`：仅探测 IPv6。
