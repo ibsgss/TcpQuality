@@ -39,6 +39,14 @@ init_privilege() {
   fi
 }
 
+show_dependency_install_notice() {
+  echo -ne "\r${YELLOW}[!] 检测到未安装的依赖，正在安装...${NC}"
+}
+
+clear_dependency_install_notice() {
+  printf '\r\033[2K'
+}
+
 install_with_package_manager() {
   local dep="$1"
   local apt_pkg="$2"
@@ -83,10 +91,11 @@ check_command() {
   if command -v "$cmd" &>/dev/null; then
     return 0
   fi
-  echo -e "${YELLOW}[!] $desc 未安装，正在自动安装...${NC}"
+  show_dependency_install_notice
   if install_with_package_manager "$desc" "$apt_pkg" "$dnf_pkg" "$yum_pkg" "$apk_pkg" "$pacman_pkg" "$brew_pkg" && command -v "$cmd" &>/dev/null; then
-    echo -e "${GREEN}[√] $desc 安装成功${NC}"
+    clear_dependency_install_notice
   else
+    clear_dependency_install_notice
     echo -e "${RED}[X] $desc 安装失败${NC}"
     exit 1
   fi
@@ -100,7 +109,7 @@ check_nping() {
   if command -v nping &>/dev/null; then
     return 0
   fi
-  echo -e "${YELLOW}[!] nping 未安装，正在自动安装...${NC}"
+  show_dependency_install_notice
   if command -v apk &>/dev/null; then
     if ! install_with_package_manager nping nmap nmap nmap nmap-nping nmap nmap; then
       install_with_package_manager nping nmap nmap nmap nmap nmap nmap || true
@@ -109,8 +118,9 @@ check_nping() {
     install_with_package_manager nping nmap nmap nmap nmap nmap nmap || true
   fi
   if command -v nping &>/dev/null; then
-    echo -e "${GREEN}[√] nping 安装成功${NC}"
+    clear_dependency_install_notice
   else
+    clear_dependency_install_notice
     echo -e "${RED}[X] nping 安装失败${NC}"
     exit 1
   fi
@@ -145,6 +155,8 @@ ROUTE_MODE=0
 ROUTE_PROTOCOL="tcp"
 SELECTED_PROVINCES=""
 DEBUG_MODE=0
+SPEEDTEST_ENABLED=0
+SPEEDTEST_ONLY=0
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
@@ -356,6 +368,8 @@ TcpQuality 节点 TCP 丢包探测脚本
   -v6, --v6         仅探测 IPv6
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
+  --speedtest       TCP 质量探测完成后追加国内三网分阶段 Speedtest
+  --only-speedtest  仅运行国内三网分阶段 Speedtest
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
   --debug           保留临时文件并输出调试信息，便于排查线路识别问题
@@ -363,11 +377,13 @@ TcpQuality 节点 TCP 丢包探测脚本
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -bj -v4 --cernet
+  bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) --speedtest
 
 依赖:
   - nping: 随 nmap 安装
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
+  - speedtest/iproute2: 分阶段测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -427,6 +443,15 @@ parse_args() {
         ;;
       --all)
         TEST_ALL=1
+        shift
+        ;;
+      --speedtest)
+        SPEEDTEST_ENABLED=1
+        shift
+        ;;
+      --only-speedtest)
+        SPEEDTEST_ENABLED=1
+        SPEEDTEST_ONLY=1
         shift
         ;;
       --debug)
@@ -825,7 +850,7 @@ ipv4_available() {
 upload_report() {
   local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses
   if ! command -v curl &>/dev/null; then
-    echo -e "  ${YELLOW}[!] 未安装 curl，已跳过 SVG 报告上传${NC}"
+    echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
     return
   fi
 
@@ -1398,12 +1423,436 @@ export -f get_ipv6_route
 export -f is_public_ipv4
 export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE
 
+# ===================== 国内分阶段测速 =====================
+SPEEDTEST_RATES=(10 200 unlimited)
+SPEEDTEST_IFB="ifb_tqtest"
+SPEEDTEST_IFACE=""
+SPEEDTEST_CREATED_IFB=0
+SPEEDTEST_TELECOM_ID=""
+SPEEDTEST_TELECOM_CITY=""
+SPEEDTEST_UNICOM_ID=""
+SPEEDTEST_UNICOM_CITY=""
+SPEEDTEST_MOBILE_ID=""
+SPEEDTEST_MOBILE_CITY=""
+SPEEDTEST_ROWS=()
+
+speedtest_candidates() {
+  case "$1" in
+    电信)
+      printf '%s\n' '59386|杭州' '59387|宁波' '5396|苏州' '36663|镇江'
+      ;;
+    联通)
+      printf '%s\n' '43752|北京' '24447|上海' '37695|香港'
+      ;;
+    移动)
+      printf '%s\n' '16204|苏州' '54312|杭州' '60584|深圳' '60794|广州' '4575|成都' '25858|北京'
+      ;;
+  esac
+}
+
+speedtest_selected_id() {
+  case "$1" in
+    电信) printf '%s' "$SPEEDTEST_TELECOM_ID" ;;
+    联通) printf '%s' "$SPEEDTEST_UNICOM_ID" ;;
+    移动) printf '%s' "$SPEEDTEST_MOBILE_ID" ;;
+  esac
+}
+
+speedtest_selected_city() {
+  case "$1" in
+    电信) printf '%s' "$SPEEDTEST_TELECOM_CITY" ;;
+    联通) printf '%s' "$SPEEDTEST_UNICOM_CITY" ;;
+    移动) printf '%s' "$SPEEDTEST_MOBILE_CITY" ;;
+  esac
+}
+
+speedtest_set_selected() {
+  local carrier="$1" server_id="$2" city="$3"
+  case "$carrier" in
+    电信) SPEEDTEST_TELECOM_ID="$server_id"; SPEEDTEST_TELECOM_CITY="$city" ;;
+    联通) SPEEDTEST_UNICOM_ID="$server_id"; SPEEDTEST_UNICOM_CITY="$city" ;;
+    移动) SPEEDTEST_MOBILE_ID="$server_id"; SPEEDTEST_MOBILE_CITY="$city" ;;
+  esac
+}
+
+speedtest_cleanup() {
+  if [ -n "${SPEEDTEST_IFACE:-}" ]; then
+    tc qdisc del dev "$SPEEDTEST_IFACE" root 2>/dev/null || true
+    tc qdisc del dev "$SPEEDTEST_IFACE" ingress 2>/dev/null || true
+  fi
+  tc qdisc del dev "$SPEEDTEST_IFB" root 2>/dev/null || true
+  if [ "${SPEEDTEST_CREATED_IFB:-0}" -eq 1 ]; then
+    ip link set "$SPEEDTEST_IFB" down 2>/dev/null || true
+    ip link delete "$SPEEDTEST_IFB" type ifb 2>/dev/null || true
+    SPEEDTEST_CREATED_IFB=0
+  fi
+}
+
+speedtest_dependencies_ready() {
+  local cmd
+  for cmd in ip tc nstat modprobe jq curl; do
+    command -v "$cmd" &>/dev/null || return 1
+  done
+}
+
+install_speedtest_dependencies() {
+  show_dependency_install_notice
+  if command -v apt-get &>/dev/null; then
+    $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq \
+      iproute2 kmod jq curl ca-certificates gnupg >/dev/null 2>&1
+  elif command -v dnf &>/dev/null; then
+    $USE_SUDO dnf install -y -q iproute kmod jq curl ca-certificates gnupg2 >/dev/null 2>&1
+  elif command -v yum &>/dev/null; then
+    $USE_SUDO yum install -y -q iproute kmod jq curl ca-certificates gnupg2 >/dev/null 2>&1
+  elif command -v apk &>/dev/null; then
+    $USE_SUDO apk add --no-cache iproute2 kmod jq curl ca-certificates gnupg >/dev/null 2>&1
+  else
+    return 1
+  fi
+  if speedtest_dependencies_ready; then
+    clear_dependency_install_notice
+    return 0
+  fi
+  clear_dependency_install_notice
+  return 1
+}
+
+is_ookla_speedtest() {
+  local version
+  command -v speedtest &>/dev/null || return 1
+  version=$(speedtest --version 2>&1 || true)
+  printf '%s' "$version" | grep -qi 'ookla'
+}
+
+install_ookla_speedtest() {
+  local installer
+  show_dependency_install_notice
+
+  if command -v apt-get &>/dev/null; then
+    if dpkg-query -W -f='${Status}' speedtest-cli 2>/dev/null | grep -q 'install ok installed'; then
+      $USE_SUDO apt-get purge -y -qq speedtest-cli >/dev/null 2>&1 || return 1
+    fi
+    installer=$(mktemp /tmp/ookla-repo.XXXXXX.sh)
+    curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh \
+      -o "$installer" || return 1
+    $USE_SUDO bash "$installer" >/dev/null 2>&1 || return 1
+    rm -f "$installer"
+    $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq speedtest >/dev/null 2>&1 || return 1
+  elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+    installer=$(mktemp /tmp/ookla-repo.XXXXXX.sh)
+    curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh \
+      -o "$installer" || return 1
+    $USE_SUDO bash "$installer" >/dev/null 2>&1 || return 1
+    rm -f "$installer"
+    if command -v dnf &>/dev/null; then
+      $USE_SUDO dnf install -y -q speedtest >/dev/null 2>&1 || return 1
+    else
+      $USE_SUDO yum install -y -q speedtest >/dev/null 2>&1 || return 1
+    fi
+  else
+    return 1
+  fi
+  hash -r
+  if is_ookla_speedtest; then
+    clear_dependency_install_notice
+    return 0
+  fi
+  clear_dependency_install_notice
+  return 1
+}
+
+speedtest_retrans_count() {
+  nstat -az 2>/dev/null | awk '$1=="TcpRetransSegs"{print $2; found=1} END{if(!found) print 0}'
+}
+
+speedtest_apply_limit() {
+  local rate="$1"
+  speedtest_cleanup
+  if [ "$rate" = "unlimited" ]; then
+    return 0
+  fi
+
+  modprobe ifb >/dev/null 2>&1 || return 1
+  if ! ip link show "$SPEEDTEST_IFB" >/dev/null 2>&1; then
+    ip link add "$SPEEDTEST_IFB" type ifb >/dev/null 2>&1 || return 1
+    SPEEDTEST_CREATED_IFB=1
+  fi
+  ip link set "$SPEEDTEST_IFB" up >/dev/null 2>&1 || return 1
+  tc qdisc add dev "$SPEEDTEST_IFACE" root tbf rate "${rate}mbit" burst 1mb latency 500ms >/dev/null 2>&1 || return 1
+  tc qdisc add dev "$SPEEDTEST_IFACE" handle ffff: ingress >/dev/null 2>&1 || return 1
+  tc filter add dev "$SPEEDTEST_IFACE" parent ffff: protocol all u32 \
+    match u32 0 0 action mirred egress redirect dev "$SPEEDTEST_IFB" >/dev/null 2>&1 || return 1
+  tc qdisc add dev "$SPEEDTEST_IFB" root tbf rate "${rate}mbit" burst 1mb latency 500ms >/dev/null 2>&1 || return 1
+}
+
+speedtest_result_valid() {
+  local file="$1"
+  jq -e '.type == "result" and (.download.bandwidth | numbers) and (.upload.bandwidth | numbers)' \
+    "$file" >/dev/null 2>&1
+}
+
+speedtest_run_node() {
+  local server_id="$1" output_file="$2"
+  speedtest --accept-license --accept-gdpr -s "$server_id" -f json --progress=no \
+    >"$output_file" 2>"${output_file}.err" || return 1
+  speedtest_result_valid "$output_file"
+}
+
+speedtest_run_carrier() {
+  local carrier="$1" output_file="$2"
+  local selected_id selected_city
+  local candidate server_id city
+  selected_id=$(speedtest_selected_id "$carrier")
+  selected_city=$(speedtest_selected_city "$carrier")
+
+  if [ -n "$selected_id" ] && speedtest_run_node "$selected_id" "$output_file"; then
+    return 0
+  fi
+  speedtest_set_selected "$carrier" "" ""
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    server_id=${candidate%%|*}
+    city=${candidate#*|}
+    [ "$server_id" = "$selected_id" ] && continue
+    if speedtest_run_node "$server_id" "$output_file"; then
+      speedtest_set_selected "$carrier" "$server_id" "$city"
+      return 0
+    fi
+  done < <(speedtest_candidates "$carrier")
+
+  if [ -n "$selected_id" ]; then
+    speedtest_set_selected "$carrier" "$selected_id" "$selected_city"
+  fi
+  return 1
+}
+
+speedtest_format_mbps() {
+  local bandwidth="$1"
+  awk -v bytes="$bandwidth" 'BEGIN{printf "%.1f", bytes*8/1000000}'
+}
+
+speedtest_carrier_title() {
+  local carrier="$1" city
+  city=$(speedtest_selected_city "$carrier")
+  if [ -n "$(speedtest_selected_id "$carrier")" ]; then
+    printf '%s%s' "$city" "$carrier"
+  else
+    printf '%s失败' "$carrier"
+  fi
+}
+
+speedtest_print_group_header() {
+  local carrier index=0
+  # Keep the label's display-width right edge aligned with values such as 200Mbps.
+  printf "      限速"
+  for carrier in 电信 联通 移动; do
+    # City plus carrier is four CJK characters (eight terminal columns).
+    printf "          %s          " "$(speedtest_carrier_title "$carrier")"
+    [ "$index" -lt 2 ] && printf " /"
+    index=$((index + 1))
+  done
+  printf '\n'
+  printf "  %-8s  %8s %8s %8s / %8s %8s %8s / %8s %8s %8s\n" \
+    "" "回程速度" "回程重传" "去程速度" \
+    "回程速度" "回程重传" "去程速度" \
+    "回程速度" "回程重传" "去程速度"
+}
+
+speedtest_show_progress() {
+  local done="$1" total="$2"
+  echo -ne "\r  ${CYAN}测速进度${NC} "
+  bar "$done" "$total"
+  echo -ne "   "
+}
+
+speedtest_speed_color() {
+  local value="$1" label="$2" level_name
+  if [ "$value" = "failed" ]; then
+    printf '%s' "$RED"
+  elif [ "$label" = "不限" ]; then
+    printf '%s' "$GREEN"
+  else
+    level_name=$(awk -v value="$value" -v target="${label%Mbps}" 'BEGIN {
+      diff = (value - target) / target
+      if (diff < 0) diff = -diff
+      if (diff <= 0.20) print "ok"
+      else if (diff <= 0.50) print "warn"
+      else print "bad"
+    }')
+    case "$level_name" in
+      ok) printf '%s' "$GREEN" ;;
+      warn) printf '%s' "$YELLOW" ;;
+      *) printf '%s' "$RED" ;;
+    esac
+  fi
+}
+
+speedtest_retrans_color() {
+  local value="$1"
+  if [ "$value" = "failed" ] || [ "$value" -gt 999 ] 2>/dev/null; then
+    printf '%s' "$RED"
+  elif [ "$value" -ge 100 ] 2>/dev/null; then
+    printf '%s' "$YELLOW"
+  else
+    printf '%s' "$GREEN"
+  fi
+}
+
+collect_speedtest_results() {
+  local rate label carrier workdir result_file before after retrans index
+  local upload download result row done=0 total
+  local carriers=(电信 联通 移动)
+  local carrier_values=()
+  SPEEDTEST_ROWS=()
+  total=$((${#SPEEDTEST_RATES[@]} * ${#carriers[@]}))
+
+  [ "$(uname)" = "Linux" ] || {
+    echo -e "${RED}[X] 分阶段 Speedtest 目前仅支持 Linux${NC}"
+    exit 1
+  }
+  require_raw_socket_privilege
+  check_curl
+  speedtest_dependencies_ready || install_speedtest_dependencies || {
+    echo -e "${RED}[X] 测速依赖安装失败${NC}"
+    exit 1
+  }
+  is_ookla_speedtest || install_ookla_speedtest || {
+    echo -e "${RED}[X] Ookla Speedtest 安装失败${NC}"
+    exit 1
+  }
+
+  SPEEDTEST_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+  [ -n "$SPEEDTEST_IFACE" ] || {
+    echo -e "${RED}[X] 无法识别默认网络接口${NC}"
+    exit 1
+  }
+  trap 'speedtest_cleanup; cleanup_result_dir' EXIT
+  trap 'speedtest_cleanup; cleanup_result_dir; exit 130' INT TERM
+
+  echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
+  echo
+  speedtest_show_progress 0 "$total"
+
+  for rate in "${SPEEDTEST_RATES[@]}"; do
+    speedtest_apply_limit "$rate" || {
+      echo -e "${RED}[X] 无法应用 ${rate} Mbps 限速${NC}"
+      exit 1
+    }
+    sleep 2
+    carrier_values=()
+
+    for carrier in "${carriers[@]}"; do
+      workdir=$(mktemp -d "$RESULT_DIR/speedtest.XXXXXX")
+      result_file="$workdir/result.json"
+      before=$(speedtest_retrans_count)
+      if speedtest_run_carrier "$carrier" "$result_file"; then
+        after=$(speedtest_retrans_count)
+        retrans=$((after - before))
+        [ "$retrans" -ge 0 ] || retrans=0
+        upload=$(jq -r '.upload.bandwidth' "$result_file")
+        download=$(jq -r '.download.bandwidth' "$result_file")
+        carrier_values+=("$(speedtest_format_mbps "$upload")|$retrans|$(speedtest_format_mbps "$download")")
+      else
+        carrier_values+=("failed|failed|failed")
+      fi
+      done=$((done + 1))
+      speedtest_show_progress "$done" "$total"
+    done
+
+    label="${rate}Mbps"
+    [ "$rate" = "unlimited" ] && label="不限"
+    SPEEDTEST_ROWS+=("$label;${carrier_values[0]};${carrier_values[1]};${carrier_values[2]}")
+  done
+
+  speedtest_cleanup
+  echo
+}
+
+show_speedtest_results() {
+  local row label result1 result2 result3 result upload retrans download index
+  local speed_color retrans_color
+  echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
+  echo
+  speedtest_print_group_header
+  for row in "${SPEEDTEST_ROWS[@]}"; do
+    IFS=';' read -r label result1 result2 result3 <<<"$row"
+    if [ "$label" = "不限" ]; then
+      printf "      不限"
+    else
+      printf "  %8s" "$label"
+    fi
+    index=0
+    for result in "$result1" "$result2" "$result3"; do
+      IFS='|' read -r upload retrans download <<<"$result"
+      speed_color=$(speedtest_speed_color "$upload" "$label")
+      printf "  %b%8s%b" "$speed_color" "$upload" "$NC"
+      retrans_color=$(speedtest_retrans_color "$retrans")
+      printf " %b%8s%b" "$retrans_color" "$retrans" "$NC"
+      speed_color=$(speedtest_speed_color "$download" "$label")
+      printf " %b%8s%b" "$speed_color" "$download" "$NC"
+      [ "$index" -lt 2 ] && printf " /"
+      index=$((index + 1))
+    done
+    printf '\n'
+  done
+}
+
+append_speedtest_csv() {
+  local csv="$1" row label result1 result2 result3 result upload retrans download index carrier
+  local carriers=(电信 联通 移动)
+  for row in "${SPEEDTEST_ROWS[@]}"; do
+    IFS=';' read -r label result1 result2 result3 <<<"$row"
+    index=0
+    for result in "$result1" "$result2" "$result3"; do
+      carrier="${carriers[$index]}"
+      IFS='|' read -r upload retrans download <<<"$result"
+      if [ "$upload" = "failed" ]; then
+        printf 'Speedtest,%s,%s,%s,,,%s,%s,%s,%s,,\n' \
+          "$label" "$carrier" "$(speedtest_selected_city "$carrier")" "FAIL" "$upload" "$retrans" "$download" >> "$csv"
+      else
+        printf 'Speedtest,%s,%s,%s,%s,,%s,%s,%s,%s,,\n' \
+          "$label" "$carrier" "$(speedtest_selected_city "$carrier")" "$(speedtest_selected_id "$carrier")" \
+          "OK" "$upload" "$retrans" "$download" >> "$csv"
+      fi
+      index=$((index + 1))
+    done
+  done
+}
+
+run_speedtest_mode() {
+  local report_time csv
+  collect_speedtest_results
+  report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
+  csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
+  printf '\xEF\xBB\xBF' > "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$csv"
+  append_speedtest_csv "$csv"
+  clear
+  print_header
+  echo -e "  ${DIM}报告时间：${report_time}${NC}"
+  echo
+  show_speedtest_results
+  if [ "$UPLOAD_REPORT" -eq 1 ]; then
+    echo
+    upload_report "$csv" "${report_time%%（*}"
+  fi
+  echo
+}
+
 # ===================== 主流程 =====================
 main() {
   clear
   print_header
 
   init_privilege
+
+  if [ "$SPEEDTEST_ONLY" -eq 1 ]; then
+    run_speedtest_mode
+    exit 0
+  fi
 
   if [ "$ROUTE_MODE" -eq 1 ]; then
     check_curl
@@ -1535,6 +1984,11 @@ main() {
   show_progress
   echo ""
 
+  if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
+    echo
+    collect_speedtest_results
+  fi
+
   local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
   sorted_v4=$(mktemp)
   sorted_v6=$(mktemp)
@@ -1591,6 +2045,9 @@ main() {
       fi
     done
   fi
+  if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
+    append_speedtest_csv "$CSV"
+  fi
 
   # ---- TUI 结果展示 ----
   clear
@@ -1615,6 +2072,11 @@ main() {
     if [ "$test_edu" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
       show_education_results "CERNET2-IPv6" "$sorted_cernet2"
     fi
+  fi
+
+  if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
+    show_speedtest_results
+    echo
   fi
 
   if [ "$UPLOAD_REPORT" -eq 1 ]; then
