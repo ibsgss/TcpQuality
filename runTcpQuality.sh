@@ -1820,32 +1820,23 @@ speedtest_pad_center() {
 }
 
 speedtest_print_group_header() {
-  local carrier index=0
+  local label="$1" title
+  [ "$label" = "不限" ] && title='不限速' || title="限速 $label"
+
   # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
   printf '  '
   printf '%b' "$CYAN"
-  speedtest_pad_left 8 '限速'
+  speedtest_pad_center 54 "$title"
   printf '%b' "$NC"
-  printf '  '
-  for carrier in 电信 联通 移动; do
-    printf '%b' "$CYAN"
-    speedtest_pad_center 32 "$(speedtest_carrier_title "$carrier")"
-    printf '%b' "$NC"
-    [ "$index" -lt 2 ] && printf ' / '
-    index=$((index + 1))
-  done
   printf '\n'
-  printf '            '
-  for index in 1 2 3; do
-    printf '%b' "$CYAN"
-    speedtest_pad_left 8 '回程重传'
-    printf ' '
-    speedtest_pad_left 11 '回程速度'
-    printf ' '
-    speedtest_pad_left 11 '去程速度'
-    printf '%b' "$NC"
-    [ "$index" -lt 3 ] && printf ' / '
-  done
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '地区'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '回程重传'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '回程速度'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '去程速度'; printf '%b' "$NC"
   printf '\n'
 }
 
@@ -2078,33 +2069,37 @@ wait_speedtest_background() {
 }
 
 show_speedtest_results() {
-  local row label result1 result2 result3 result upload retrans download index upload_text download_text
+  local row label result1 result2 result3 result upload retrans download index carrier region upload_text download_text
   local speed_color retrans_color
+  local carriers=(电信 联通 移动)
+  local results=()
   echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
   echo
-  speedtest_print_group_header
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
-    printf '  '
-    printf '%b' "$CYAN"
-    speedtest_pad_left 8 "$label"
-    printf '%b' "$NC"
-    printf '  '
-    index=0
-    for result in "$result1" "$result2" "$result3"; do
+    speedtest_print_group_header "$label"
+    results=("$result1" "$result2" "$result3")
+    for index in "${!results[@]}"; do
+      result="${results[$index]}"
+      carrier="${carriers[$index]}"
+      region=$(speedtest_carrier_title "$carrier")
       IFS='|' read -r upload retrans download <<<"$result"
+      printf '  '
+      printf '%b' "$CYAN"; speedtest_pad_left 12 "$region"; printf '%b' "$NC"
+      printf '  '
       retrans_color=$(speedtest_retrans_color "$retrans")
-      printf '%b%8s%b ' "$retrans_color" "$retrans" "$NC"
+      printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+      printf '  '
       upload_text=$(speedtest_speed_text "$upload")
       speed_color=$(speedtest_speed_color "$upload" "$label")
-      printf '%b%11s%b ' "$speed_color" "$upload_text" "$NC"
+      printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
+      printf '  '
       download_text=$(speedtest_speed_text "$download")
       speed_color=$(speedtest_speed_color "$download" "$label")
-      printf '%b%11s%b' "$speed_color" "$download_text" "$NC"
-      [ "$index" -lt 2 ] && printf ' / '
-      index=$((index + 1))
+      printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
+      printf '\n'
     done
-    printf '\n'
+    echo
   done
 }
 
