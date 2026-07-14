@@ -165,6 +165,9 @@ ROUTE_PROGRESS_TOTAL=0
 ROUTE_BACKGROUND_PID=""
 MULTI_PROGRESS_MODE=0
 PROGRESS_LINES_PRINTED=0
+PROGRESS_LAST_STATE=""
+PROGRESS_LAST_TS=0
+PROGRESS_MIN_INTERVAL=1
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
@@ -529,9 +532,20 @@ count_results() {
 }
 
 show_single_progress() {
-  local done
+  local done now state force
+  force=${1:-0}
   done=$(count_results)
   [ "$done" -gt "$TOTAL" ] && done="$TOTAL"
+  now=$(date +%s)
+  state="single:${done}/${TOTAL}"
+  if [ "$force" -ne 1 ] && [ "$state" = "$PROGRESS_LAST_STATE" ]; then
+    return 0
+  fi
+  if [ "$force" -ne 1 ] && [ "$done" -lt "$TOTAL" ] && [ $((now - PROGRESS_LAST_TS)) -lt "$PROGRESS_MIN_INTERVAL" ]; then
+    return 0
+  fi
+  PROGRESS_LAST_STATE="$state"
+  PROGRESS_LAST_TS="$now"
   echo -ne "\r  ${CYAN}探测进度${NC} "
   bar "$done" "$TOTAL"
   echo -ne "   "
@@ -562,7 +576,8 @@ read_speedtest_progress() {
 }
 
 show_all_progress() {
-  local latency_done route_done speed_done speed_total speed_progress
+  local latency_done route_done speed_done speed_total speed_progress now state complete force
+  force=${1:-0}
   latency_done=$(count_results)
   [ "$latency_done" -gt "$TOTAL" ] && latency_done="$TOTAL"
   route_done=$(count_route_progress)
@@ -570,6 +585,22 @@ show_all_progress() {
   speed_progress=$(read_speedtest_progress)
   speed_done=${speed_progress%%|*}
   speed_total=${speed_progress#*|}
+  now=$(date +%s)
+  state="all:${latency_done}/${TOTAL}:${route_done}/${ROUTE_PROGRESS_TOTAL}:${speed_done}/${speed_total}"
+  complete=0
+  if [ "$latency_done" -ge "$TOTAL" ] \
+    && { [ "$ROUTE_PROGRESS_TOTAL" -eq 0 ] || [ "$route_done" -ge "$ROUTE_PROGRESS_TOTAL" ]; } \
+    && { [ "$SPEEDTEST_ENABLED" -ne 1 ] || [ "$speed_done" -ge "$speed_total" ]; }; then
+    complete=1
+  fi
+  if [ "$force" -ne 1 ] && [ "$state" = "$PROGRESS_LAST_STATE" ]; then
+    return 0
+  fi
+  if [ "$force" -ne 1 ] && [ "$complete" -ne 1 ] && [ $((now - PROGRESS_LAST_TS)) -lt "$PROGRESS_MIN_INTERVAL" ]; then
+    return 0
+  fi
+  PROGRESS_LAST_STATE="$state"
+  PROGRESS_LAST_TS="$now"
 
   if [ "$PROGRESS_LINES_PRINTED" -gt 0 ]; then
     printf '\033[%dA' "$PROGRESS_LINES_PRINTED"
@@ -591,10 +622,11 @@ show_all_progress() {
 }
 
 show_progress() {
+  local force=${1:-0}
   if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
-    show_all_progress
+    show_all_progress "$force"
   else
-    show_single_progress
+    show_single_progress "$force"
   fi
 }
 
