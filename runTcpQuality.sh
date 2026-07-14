@@ -1357,15 +1357,28 @@ collect_route_labels() {
   rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
 }
 
+set_route_progress_total() {
+  local has_v4="$1" has_v6="$2"
+  ROUTE_PROGRESS_TOTAL=0
+  if [ "$has_v4" -eq 1 ]; then
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
+  fi
+  if [ "$has_v6" -eq 1 ]; then
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 6)))
+  fi
+  return 0
+}
+
 start_route_background() {
   local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4"
-  ROUTE_PROGRESS_TOTAL=0
-  [ "$has_v4" -eq 1 ] && ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
-  [ "$has_v6" -eq 1 ] && ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 6)))
   [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ] || return 0
   (
-    [ "$has_v4" -eq 1 ] && collect_route_labels 4 "$route_labels_v4"
-    [ "$has_v6" -eq 1 ] && collect_route_labels 6 "$route_labels_v6"
+    if [ "$has_v4" -eq 1 ]; then
+      collect_route_labels 4 "$route_labels_v4"
+    fi
+    if [ "$has_v6" -eq 1 ]; then
+      collect_route_labels 6 "$route_labels_v6"
+    fi
   ) >"$RESULT_DIR/route.log" 2>&1 &
   ROUTE_BACKGROUND_PID=$!
 }
@@ -2210,6 +2223,9 @@ main() {
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$((${#SPEEDTEST_RATES[@]} * 3))
+  fi
+  if [ "$test_cdn" -eq 1 ]; then
+    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled"
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
