@@ -157,6 +157,14 @@ SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
 SPEEDTEST_ONLY=0
+SPEEDTEST_STATE_FILE=""
+SPEEDTEST_PROGRESS_FILE=""
+SPEEDTEST_BACKGROUND=0
+SPEEDTEST_BACKGROUND_PID=""
+ROUTE_PROGRESS_TOTAL=0
+ROUTE_BACKGROUND_PID=""
+MULTI_PROGRESS_MODE=0
+PROGRESS_LINES_PRINTED=0
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
@@ -368,7 +376,7 @@ TcpQuality 节点 TCP 丢包探测脚本
   -v6, --v6         仅探测 IPv6
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
-  --speedtest       TCP 质量探测完成后追加国内三网分阶段 Speedtest
+  --speedtest       追加国内三网分阶段 Speedtest（避免影响延迟探测）
   --only-speedtest  仅运行国内三网分阶段 Speedtest
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
@@ -501,6 +509,8 @@ loss_level() {
 
 bar() {
   local done=$1 total=$2 width=40
+  [ "$total" -gt 0 ] 2>/dev/null || total=1
+  [ "$done" -gt "$total" ] 2>/dev/null && done="$total"
   local pct=$(( done * 100 / total ))
   local fill=$(( done * width / total ))
   local empty=$(( width - fill ))
@@ -514,17 +524,78 @@ count_results() {
   if [ "${ROUTE_MODE:-0}" -eq 1 ]; then
     find "$RESULT_DIR" -type f -name 'route_[0-9]*' 2>/dev/null | wc -l | tr -d ' '
   else
-    find "$RESULT_DIR" -type f 2>/dev/null | wc -l | tr -d ' '
+    find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'cdn4_[0-9]*' -o -name 'cdn6_[0-9]*' -o -name 'cernet_[0-9]*' -o -name 'cernet2_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
   fi
 }
 
-show_progress() {
+show_single_progress() {
   local done
   done=$(count_results)
   [ "$done" -gt "$TOTAL" ] && done="$TOTAL"
   echo -ne "\r  ${CYAN}探测进度${NC} "
   bar "$done" "$TOTAL"
   echo -ne "   "
+}
+
+count_route_progress() {
+  find "$RESULT_DIR" -maxdepth 1 -type f -name 'summary_route[46]_[0-9]*' ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
+}
+
+count_selected_cdn_nodes() {
+  local family="$1" prov count=0
+  while IFS='|' read -r prov _; do
+    province_selected "$prov" && count=$((count + 1))
+  done < <(print_cdn_entries "$family")
+  printf '%s' "$count"
+}
+
+read_speedtest_progress() {
+  local progress done total
+  progress=$(cat "$SPEEDTEST_PROGRESS_FILE" 2>/dev/null || true)
+  done=${progress%%/*}
+  total=${progress#*/}
+  if [ -n "$done" ] && [ "$done" != "$progress" ] && [ -n "$total" ]; then
+    printf '%s|%s' "$done" "$total"
+  else
+    printf '0|%s' "${SPEEDTEST_PROGRESS_TOTAL:-0}"
+  fi
+}
+
+show_all_progress() {
+  local latency_done route_done speed_done speed_total speed_progress
+  latency_done=$(count_results)
+  [ "$latency_done" -gt "$TOTAL" ] && latency_done="$TOTAL"
+  route_done=$(count_route_progress)
+  [ "$route_done" -gt "$ROUTE_PROGRESS_TOTAL" ] && route_done="$ROUTE_PROGRESS_TOTAL"
+  speed_progress=$(read_speedtest_progress)
+  speed_done=${speed_progress%%|*}
+  speed_total=${speed_progress#*|}
+
+  if [ "$PROGRESS_LINES_PRINTED" -gt 0 ]; then
+    printf '\033[%dA' "$PROGRESS_LINES_PRINTED"
+  fi
+  printf '\r\033[2K  %b延迟重传%b ' "$CYAN" "$NC"
+  bar "$latency_done" "$TOTAL"
+  printf '\n'
+  if [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ]; then
+    printf '\r\033[2K  %b回程识别%b ' "$CYAN" "$NC"
+    bar "$route_done" "$ROUTE_PROGRESS_TOTAL"
+    printf '\n'
+  fi
+  if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
+    printf '\r\033[2K  %b分段测速%b ' "$CYAN" "$NC"
+    bar "$speed_done" "$speed_total"
+    printf '\n'
+  fi
+  PROGRESS_LINES_PRINTED=$((1 + (SPEEDTEST_ENABLED == 1) + (ROUTE_PROGRESS_TOTAL > 0)))
+}
+
+show_progress() {
+  if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
+    show_all_progress
+  else
+    show_single_progress
+  fi
 }
 
 show_provider_summary() {
@@ -1035,8 +1106,8 @@ route_label_from_ip_trace() {
 }
 
 route_trace_one() {
-  local family="$1" protocol="$2" prov="$3" isp="$4" host="$5" idx="$6" port="${7:-80}" fixed_ip="${8:-}"
-  local outfile="${RESULT_DIR}/route_${idx}" trace_file="${RESULT_DIR}/route_trace_${idx}"
+  local family="$1" protocol="$2" prov="$3" isp="$4" host="$5" idx="$6" port="${7:-80}" fixed_ip="${8:-}" prefix="${9:-route}"
+  local outfile="${RESULT_DIR}/${prefix}_${idx}" trace_file="${RESULT_DIR}/${prefix}_trace_${idx}"
   local probe_arg="-T"
   [ "$protocol" = "udp" ] && probe_arg="-U"
   local -a args
@@ -1229,13 +1300,15 @@ run_route_mode() {
 }
 
 collect_route_labels() {
-  local family="$1" out_file="$2" idx=0 entry prov isp host route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label
+  local family="$1" out_file="$2" idx=0 entry prov isp host route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label prefix
   local route_parallel="$PARALLEL"
-  route_total=$(count_cdn_nodes "$family")
+  prefix="summary_route${family}"
+  route_total=0
+  while IFS='|' read -r prov isp host _; do
+    province_selected "$prov" && route_total=$((route_total + 1))
+  done < <(print_cdn_entries "$family")
   [ "$route_total" -eq 0 ] && return 0
 
-  check_traceroute
-  echo -e "  ${DIM}正在识别 IPv${family} TCP 回程线路，请稍候...${NC}"
   while IFS='|' read -r prov isp host fixed_ip port; do
     province_selected "$prov" || continue
     port=${port:-80}
@@ -1243,7 +1316,7 @@ collect_route_labels() {
     while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
       sleep 0.2
     done
-    route_trace_one "$family" tcp "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" &
+    route_trace_one "$family" tcp "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
   done < <(print_cdn_entries "$family")
   wait
 
@@ -1252,8 +1325,8 @@ collect_route_labels() {
   cymru_file=$(mktemp)
   asn_map_file=$(mktemp)
   for idx in $(seq 1 "$route_total"); do
-    [ -f "${RESULT_DIR}/route_${idx}" ] && cat "${RESULT_DIR}/route_${idx}" >> "$route_raw_file"
-    [ -f "${RESULT_DIR}/route_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/route_trace_${idx}" >> "$ip_file"
+    [ -f "${RESULT_DIR}/${prefix}_${idx}" ] && cat "${RESULT_DIR}/${prefix}_${idx}" >> "$route_raw_file"
+    [ -f "${RESULT_DIR}/${prefix}_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${idx}" >> "$ip_file"
   done
   sort -u "$ip_file" -o "$ip_file" 2>/dev/null || true
 
@@ -1263,10 +1336,10 @@ collect_route_labels() {
   fi
 
   while IFS='|' read -r status prov isp protocol host value; do
-    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/route_trace_${value}" ]; then
-      trace_ip_file="${RESULT_DIR}/route_trace_${value}.ips"
-      extract_trace_ips "${RESULT_DIR}/route_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/route_trace_${value}" "$asn_map_file" "$trace_ip_file")
+    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
+      trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
+      extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
       echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
@@ -1274,14 +1347,38 @@ collect_route_labels() {
   done < "$route_raw_file"
 
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    cp "$route_raw_file" "${RESULT_DIR}/route_raw_summary.txt"
-    cp "$ip_file" "${RESULT_DIR}/route_ips_summary.txt"
-    cp "$cymru_file" "${RESULT_DIR}/route_cymru_summary.txt"
-    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map_summary.txt"
-    cp "$out_file" "${RESULT_DIR}/route_final_summary.txt"
+    cp "$route_raw_file" "${RESULT_DIR}/route_raw_summary_v${family}.txt"
+    cp "$ip_file" "${RESULT_DIR}/route_ips_summary_v${family}.txt"
+    cp "$cymru_file" "${RESULT_DIR}/route_cymru_summary_v${family}.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map_summary_v${family}.txt"
+    cp "$out_file" "${RESULT_DIR}/route_final_summary_v${family}.txt"
   fi
 
   rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
+}
+
+start_route_background() {
+  local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4"
+  ROUTE_PROGRESS_TOTAL=0
+  [ "$has_v4" -eq 1 ] && ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
+  [ "$has_v6" -eq 1 ] && ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 6)))
+  [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ] || return 0
+  (
+    [ "$has_v4" -eq 1 ] && collect_route_labels 4 "$route_labels_v4"
+    [ "$has_v6" -eq 1 ] && collect_route_labels 6 "$route_labels_v6"
+  ) >"$RESULT_DIR/route.log" 2>&1 &
+  ROUTE_BACKGROUND_PID=$!
+}
+
+wait_route_background() {
+  [ -n "${ROUTE_BACKGROUND_PID:-}" ] || return 0
+  while kill -0 "$ROUTE_BACKGROUND_PID" 2>/dev/null; do
+    if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
+      show_all_progress
+    fi
+    sleep 0.2
+  done
+  wait "$ROUTE_BACKGROUND_PID" 2>/dev/null || true
 }
 
 export -f route_trace_one
@@ -1644,25 +1741,84 @@ speedtest_carrier_title() {
   fi
 }
 
+speedtest_display_width() {
+  local text="$1" char width=0
+  while [ -n "$text" ]; do
+    char=${text:0:1}
+    text=${text:1}
+    case "$char" in
+      [[:ascii:]]) width=$((width + 1)) ;;
+      *) width=$((width + 2)) ;;
+    esac
+  done
+  printf '%s' "$width"
+}
+
+speedtest_pad_left() {
+  local width="$1" text="$2" actual padding
+  actual=$(speedtest_display_width "$text")
+  padding=$((width - actual))
+  [ "$padding" -gt 0 ] && printf '%*s' "$padding" ''
+  printf '%s' "$text"
+}
+
+speedtest_pad_center() {
+  local width="$1" text="$2" actual padding left right
+  actual=$(speedtest_display_width "$text")
+  padding=$((width - actual))
+  [ "$padding" -lt 0 ] && padding=0
+  left=$((padding / 2))
+  right=$((padding - left))
+  [ "$left" -gt 0 ] && printf '%*s' "$left" ''
+  printf '%s' "$text"
+  [ "$right" -gt 0 ] && printf '%*s' "$right" ''
+}
+
 speedtest_print_group_header() {
   local carrier index=0
-  # Keep the label's display-width right edge aligned with values such as 200Mbps.
-  printf "      限速"
+  # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
+  printf '  '
+  printf '%b' "$CYAN"
+  speedtest_pad_left 8 '限速'
+  printf '%b' "$NC"
+  printf '  '
   for carrier in 电信 联通 移动; do
-    # City plus carrier is four CJK characters (eight terminal columns).
-    printf "          %s          " "$(speedtest_carrier_title "$carrier")"
-    [ "$index" -lt 2 ] && printf " /"
+    printf '%b' "$CYAN"
+    speedtest_pad_center 32 "$(speedtest_carrier_title "$carrier")"
+    printf '%b' "$NC"
+    [ "$index" -lt 2 ] && printf ' / '
     index=$((index + 1))
   done
   printf '\n'
-  printf "  %-8s  %8s %8s %8s / %8s %8s %8s / %8s %8s %8s\n" \
-    "" "回程速度" "回程重传" "去程速度" \
-    "回程速度" "回程重传" "去程速度" \
-    "回程速度" "回程重传" "去程速度"
+  printf '            '
+  for index in 1 2 3; do
+    printf '%b' "$CYAN"
+    speedtest_pad_left 8 '回程重传'
+    printf ' '
+    speedtest_pad_left 11 '回程速度'
+    printf ' '
+    speedtest_pad_left 11 '去程速度'
+    printf '%b' "$NC"
+    [ "$index" -lt 3 ] && printf ' / '
+  done
+  printf '\n'
+}
+
+speedtest_speed_text() {
+  local value="$1"
+  if [ "$value" = "failed" ]; then
+    printf 'failed'
+  else
+    printf '%sMbps' "$value"
+  fi
 }
 
 speedtest_show_progress() {
   local done="$1" total="$2"
+  if [ "${SPEEDTEST_BACKGROUND:-0}" -eq 1 ]; then
+    printf '%s/%s\n' "$done" "$total" > "$SPEEDTEST_PROGRESS_FILE"
+    return
+  fi
   echo -ne "\r  ${CYAN}测速进度${NC} "
   bar "$done" "$total"
   echo -ne "   "
@@ -1673,7 +1829,16 @@ speedtest_speed_color() {
   if [ "$value" = "failed" ]; then
     printf '%s' "$RED"
   elif [ "$label" = "不限" ]; then
-    printf '%s' "$GREEN"
+    level_name=$(awk -v value="$value" 'BEGIN {
+      if (value <= 20) print "bad"
+      else if (value <= 150) print "warn"
+      else print "ok"
+    }')
+    case "$level_name" in
+      ok) printf '%s' "$GREEN" ;;
+      warn) printf '%s' "$YELLOW" ;;
+      *) printf '%s' "$RED" ;;
+    esac
   else
     level_name=$(awk -v value="$value" -v target="${label%Mbps}" 'BEGIN {
       diff = (value - target) / target
@@ -1703,11 +1868,21 @@ speedtest_retrans_color() {
 
 collect_speedtest_results() {
   local rate label carrier workdir result_file before after retrans index
-  local upload download result row done=0 total
+  local upload download result row done total offset
   local carriers=(电信 联通 移动)
   local carrier_values=()
-  SPEEDTEST_ROWS=()
-  total=$((${#SPEEDTEST_RATES[@]} * ${#carriers[@]}))
+  local rates=("$@")
+  [ "${#rates[@]}" -gt 0 ] || rates=("${SPEEDTEST_RATES[@]}")
+  offset=${SPEEDTEST_PROGRESS_OFFSET:-0}
+  done="$offset"
+  total=${SPEEDTEST_PROGRESS_TOTAL:-0}
+  [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + ${#rates[@]} * ${#carriers[@]}))
+
+  if [ "${SPEEDTEST_APPEND_STATE:-0}" -eq 1 ]; then
+    speedtest_load_background_state || true
+  else
+    SPEEDTEST_ROWS=()
+  fi
 
   [ "$(uname)" = "Linux" ] || {
     echo -e "${RED}[X] 分阶段 Speedtest 目前仅支持 Linux${NC}"
@@ -1729,14 +1904,16 @@ collect_speedtest_results() {
     echo -e "${RED}[X] 无法识别默认网络接口${NC}"
     exit 1
   }
-  trap 'speedtest_cleanup; cleanup_result_dir' EXIT
-  trap 'speedtest_cleanup; cleanup_result_dir; exit 130' INT TERM
+  if [ "${SPEEDTEST_BACKGROUND:-0}" -eq 1 ]; then
+    trap 'speedtest_cleanup' EXIT
+    trap 'speedtest_cleanup; exit 130' INT TERM
+  fi
 
   echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
   echo
   speedtest_show_progress 0 "$total"
 
-  for rate in "${SPEEDTEST_RATES[@]}"; do
+  for rate in "${rates[@]}"; do
     speedtest_apply_limit "$rate" || {
       echo -e "${RED}[X] 无法应用 ${rate} Mbps 限速${NC}"
       exit 1
@@ -1768,32 +1945,118 @@ collect_speedtest_results() {
   done
 
   speedtest_cleanup
+  if [ -n "${SPEEDTEST_STATE_FILE:-}" ]; then
+    {
+      printf 'META\t%s|%s|%s|%s|%s|%s\n' \
+        "$SPEEDTEST_TELECOM_ID" "$SPEEDTEST_TELECOM_CITY" \
+        "$SPEEDTEST_UNICOM_ID" "$SPEEDTEST_UNICOM_CITY" \
+        "$SPEEDTEST_MOBILE_ID" "$SPEEDTEST_MOBILE_CITY"
+      printf 'ROW\t%s\n' "${SPEEDTEST_ROWS[@]}"
+    } > "$SPEEDTEST_STATE_FILE"
+  fi
   echo
 }
 
+speedtest_set_failed_rows() {
+  SPEEDTEST_ROWS=()
+  local rate label
+  for rate in "${SPEEDTEST_RATES[@]}"; do
+    label="${rate}Mbps"
+    [ "$rate" = "unlimited" ] && label="不限"
+    SPEEDTEST_ROWS+=("$label;failed|failed|failed;failed|failed|failed;failed|failed|failed")
+  done
+}
+
+speedtest_load_background_state() {
+  local type value a b c d e f
+  SPEEDTEST_ROWS=()
+  [ -s "$SPEEDTEST_STATE_FILE" ] || {
+    speedtest_set_failed_rows
+    return 1
+  }
+
+  while IFS=$'\t' read -r type value; do
+    case "$type" in
+      META)
+        IFS='|' read -r a b c d e f <<<"$value"
+        SPEEDTEST_TELECOM_ID="$a"
+        SPEEDTEST_TELECOM_CITY="$b"
+        SPEEDTEST_UNICOM_ID="$c"
+        SPEEDTEST_UNICOM_CITY="$d"
+        SPEEDTEST_MOBILE_ID="$e"
+        SPEEDTEST_MOBILE_CITY="$f"
+        ;;
+      ROW)
+        SPEEDTEST_ROWS+=("$value")
+        ;;
+    esac
+  done < "$SPEEDTEST_STATE_FILE"
+
+  [ "${#SPEEDTEST_ROWS[@]}" -gt 0 ] || speedtest_set_failed_rows
+}
+
+start_speedtest_background() {
+  local offset="${1:-0}" append="${2:-0}"
+  shift 2 || true
+  SPEEDTEST_STATE_FILE="$RESULT_DIR/speedtest.state"
+  SPEEDTEST_PROGRESS_FILE="$RESULT_DIR/speedtest.progress"
+  printf '%s/%s\n' "$offset" "$SPEEDTEST_PROGRESS_TOTAL" > "$SPEEDTEST_PROGRESS_FILE"
+  SPEEDTEST_BACKGROUND=1 SPEEDTEST_APPEND_STATE="$append" \
+    SPEEDTEST_PROGRESS_OFFSET="$offset" collect_speedtest_results "$@" \
+    >"$RESULT_DIR/speedtest.log" 2>&1 &
+  SPEEDTEST_BACKGROUND_PID=$!
+}
+
+wait_speedtest_background() {
+  local progress done total
+  [ -n "${SPEEDTEST_BACKGROUND_PID:-}" ] || return 0
+  while kill -0 "$SPEEDTEST_BACKGROUND_PID" 2>/dev/null; do
+    if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
+      show_all_progress
+    else
+      progress=$(cat "$SPEEDTEST_PROGRESS_FILE" 2>/dev/null || true)
+      done=${progress%%/*}
+      total=${progress#*/}
+      if [ -n "$done" ] && [ "$done" != "$progress" ] && [ -n "$total" ]; then
+        echo -ne "\r  ${CYAN}测速进度${NC} "
+        bar "$done" "$total"
+        echo -ne "   "
+      else
+        echo -ne "\r  ${CYAN}测速准备中...${NC}   "
+      fi
+    fi
+    sleep 0.2
+  done
+  wait "$SPEEDTEST_BACKGROUND_PID" 2>/dev/null || true
+  speedtest_load_background_state || true
+  [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ] || echo
+}
+
 show_speedtest_results() {
-  local row label result1 result2 result3 result upload retrans download index
+  local row label result1 result2 result3 result upload retrans download index upload_text download_text
   local speed_color retrans_color
   echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
   echo
   speedtest_print_group_header
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
-    if [ "$label" = "不限" ]; then
-      printf "      不限"
-    else
-      printf "  %8s" "$label"
-    fi
+    printf '  '
+    printf '%b' "$CYAN"
+    speedtest_pad_left 8 "$label"
+    printf '%b' "$NC"
+    printf '  '
     index=0
     for result in "$result1" "$result2" "$result3"; do
       IFS='|' read -r upload retrans download <<<"$result"
-      speed_color=$(speedtest_speed_color "$upload" "$label")
-      printf "  %b%8s%b" "$speed_color" "$upload" "$NC"
       retrans_color=$(speedtest_retrans_color "$retrans")
-      printf " %b%8s%b" "$retrans_color" "$retrans" "$NC"
+      printf '%b%8s%b ' "$retrans_color" "$retrans" "$NC"
+      upload_text=$(speedtest_speed_text "$upload")
+      speed_color=$(speedtest_speed_color "$upload" "$label")
+      printf '%b%11s%b ' "$speed_color" "$upload_text" "$NC"
+      download_text=$(speedtest_speed_text "$download")
       speed_color=$(speedtest_speed_color "$download" "$label")
-      printf " %b%8s%b" "$speed_color" "$download" "$NC"
-      [ "$index" -lt 2 ] && printf " /"
+      printf '%b%11s%b' "$speed_color" "$download_text" "$NC"
+      [ "$index" -lt 2 ] && printf ' / '
       index=$((index + 1))
     done
     printf '\n'
@@ -1927,21 +2190,42 @@ main() {
   echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  包长: $size_text  并行: $PARALLEL  端口: 80/tcp${NC}"
   echo ""
 
-  # 并行测试
-  local idx=0
-  echo -e "  ${DIM}正在探测，请稍候...${NC}"
-  show_progress
   local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
   local -a families=()
   if [ "$test_cdn" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then families+=(4); fi
     if [ "$ipv6_enabled" -eq 1 ]; then families+=(6); fi
+    [ "${#families[@]}" -gt 0 ] && check_traceroute
+  fi
+
+  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
+  sorted_v4=$(mktemp)
+  sorted_v6=$(mktemp)
+  sorted_cernet=$(mktemp)
+  sorted_cernet2=$(mktemp)
+  route_labels_v4=$(mktemp)
+  route_labels_v6=$(mktemp)
+
+  # Speedtest 会显著占用链路，必须在延迟重传与回程识别完成后才启动。
+  SPEEDTEST_PROGRESS_TOTAL=0
+  if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
+    SPEEDTEST_PROGRESS_TOTAL=$((${#SPEEDTEST_RATES[@]} * 3))
+  fi
+  echo -e "  ${DIM}正在检测，请稍候...${NC}"
+  MULTI_PROGRESS_MODE=1
+  if [ "$test_cdn" -eq 1 ]; then
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled"
+  fi
+
+  local idx=0
+  show_progress
+  if [ "$test_cdn" -eq 1 ]; then
     for family in "${families[@]}"; do
       while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
         port=${port:-80}
         province_selected "$prov" || continue
         idx=$((idx + 1))
-        while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLEL" ]; do
+        while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
           show_progress
           sleep 0.2
         done
@@ -1955,7 +2239,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLEL" ]; do
+      while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
@@ -1968,7 +2252,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLEL" ]; do
+      while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
@@ -1976,32 +2260,21 @@ main() {
       show_progress
     done < <(print_cernet2_entries)
   fi
-  while [ "$(jobs -pr | wc -l | tr -d ' ')" -gt 0 ]; do
+  while [ $((idx - $(count_results))) -gt 0 ]; do
     show_progress
     sleep 0.2
   done
-  wait
   show_progress
-  echo ""
 
+  if [ "$test_cdn" -eq 1 ]; then
+    wait_route_background
+  fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
-    echo
-    collect_speedtest_results
+    start_speedtest_background 0 0 "${SPEEDTEST_RATES[@]}"
+    wait_speedtest_background
   fi
-
-  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
-  sorted_v4=$(mktemp)
-  sorted_v6=$(mktemp)
-  sorted_cernet=$(mktemp)
-  sorted_cernet2=$(mktemp)
-  route_labels_v4=$(mktemp)
-  route_labels_v6=$(mktemp)
-  if [ "$test_cdn" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
-    collect_route_labels 4 "$route_labels_v4"
-  fi
-  if [ "$test_cdn" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
-    collect_route_labels 6 "$route_labels_v6"
-  fi
+  show_progress
+  printf '\n'
 
   # 收集结果并写入 CSV
   local report_time
