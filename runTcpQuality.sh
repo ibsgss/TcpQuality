@@ -2206,16 +2206,13 @@ main() {
   route_labels_v4=$(mktemp)
   route_labels_v6=$(mktemp)
 
-  # Speedtest 会显著占用链路，必须在延迟重传与回程识别完成后才启动。
+  # 三个阶段严格串行，避免路由与测速流量影响延迟重传结果。
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$((${#SPEEDTEST_RATES[@]} * 3))
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
-  if [ "$test_cdn" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled"
-  fi
 
   local idx=0
   show_progress
@@ -2267,6 +2264,7 @@ main() {
   show_progress
 
   if [ "$test_cdn" -eq 1 ]; then
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled"
     wait_route_background
   fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
