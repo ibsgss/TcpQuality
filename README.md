@@ -32,6 +32,8 @@ https://tcpquality.ibsgss.uk/r/3-xsaeoJDH
 - `-v6`、`--v6`：仅探测 IPv6。
 - `--cernet`：仅探测 CERNET IPv4 和 CERNET2 IPv6。
 - `--all`：检测三网、CERNET 和 CERNET2；出现 `--all` 时会探测全部可用 IP 协议。
+- `--speedtest`：完成 TCP 质量探测后，追加国内电信、联通、移动分阶段 Speedtest 测速。
+- `--only-speedtest`：仅运行国内电信、联通、移动分阶段 Speedtest 测速。
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
@@ -39,8 +41,8 @@ https://tcpquality.ibsgss.uk/r/3-xsaeoJDH
 
 <a href="https://www.star-history.com/?repos=ibsgss%2FTcpQuality&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&theme=dark&legend=top-left&sealed_token=A3YyowntRSKZ_NbwvTOWzEXc-QcSMqDRnPoJPKWRWCDwwadAUjPLojLmw-nkzF5qkm9TPmLslytK3jUjOirUH3O7n0RhHYa5EirQ6o4v4fY4iGRkPC2BYGL6QwTuhA9zv_Otf6suwUroKXsIzRHUwuCsOJGSTpJWPx5l5sbBOJ9Nvk9C_jVFPUy0jOdz" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=A3YyowntRSKZ_NbwvTOWzEXc-QcSMqDRnPoJPKWRWCDwwadAUjPLojLmw-nkzF5qkm9TPmLslytK3jUjOirUH3O7n0RhHYa5EirQ6o4v4fY4iGRkPC2BYGL6QwTuhA9zv_Otf6suwUroKXsIzRHUwuCsOJGSTpJWPx5l5sbBOJ9Nvk9C_jVFPUy0jOdz" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=A3YyowntRSKZ_NbwvTOWzEXc-QcSMqDRnPoJPKWRWCDwwadAUjPLojLmw-nkzF5qkm9TPmLslytK3jUjOirUH3O7n0RhHYa5EirQ6o4v4fY4iGRkPC2BYGL6QwTuhA9zv_Otf6suwUroKXsIzRHUwuCsOJGSTpJWPx5l5sbBOJ9Nvk9C_jVFPUy0jOdz" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&theme=dark&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
  </picture>
 </a>
