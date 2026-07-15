@@ -9,6 +9,97 @@
 
 set -e
 
+# ===================== NixOS 临时运行环境 =====================
+is_nixos() {
+  [ -e /etc/NIXOS ] || {
+    [ -r /etc/os-release ] && grep -Eq '^ID=(nixos|"nixos")$' /etc/os-release
+  }
+}
+
+bootstrap_nixos_environment() {
+  local arg need_speedtest=0 temp_script
+  local -a nix_packages
+
+  is_nixos || return 0
+  [ "${TCPQUALITY_NIX_BOOTSTRAPPED:-0}" -eq 1 ] && return 0
+
+  # 帮助信息本身不需要拉取任何依赖。
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) return 0 ;;
+      --speedtest|--only-speedtest) need_speedtest=1 ;;
+    esac
+  done
+
+  if ! command -v nix >/dev/null 2>&1; then
+    echo '[X] 当前系统是 NixOS，但没有找到 nix 命令。' >&2
+    exit 1
+  fi
+  if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+    echo '[X] 裸 TCP SYN 探测需要 root；请使用 root 运行，或先启用 sudo。' >&2
+    exit 1
+  fi
+
+  # 兼容 `bash <(curl ...)`：/dev/fd 路径跨 exec 后可能失效，因此先复制脚本。
+  temp_script=$(mktemp /tmp/tcpquality-nixos.XXXXXX.sh)
+  cat "$0" > "$temp_script"
+  chmod 0755 "$temp_script"
+  trap 'rm -f -- "$temp_script"' EXIT
+
+  nix_packages=(
+    nixpkgs#bash
+    nixpkgs#coreutils
+    nixpkgs#curl
+    nixpkgs#findutils
+    nixpkgs#gawk
+    nixpkgs#gnugrep
+    nixpkgs#gnused
+    nixpkgs#iproute2
+    nixpkgs#iputils
+    nixpkgs#jq
+    nixpkgs#kmod
+    nixpkgs#ncurses
+    nixpkgs#nmap
+    nixpkgs#traceroute
+  )
+  if [ "$need_speedtest" -eq 1 ]; then
+    # 官方 Ookla CLI 在 nixpkgs 中是 unfree 包，仅测速模式加载。
+    nix_packages+=(nixpkgs#ookla-speedtest)
+  fi
+
+  echo '[i] NixOS：正在进入临时 Nix 环境（不会修改 systemPackages）...'
+
+  if [ "$(id -u)" -eq 0 ]; then
+    exec env \
+      TCPQUALITY_NIX_BOOTSTRAPPED=1 \
+      TCPQUALITY_NIX_TEMP_SCRIPT="$temp_script" \
+      NIXPKGS_ALLOW_UNFREE=1 \
+      nix --extra-experimental-features 'nix-command flakes' \
+        shell --impure "${nix_packages[@]}" \
+        --command bash "$temp_script" "$@"
+  fi
+
+  # 先以普通用户构建/进入 nix shell，再只把实际探测进程提权；显式保留
+  # Nix shell 生成的 PATH，否则 sudo 的 secure_path 会再次丢失这些工具。
+  exec env NIXPKGS_ALLOW_UNFREE=1 \
+    nix --extra-experimental-features 'nix-command flakes' \
+      shell --impure "${nix_packages[@]}" \
+      --command bash -c '
+        exec sudo env \
+          "PATH=$PATH" \
+          "TERM=${TERM:-dumb}" \
+          "LANG=${LANG:-C.UTF-8}" \
+          "GET_NODES_URL=${GET_NODES_URL:-}" \
+          "TCPQUALITY_REPORT_API=${TCPQUALITY_REPORT_API:-}" \
+          TCPQUALITY_NIX_BOOTSTRAPPED=1 \
+          "TCPQUALITY_NIX_TEMP_SCRIPT=$1" \
+          NIXPKGS_ALLOW_UNFREE=1 \
+          bash "$1" "${@:2}"
+      ' bash "$temp_script" "$@"
+}
+
+bootstrap_nixos_environment "$@"
+
 # ===================== 颜色定义 =====================
 RED='\033[0;31m';    GREEN='\033[0;32m';    YELLOW='\033[0;33m'
 BLUE='\033[0;34m';   CYAN='\033[0;36m';     MAGENTA='\033[0;35m'
@@ -49,6 +140,11 @@ clear_dependency_install_notice() {
 
 install_with_package_manager() {
   local dep="$1"
+
+  if is_nixos; then
+    echo -e "${RED}[X] NixOS 不应在脚本内调用传统包管理器：缺少 ${dep}${NC}" >&2
+    return 1
+  fi
   local apt_pkg="$2"
   local dnf_pkg="$3"
   local yum_pkg="$4"
@@ -91,6 +187,11 @@ check_command() {
   if command -v "$cmd" &>/dev/null; then
     return 0
   fi
+  if is_nixos; then
+    echo -e "${RED}[X] Nix 临时环境中没有找到 ${desc}（命令：${cmd}）${NC}" >&2
+    echo -e "${DIM}    请确认 nixpkgs 中对应软件包仍可用，或使用 --debug 排查。${NC}" >&2
+    exit 1
+  fi
   show_dependency_install_notice
   if install_with_package_manager "$desc" "$apt_pkg" "$dnf_pkg" "$yum_pkg" "$apk_pkg" "$pacman_pkg" "$brew_pkg" && command -v "$cmd" &>/dev/null; then
     clear_dependency_install_notice
@@ -108,6 +209,10 @@ check_curl() {
 check_nping() {
   if command -v nping &>/dev/null; then
     return 0
+  fi
+  if is_nixos; then
+    echo -e "${RED}[X] nixpkgs#nmap 环境中没有找到 nping${NC}" >&2
+    exit 1
   fi
   show_dependency_install_notice
   if command -v apk &>/dev/null; then
@@ -176,6 +281,9 @@ cleanup_result_dir() {
   else
     rm -rf "$RESULT_DIR"
   fi
+  case "${TCPQUALITY_NIX_TEMP_SCRIPT:-}" in
+    /tmp/tcpquality-nixos.*.sh) rm -f -- "$TCPQUALITY_NIX_TEMP_SCRIPT" ;;
+  esac
 }
 trap cleanup_result_dir EXIT
 
@@ -368,6 +476,10 @@ TcpQuality 节点 TCP 丢包探测脚本
 用法:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) [选项]
 
+NixOS:
+  脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
+  使用 --speedtest/--only-speedtest 时会临时加载 unfree 的 ookla-speedtest。
+
 选项:
   -h, --help        显示帮助信息并退出
   -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
@@ -398,6 +510,7 @@ TcpQuality 节点 TCP 丢包探测脚本
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
+  - NixOS:          无需安装，脚本自动进入临时 nix shell
   - Debian/Ubuntu: apt-get install -y curl nmap traceroute
   - RHEL/Fedora:   dnf install -y curl nmap traceroute
   - Alpine Linux:  apk add curl nmap-nping traceroute
@@ -1638,6 +1751,10 @@ speedtest_dependencies_ready() {
 }
 
 install_speedtest_dependencies() {
+  if is_nixos; then
+    echo -e "${RED}[X] Nix 临时环境中的 Speedtest 依赖不完整${NC}" >&2
+    return 1
+  fi
   show_dependency_install_notice
   if command -v apt-get &>/dev/null; then
     $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
@@ -1669,6 +1786,10 @@ is_ookla_speedtest() {
 
 install_ookla_speedtest() {
   local installer
+  if is_nixos; then
+    echo -e "${RED}[X] 未找到 Ookla Speedtest；请直接使用 --speedtest 重新运行脚本${NC}" >&2
+    return 1
+  fi
   show_dependency_install_notice
 
   if command -v apt-get &>/dev/null; then
