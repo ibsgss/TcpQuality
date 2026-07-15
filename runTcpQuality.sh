@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # TcpQuality 节点 TCP 丢包探测脚本
 # 用法: bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
@@ -479,7 +479,6 @@ TcpQuality 节点 TCP 丢包探测脚本
 NixOS:
   脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
   使用 --speedtest/--only-speedtest 时会临时加载 unfree 的 ookla-speedtest。
-  已启用 sudo 时会自动提权
 
 选项:
   -h, --help        显示帮助信息并退出
@@ -519,7 +518,7 @@ NixOS:
   - macOS:         brew install curl nmap traceroute
 
 说明:
-  发送裸 TCP SYN 包通常需要 root 权限；请切换到 root 用户后运行。对于 NixOS 则已启用 sudo 时会自动提权
+  发送裸 TCP SYN 包通常需要 root 权限；请切换到 root 用户后运行。
 EOF
 }
 
