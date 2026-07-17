@@ -259,6 +259,7 @@ ONLY_IPV4=0
 ONLY_IPV6=0
 ROUTE_MODE=0
 ROUTE_PROTOCOL="tcp"
+ROUTE_ACTIVE_PREFIX=""
 SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
@@ -491,6 +492,9 @@ NixOS:
   -v6, --v6         仅探测 IPv6
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
   --all             探测三网、CERNET 和 CERNET2
+  --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
+  --route-protocol PROTO
+                    设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
   --speedtest       追加国内三网分阶段 Speedtest（避免影响延迟探测）
   --only-speedtest  仅运行国内三网分阶段 Speedtest
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
@@ -500,6 +504,7 @@ NixOS:
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -bj -v4 --cernet
+  bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) --route --debug
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) --speedtest
 
 依赖:
@@ -568,6 +573,19 @@ parse_args() {
       --all)
         TEST_ALL=1
         shift
+        ;;
+      --route)
+        ROUTE_MODE=1
+        UPLOAD_REPORT=0
+        shift
+        ;;
+      --route-protocol)
+        if [ -z "${2:-}" ] || { [ "$2" != "tcp" ] && [ "$2" != "udp" ] && [ "$2" != "both" ]; }; then
+          echo -e "${RED}[X] --route-protocol 只支持 tcp、udp、both${NC}" >&2
+          exit 1
+        fi
+        ROUTE_PROTOCOL="$2"
+        shift 2
         ;;
       --speedtest)
         SPEEDTEST_ENABLED=1
@@ -638,7 +656,11 @@ bar() {
 
 count_results() {
   if [ "${ROUTE_MODE:-0}" -eq 1 ]; then
-    find "$RESULT_DIR" -type f -name 'route_[0-9]*' 2>/dev/null | wc -l | tr -d ' '
+    if [ -n "${ROUTE_ACTIVE_PREFIX:-}" ]; then
+      find "$RESULT_DIR" -type f -name "${ROUTE_ACTIVE_PREFIX}_[0-9]*" 2>/dev/null | wc -l | tr -d ' '
+    else
+      find "$RESULT_DIR" -type f \( -name 'route4_[0-9]*' -o -name 'route6_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
+    fi
   else
     find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'cdn4_[0-9]*' -o -name 'cdn6_[0-9]*' -o -name 'cernet_[0-9]*' -o -name 'cernet2_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
   fi
@@ -748,7 +770,7 @@ show_provider_summary() {
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     label_w = 10
-    route_w = 8
+    route_w = 10
     latency_w = 6
     loss_w = 6
     summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
@@ -1277,6 +1299,9 @@ route_label_from_ip_trace() {
     function is_ctgnet_ip(ip) {
       return ip ~ /^203\.22\.182\./ || ip ~ /^203\.22\.178\./ || ip ~ /^203\.22\.179\./ || ip ~ /^203\.128\.224\./ || ip ~ /^69\.194\./ || ip ~ /^2400:9380:/
     }
+    function is_ctgnet_transit_ip(ip) {
+      return is_ctgnet_ip(ip)
+    }
     function is_163_ip(ip) {
       return ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./ || ip ~ /^240e:/
     }
@@ -1284,10 +1309,10 @@ route_label_from_ip_trace() {
       return ip ~ /^218\.30\./ || ip ~ /^145\.14\./ || ip ~ /^5\.154\./
     }
     function is_oversea_10099_ip(ip) {
-      return ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.3[2-9]\./ || ip ~ /^2401:8a00:/
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.3[2-9]\./ || ip ~ /^202\.77\.23\./ || ip ~ /^2401:8a00:/
     }
-    function is_mainland_10099_entry_ip(ip) {
-      return ip ~ /^162\.219\.85\./ || ip ~ /^203\.160\.75\./
+    function is_10099_entry_ip(ip) {
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./ || ip ~ /^2401:8a00:/
     }
     function is_oversea_cn2_ip(ip) {
       return ip ~ /^2605:9d80:/
@@ -1298,6 +1323,32 @@ route_label_from_ip_trace() {
     function is_unicom_backbone_asn(asn) {
       return asn == "9929" || asn == "4837" || asn == "4808"
     }
+    function is_unicom_access_asn(asn) {
+      return asn == "136958" || asn == "140979"
+    }
+    function unicom_domestic_label_from_hop(first,   h, has_4837) {
+      for (h = first + 1; h <= max_hop; h++) {
+        if (asns[h] == "9929" || ips[h] ~ /^210\.14\./ || ips[h] ~ /^210\.51\./ || ips[h] ~ /^210\.78\./ || ips[h] ~ /^218\.105\./) return "9929"
+        if (asns[h] == "4837" || asns[h] == "4808" || is_unicom_access_asn(asns[h]) || ips[h] ~ /^219\.158\./ || ips[h] ~ /^2408:/) has_4837 = 1
+      }
+      if (has_4837) return "4837"
+      return ""
+    }
+    function unicom_route_combo_label(   h, first_unicom, domestic) {
+      for (h = 1; h <= max_hop; h++) {
+        if (asns[h] == "10099" && is_10099_entry_ip(ips[h])) {
+          first_unicom = h
+          domestic = unicom_domestic_label_from_hop(h)
+          if (domestic != "") return "10099-" domestic
+          return "10099"
+        }
+        if (is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h])) {
+          first_unicom = h
+          break
+        }
+      }
+      return unicom_domestic_label_from_hop(first_unicom - 1)
+    }
     function has_unicom_downstream(first,   h) {
       if (first <= 0) return 0
       for (h = first + 1; h <= max_hop; h++) {
@@ -1307,7 +1358,7 @@ route_label_from_ip_trace() {
     }
     function has_10099_entry_to_unicom(   h) {
       for (h = 1; h <= max_hop; h++) {
-        if (asns[h] == "10099" && is_mainland_10099_entry_ip(ips[h]) && has_unicom_downstream(h)) return 1
+        if (asns[h] == "10099" && is_10099_entry_ip(ips[h]) && has_unicom_downstream(h)) return 1
       }
       return 0
     }
@@ -1330,15 +1381,16 @@ route_label_from_ip_trace() {
       return 0
     }
     function is_mainland_backbone_hop(asn, ip) {
-      if (asn == "10099") return is_mainland_10099_entry_ip(ip)
+      if (asn == "10099") return is_10099_entry_ip(ip)
       if (asn == "9929" || asn == "4837" || asn == "4808") return 1
       if (asn == "4809") return !is_oversea_cn2_ip(ip)
       if (asn == "4134") return is_163_ip(ip)
-      if (asn == "4847" || asn == "23764") return 1
+      if (asn == "4847") return 1
+      if (asn == "23764" || is_ctgnet_ip(ip)) return !is_ctgnet_transit_ip(ip)
       if (asn == "58807" || asn == "58453" || asn == "9808") return 1
       if (asn ~ /^5604[0-8]$/) return 1
       if (asn == "23911" || asn == "23910" || asn == "4538" || asn == "7497") return 1
-      if (is_ctgnet_ip(ip) || is_163_ip(ip)) return 1
+      if (is_163_ip(ip)) return 1
       return 0
     }
     function label_from_mainland_hop(hop, asn, ip,   h) {
@@ -1347,10 +1399,7 @@ route_label_from_ip_trace() {
       if (asn == "4837" || asn == "4808") return "4837"
       if (asn == "4134" && is_163_ip(ip)) return "163"
       if (asn == "4847" || is_163_ip(ip)) return "163"
-      if (asn == "23764" || is_ctgnet_ip(ip)) {
-        if (has_163_after(hop)) return "163"
-        return "CTGGIA"
-      }
+      if (asn == "23764" || is_ctgnet_ip(ip)) return ""
       if (asn == "4809") {
         if (has_cn2_to_163(hop)) return "CN2GT"
         for (h = hop; h <= max_hop; h++) {
@@ -1365,8 +1414,9 @@ route_label_from_ip_trace() {
       if (asn == "7497") return "CSTNET"
       return ""
     }
-    function classify(   hop, label, first_cn2, has_ctgnet, has_cn2) {
+    function classify(   hop, label, first_cn2, has_ctgnet, has_cn2, has_v6) {
       for (hop = 1; hop <= max_hop; hop++) {
+        if (ips[hop] ~ /:/) has_v6 = 1
         if (asns[hop] == "23764" || is_ctgnet_ip(ips[hop])) has_ctgnet = 1
         if (ips[hop] ~ /^59\.43\./) {
           has_cn2 = 1
@@ -1378,7 +1428,8 @@ route_label_from_ip_trace() {
         if (has_ctgnet) return "CTGGIA"
         return "CN2GIA"
       }
-      if (has_10099_entry_to_unicom()) return "10099"
+      label = unicom_route_combo_label()
+      if (label != "") return label
       for (hop = 1; hop <= max_hop; hop++) {
         if (!is_mainland_backbone_hop(asns[hop], ips[hop])) continue
         label = label_from_mainland_hop(hop, asns[hop], ips[hop])
@@ -1522,7 +1573,7 @@ show_route_results() {
 }
 
 run_route_mode() {
-  local family=4 idx=0 entry prov isp host protocol route_raw_file route_file ip_file cymru_file asn_map_file
+  local family="${1:-4}" idx=0 entry prov isp host protocol route_raw_file route_file ip_file cymru_file asn_map_file prefix
   local route_parallel="$PARALLEL"
   local -a protocols=()
   if [ "$ROUTE_PROTOCOL" = "both" ]; then
@@ -1530,12 +1581,24 @@ run_route_mode() {
   else
     protocols=("$ROUTE_PROTOCOL")
   fi
+  prefix="route${family}"
+  ROUTE_ACTIVE_PREFIX="$prefix"
 
   check_curl
-  require_remote_nodes v4
+  require_remote_nodes "v${family}"
   check_traceroute
-  if ! ipv4_available; then
-    echo -e "${RED}[X] 未检测到可用 IPv4，暂不执行线路识别${NC}"
+  if [ "$family" = "6" ]; then
+    if ! ipv6_available; then
+      echo -e "${YELLOW}[!] 未检测到可用 IPv6，已跳过 IPv6 线路识别${NC}"
+      return 0
+    fi
+  elif ! ipv4_available; then
+    echo -e "${YELLOW}[!] 未检测到可用 IPv4，已跳过 IPv4 线路识别${NC}"
+    return 0
+  fi
+
+  if [ "$family" != "4" ] && [ "$family" != "6" ]; then
+    echo -e "${RED}[X] 线路识别 family 只支持 4 或 6${NC}"
     exit 1
   fi
 
@@ -1546,6 +1609,7 @@ run_route_mode() {
     echo -e "${RED}[X] 指定省份没有可执行的线路检测任务${NC}"
     exit 1
   fi
+  echo -e "${CYAN}  IPv${family} 三网回程线路识别${NC}"
   echo -e "${DIM}  检测范围: $(province_filter_text)  线路检测节点: $TOTAL  协议: $ROUTE_PROTOCOL  并行: $route_parallel${NC}"
   echo -e "${YELLOW}  [!] 线路检测使用 traceroute，本地探测完成后批量查询 Team Cymru ASN。${NC}"
   echo ""
@@ -1560,7 +1624,7 @@ run_route_mode() {
         sleep 0.2
       done
       port=${port:-80}
-      route_trace_one "$family" "$protocol" "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" &
+      route_trace_one "$family" "$protocol" "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
       show_progress
     done < <(print_cdn_entries "$family")
   done
@@ -1578,8 +1642,8 @@ run_route_mode() {
   cymru_file=$(mktemp)
   asn_map_file=$(mktemp)
   for idx in $(seq 1 "$TOTAL"); do
-    [ -f "${RESULT_DIR}/route_${idx}" ] && cat "${RESULT_DIR}/route_${idx}" >> "$route_raw_file"
-    [ -f "${RESULT_DIR}/route_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/route_trace_${idx}" >> "$ip_file"
+    [ -f "${RESULT_DIR}/${prefix}_${idx}" ] && cat "${RESULT_DIR}/${prefix}_${idx}" >> "$route_raw_file"
+    [ -f "${RESULT_DIR}/${prefix}_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${idx}" >> "$ip_file"
   done
   sort -u "$ip_file" -o "$ip_file" 2>/dev/null || true
 
@@ -1589,17 +1653,17 @@ run_route_mode() {
   fi
 
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    cp "$route_raw_file" "${RESULT_DIR}/route_raw.txt"
-    cp "$ip_file" "${RESULT_DIR}/route_ips.txt"
-    cp "$cymru_file" "${RESULT_DIR}/route_cymru.txt"
-    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map.txt"
+    cp "$route_raw_file" "${RESULT_DIR}/${prefix}_raw.txt"
+    cp "$ip_file" "${RESULT_DIR}/${prefix}_ips.txt"
+    cp "$cymru_file" "${RESULT_DIR}/${prefix}_cymru.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/${prefix}_asn_map.txt"
   fi
 
   while IFS='|' read -r status prov isp protocol host value; do
-    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/route_trace_${value}" ]; then
-      trace_ip_file="${RESULT_DIR}/route_trace_${value}.ips"
-      extract_trace_ips "${RESULT_DIR}/route_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/route_trace_${value}" "$asn_map_file" "$trace_ip_file")
+    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
+      trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
+      extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
       echo "OK|$prov|$isp|$protocol|$host|$label" >> "$route_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|$protocol|$host|$value" >> "$route_file"
@@ -1607,17 +1671,13 @@ run_route_mode() {
   done < "$route_raw_file"
 
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    cp "$route_file" "${RESULT_DIR}/route_final.txt"
+    cp "$route_file" "${RESULT_DIR}/${prefix}_final.txt"
   fi
 
-  clear
-  print_header
-  echo -e "  ${DIM}报告时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')${NC}"
   echo ""
   show_route_results "$route_file"
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    echo -e "  ${DIM}Debug: traces=$(ls "${RESULT_DIR}"/route_trace_* 2>/dev/null | wc -l | tr -d ' ') ips=$(wc -l < "$ip_file" | tr -d ' ') cymru=$(grep -c '|' "$cymru_file" 2>/dev/null || echo 0) asn_map=$(wc -l < "$asn_map_file" | tr -d ' ')${NC}"
-    echo -e "  ${DIM}Debug 目录：$RESULT_DIR${NC}"
+    echo -e "  ${DIM}Debug IPv${family}: traces=$(ls "${RESULT_DIR}"/${prefix}_trace_* 2>/dev/null | wc -l | tr -d ' ') ips=$(wc -l < "$ip_file" | tr -d ' ') cymru=$(grep -c '|' "$cymru_file" 2>/dev/null || echo 0) asn_map=$(wc -l < "$asn_map_file" | tr -d ' ')${NC}"
     echo ""
   fi
   rm -f "$route_raw_file" "$route_file" "$ip_file" "$cymru_file" "$asn_map_file"
@@ -2549,7 +2609,18 @@ main() {
   if [ "$ROUTE_MODE" -eq 1 ]; then
     check_curl
     detect_ip_stack
-    run_route_mode
+    echo -e "  ${DIM}报告时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')${NC}"
+    echo ""
+    if [ "$ONLY_IPV6" -ne 1 ]; then
+      run_route_mode 4
+    fi
+    if [ "$ONLY_IPV4" -ne 1 ]; then
+      run_route_mode 6
+    fi
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      echo -e "  ${DIM}Debug 目录：$RESULT_DIR${NC}"
+      echo ""
+    fi
     exit 0
   fi
 
