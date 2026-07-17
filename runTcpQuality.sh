@@ -246,6 +246,7 @@ require_raw_socket_privilege() {
 # 节点域名、真实 IP 与端口统一由 GET_NODES_URL 提供，脚本不再内置探测节点或备用节点。
 
 PACKETS=30
+MAX_PACKETS=600
 PACKET_SIZES=(40 80 160 320 640 1200)
 # 默认使用标准 TCP SYN，不携带数据；仅在显式指定 -s/--size 时构造指定长度报文。
 PACKET_SIZE_OVERRIDE="0"
@@ -481,7 +482,7 @@ NixOS:
 
 选项:
   -h, --help        显示帮助信息并退出
-  -c, --count NUM   设置每节点发包数，默认 ${PACKETS}
+  -c, --count NUM   设置每节点发包数，范围 1-${MAX_PACKETS}，默认 ${PACKETS}
   -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；默认 0
                      小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
@@ -529,8 +530,8 @@ parse_args() {
         exit 0
         ;;
       -c|--count)
-        if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 1 ]; then
-          echo -e "${RED}[X] 发包数必须是大于 0 的整数${NC}" >&2
+        if [ -z "${2:-}" ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -lt 1 ] || [ "$2" -gt "$MAX_PACKETS" ]; then
+          echo -e "${RED}[X] 发包数必须是 1-${MAX_PACKETS} 之间的整数${NC}" >&2
           exit 1
         fi
         PACKETS="$2"
@@ -1197,6 +1198,7 @@ extract_trace_ips() {
       if (ip ~ /^::1$/ || ip ~ /^fe80:/ || ip ~ /^fc/ || ip ~ /^fd/) return 0
       return 1
     }
+    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ { next }
     {
       for (i = 1; i <= NF; i++) {
         field = $i
@@ -1259,7 +1261,8 @@ route_label_from_ip_trace() {
       if (ip ~ /^2408:/) return "4837"
       if (ip ~ /^223\.120\./ || ip ~ /^223\.119\./) return "58453"
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./) return "9808"
-      if (ip ~ /^162\.219\.85\./ || ip ~ /^118\.26\.151\./) return "10099"
+      if (ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^118\.26\.151\./ || ip ~ /^203\.160\.75\./) return "10099"
+      if (ip ~ /^2401:8a00:/) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./) return "9929"
       if (ip ~ /^59\.64\./ || ip ~ /^101\.4\./ || ip ~ /^101\.76\./ || ip ~ /^111\.114\./ || ip ~ /^113\.54\./ || ip ~ /^115\.24\./ || ip ~ /^115\.156\./ || ip ~ /^183\.172\./ || ip ~ /^202\.38\.19/ || ip ~ /^202\.112\./ || ip ~ /^202\.113\./ || ip ~ /^202\.114\./ || ip ~ /^202\.115\./ || ip ~ /^202\.116\./ || ip ~ /^202\.117\./ || ip ~ /^202\.118\./ || ip ~ /^202\.119\./ || ip ~ /^202\.120\./ || ip ~ /^202\.194\./ || ip ~ /^202\.196\./ || ip ~ /^202\.197\./ || ip ~ /^202\.198\./ || ip ~ /^202\.200\./ || ip ~ /^202\.201\./ || ip ~ /^202\.202\./ || ip ~ /^202\.207\./ || ip ~ /^210\.2[6-9]\./ || ip ~ /^210\.3[0-9]\./ || ip ~ /^210\.4[0-7]\./ || ip ~ /^219\.22[4-9]\./ || ip ~ /^222\.(1[6-9]|2[0-3])\./ || ip ~ /^222\.19[2-9]\./ || ip ~ /^222\.20[0-7]\./) return "4538"
       if (ip ~ /^2001:252:/) return "23911"
@@ -1275,26 +1278,117 @@ route_label_from_ip_trace() {
       return ip ~ /^203\.22\.182\./ || ip ~ /^203\.22\.178\./ || ip ~ /^203\.22\.179\./ || ip ~ /^203\.128\.224\./ || ip ~ /^69\.194\./ || ip ~ /^2400:9380:/
     }
     function is_163_ip(ip) {
-      return ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./
+      return ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./ || ip ~ /^240e:/
     }
-    function classify(   hop, first_cn2, has_ctgnet, has_cn2) {
+    function is_oversea_163_ip(ip) {
+      return ip ~ /^218\.30\./ || ip ~ /^145\.14\./ || ip ~ /^5\.154\./
+    }
+    function is_oversea_10099_ip(ip) {
+      return ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.3[2-9]\./ || ip ~ /^2401:8a00:/
+    }
+    function is_mainland_10099_entry_ip(ip) {
+      return ip ~ /^162\.219\.85\./ || ip ~ /^203\.160\.75\./
+    }
+    function is_oversea_cn2_ip(ip) {
+      return ip ~ /^2605:9d80:/
+    }
+    function is_unicom_backbone_ip(ip) {
+      return ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./ || ip ~ /^219\.158\./ || ip ~ /^2408:/
+    }
+    function is_unicom_backbone_asn(asn) {
+      return asn == "9929" || asn == "4837" || asn == "4808"
+    }
+    function has_unicom_downstream(first,   h) {
+      if (first <= 0) return 0
+      for (h = first + 1; h <= max_hop; h++) {
+        if (is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h])) return 1
+      }
+      return 0
+    }
+    function has_10099_entry_to_unicom(   h) {
+      for (h = 1; h <= max_hop; h++) {
+        if (asns[h] == "10099" && is_mainland_10099_entry_ip(ips[h]) && has_unicom_downstream(h)) return 1
+      }
+      return 0
+    }
+    function has_163_after(first,   h) {
+      if (first <= 0) return 0
+      for (h = first + 1; h <= max_hop; h++) {
+        if (asns[h] == "4134" || is_163_ip(ips[h])) return 1
+      }
+      return 0
+    }
+    function has_cn2_to_163(first,   h, n) {
+      if (first <= 0) return 0
+      for (h = first; h <= max_hop; h++) {
+        if (ips[h] !~ /^59\.43\.245\./) continue
+        for (n = h + 1; n <= max_hop; n++) {
+          if (ips[n] ~ /^59\.43\./) continue
+          return is_163_ip(ips[n])
+        }
+      }
+      return 0
+    }
+    function is_mainland_backbone_hop(asn, ip) {
+      if (asn == "10099") return is_mainland_10099_entry_ip(ip)
+      if (asn == "9929" || asn == "4837" || asn == "4808") return 1
+      if (asn == "4809") return !is_oversea_cn2_ip(ip)
+      if (asn == "4134") return is_163_ip(ip)
+      if (asn == "4847" || asn == "23764") return 1
+      if (asn == "58807" || asn == "58453" || asn == "9808") return 1
+      if (asn ~ /^5604[0-8]$/) return 1
+      if (asn == "23911" || asn == "23910" || asn == "4538" || asn == "7497") return 1
+      if (is_ctgnet_ip(ip) || is_163_ip(ip)) return 1
+      return 0
+    }
+    function label_from_mainland_hop(hop, asn, ip,   h) {
+      if (asn == "10099") return "10099"
+      if (asn == "9929") return "9929"
+      if (asn == "4837" || asn == "4808") return "4837"
+      if (asn == "4134" && is_163_ip(ip)) return "163"
+      if (asn == "4847" || is_163_ip(ip)) return "163"
+      if (asn == "23764" || is_ctgnet_ip(ip)) {
+        if (has_163_after(hop)) return "163"
+        return "CTGGIA"
+      }
+      if (asn == "4809") {
+        if (has_cn2_to_163(hop)) return "CN2GT"
+        for (h = hop; h <= max_hop; h++) {
+          if (asns[h] == "23764" || is_ctgnet_ip(ips[h])) return "CTGGIA"
+        }
+        return "CN2GIA"
+      }
+      if (asn == "58807") return "CMIN2"
+      if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
+      if (asn == "23911" || asn == "23910") return "CERNET2"
+      if (asn == "4538") return "CERNET"
+      if (asn == "7497") return "CSTNET"
+      return ""
+    }
+    function classify(   hop, label, first_cn2, has_ctgnet, has_cn2) {
       for (hop = 1; hop <= max_hop; hop++) {
         if (asns[hop] == "23764" || is_ctgnet_ip(ips[hop])) has_ctgnet = 1
-        if (asns[hop] == "4809" || ips[hop] ~ /^59\.43\./) {
+        if (ips[hop] ~ /^59\.43\./) {
           has_cn2 = 1
           if (first_cn2 == 0) first_cn2 = hop
         }
       }
-      if (has_asn("58807")) return "CMIN2"
-      if (has_asn("23911")) return "CERNET2"
-      if (has_asn("10099")) return "10099"
-      if (has_asn("9929")) return "9929"
       if (has_cn2) {
+        if (has_cn2_to_163(first_cn2)) return "CN2GT"
         if (has_ctgnet) return "CTGGIA"
         return "CN2GIA"
       }
+      if (has_10099_entry_to_unicom()) return "10099"
+      for (hop = 1; hop <= max_hop; hop++) {
+        if (!is_mainland_backbone_hop(asns[hop], ips[hop])) continue
+        label = label_from_mainland_hop(hop, asns[hop], ips[hop])
+        if (label != "") return label
+      }
+      if (has_asn("58807")) return "CMIN2"
+      if (has_asn("23911")) return "CERNET2"
+      if (has_asn("9929")) return "9929"
       if (has_asn("4837") || has_asn("4808")) return "4837"
-      if (has_asn("4134") || has_asn("4847")) return "163"
+      if (has_asn("4847")) return "163"
       if (has_asn("58453") || has_asn("9808") || has_asn("56040") || has_asn("56041") || has_asn("56042") || has_asn("56044") || has_asn("56045") || has_asn("56046") || has_asn("56047") || has_asn("56048")) return "CMI"
       if (has_ctgnet || has_asn("23764")) return "CTGGIA"
       if (has_asn("23910")) return "CERNET2"
@@ -1317,6 +1411,7 @@ route_label_from_ip_trace() {
       add_asn(asn)
       next
     }
+    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ { next }
     {
       while (match($0, /[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/)) {
         ip = substr($0, RSTART, RLENGTH)
