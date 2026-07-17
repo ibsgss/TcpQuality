@@ -18,12 +18,11 @@ bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
 
 示例报告：
 
-- 线路检测：https://tcpquality.ibsgss.uk/r/kuUrB_da_I
-- 速度测试：https://tcpquality.ibsgss.uk/r/2yBMMkXuM_
+- https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj
 
-![TcpQuality 线路检测示例](https://tcpquality.ibsgss.uk/r/kuUrB_da_I.svg)
+![](https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj.png?section=ipv4)
 
-![TcpQuality 速度测试示例](https://tcpquality.ibsgss.uk/r/2yBMMkXuM_.svg)
+![](https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj.png?section=speedtest)
 
 ## 支持参数
 
