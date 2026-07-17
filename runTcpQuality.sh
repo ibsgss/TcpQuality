@@ -422,8 +422,8 @@ load_remote_nodes() {
     case "$type:$family" in
       cdn:4) REMOTE_CDN4_NODES+=("$prov|$isp|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-80}") ;;
       cdn:6) REMOTE_CDN6_NODES+=("$prov|$isp|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-80}") ;;
-      cernet:4) REMOTE_CERNET_NODES+=("$prov|$host|$ip|$port") ;;
-      cernet2:6) REMOTE_CERNET2_NODES+=("$prov|$host|$ip|$port") ;;
+      cernet:4) REMOTE_CERNET_NODES+=("$prov|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-443}") ;;
+      cernet2:6) REMOTE_CERNET2_NODES+=("$prov|$host|$ip|$port|$backup_host|$backup_ip|${backup_port:-443}") ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
@@ -431,7 +431,6 @@ load_remote_nodes() {
   if [ "${#REMOTE_CDN4_NODES[@]}" -gt 0 ] || [ "${#REMOTE_CDN6_NODES[@]}" -gt 0 ] ||
      [ "${#REMOTE_CERNET_NODES[@]}" -gt 0 ] || [ "${#REMOTE_CERNET2_NODES[@]}" -gt 0 ]; then
     REMOTE_NODES_LOADED=1
-    [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}  getNodes: 已加载远端节点 IP+端口（scope=${scope}）${NC}"
     return 0
   fi
   return 1
@@ -745,31 +744,71 @@ show_progress() {
 
 show_provider_summary() {
   local file="$1" route_file="${2:-}"
-  awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    label_w = 10
+    route_w = 8
+    latency_w = 6
+    loss_w = 6
+    summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
+  }
   function compact_loss(v) {
     return int(v + 0.5)
   }
-  function fail_cell() {
-    return red "failed     " nc
+  function center(text, width,   left, right) {
+    left = int((width - length(text)) / 2)
+    right = width - length(text) - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
   }
-  function latency_color(v) {
+  function center_display(text, width, display_width,   left, right) {
+    left = int((width - display_width) / 2)
+    right = width - display_width - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function header_align_latency(text,   left, right) {
+    left = route_w + 1 + latency_w - display_width(text)
+    right = summary_cell_w - route_w - 1 - latency_w
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function display_width(text) {
+    if (text == "三网概览") return 8
+    if (text == "教育网概览") return 10
+    if (text == "黑龙江" || text == "内蒙古") return 6
+    return 4
+  }
+  function label_cell(text,   pad) {
+    pad = label_w - display_width(text)
+    if (pad < 0) pad = 0
+    return text sprintf("%*s", pad, "")
+  }
+  function format_summary_cell(label, latency, loss, latency_color_value, loss_color_value) {
+    return white sprintf("%*s", route_w, label) nc " " latency_color_value sprintf("%*s", latency_w, latency) nc " " loss_color_value sprintf("%*s", loss_w, loss) nc
+  }
+  function latency_color(v, l) {
+    if (l >= 100) return red
     if (v > 240) return red
     if (v > 150) return yellow
     return green
+  }
+  function latency_text(v, l) {
+    if (l >= 100) return "-1ms"
+    return sprintf("%.0fms", v)
   }
   function loss_color(l) {
     if (l > 20) return red
     if (l > 0) return yellow
     return green
   }
-  function cell(status, loss, lat, rcv,   l, v, color) {
+  function cell(status, loss, lat, label,   l, v, latency, loss_text) {
+    if (label == "") label = "Hidden"
+    if (status != "OK") {
+      return format_summary_cell(label, "failed", "failed", red, red)
+    }
     l = loss + 0
     v = lat + 0
-    if (status != "OK") {
-      return fail_cell()
-    }
-
-    return latency_color(v) sprintf("%4.0fms", v) nc " " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
+    latency = latency_text(v, l)
+    loss_text = compact_loss(loss) "%"
+    return format_summary_cell(label, latency, loss_text, latency_color(v, l), loss_color(l))
   }
   function route_label(prov, isp) {
     return ((prov SUBSEP isp) in route) ? route[prov SUBSEP isp] : isp
@@ -786,18 +825,18 @@ show_provider_summary() {
     rcv = $7
     loss = $8
     lat = $9
+    label = route_label(prov, isp)
     if (!(prov in seen)) {
       seen[prov] = 1
       order[++n] = prov
     }
-    data[prov SUBSEP isp] = cell(status, loss, lat, rcv)
+    data[prov SUBSEP isp] = cell(status, loss, lat, label)
   }
   END {
-    printf "  %s%s三网概览%s %s(%s       电信       %s / %s       联通       %s / %s       移动       %s)%s\n", bold, cyan, nc, dim, cyan, dim, cyan, dim, cyan, dim, nc
+    printf "  %s%s%s%s  %s%s%s %s/ %s%s%s %s/ %s%s%s\n", bold, cyan, label_cell("三网概览"), nc, cyan, header_align_latency("电信"), nc, white, cyan, header_align_latency("联通"), nc, white, cyan, header_align_latency("移动"), nc
     for (i = 1; i <= n; i++) {
       prov = order[i]
-      prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
-      printf "  %s%s%s%s  %-6s %s / %-6s %s / %-6s %s\n", cyan, prov, nc, prov_pad, route_label(prov, "电信"), data[prov SUBSEP "电信"], route_label(prov, "联通"), data[prov SUBSEP "联通"], route_label(prov, "移动"), data[prov SUBSEP "移动"]
+      printf "  %s%s%s  %s %s/ %s %s/ %s\n", cyan, label_cell(prov), nc, data[prov SUBSEP "电信"], white, data[prov SUBSEP "联通"], white, data[prov SUBSEP "移动"]
     }
     printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
   }' "${route_file:-/dev/null}" "$file"
@@ -823,32 +862,39 @@ show_family_results() {
 
 show_education_results() {
   local title="$1" file="$2"
-  awk -F'|' -v title="$title" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  awk -F'|' -v title="$title" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   function compact_loss(v) {
     return int(v + 0.5)
   }
-  function latency_color(v) {
+  function latency_color(v, l) {
+    if (l >= 100) return red
     if (v > 240) return red
     if (v > 150) return yellow
     return green
+  }
+  function latency_text(v, l) {
+    if (l >= 100) return "-1ms"
+    return sprintf("%.0fms", v)
   }
   function loss_color(l) {
     if (l > 20) return red
     if (l > 0) return yellow
     return green
   }
-  function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "failed       " nc
+  function cell(status, loss, lat, label,   l, v, color) {
+    if (label == "") label = title
+    if (status != "OK") return white sprintf("%10s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
     l = loss + 0
     v = lat + 0
-    return latency_color(v) sprintf("%4.0fms", v) nc " / " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
+    return white sprintf("%10s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
   }
   {
     status = $1
     prov = $2
     loss = $8
     lat = $9
-    result[prov] = cell(status, loss, lat)
+    label = $10
+    result[prov] = cell(status, loss, lat, label)
     order[++n] = prov
     if (status != "OK") h++
     else if (int(loss + 0) == 0) z++
@@ -870,25 +916,58 @@ show_education_results() {
 
 show_education_combined() {
   local ipv4_file="$1" ipv6_file="$2"
-  awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    label_w = 10
+    route_w = 10
+    latency_w = 6
+    loss_w = 6
+    edu_cell_w = route_w + 1 + latency_w + 1 + loss_w
+  }
   function compact_loss(v) {
     return int(v + 0.5)
   }
-  function latency_color(v) {
+  function latency_color(v, l) {
+    if (l >= 100) return red
     if (v > 240) return red
     if (v > 150) return yellow
     return green
+  }
+  function latency_text(v, l) {
+    if (l >= 100) return "-1ms"
+    return sprintf("%.0fms", v)
   }
   function loss_color(l) {
     if (l > 20) return red
     if (l > 0) return yellow
     return green
   }
-  function cell(status, loss, lat,   l, v, color) {
-    if (status != "OK") return red "failed       " nc
+  function center(text, width,   left, right) {
+    left = int((width - length(text)) / 2)
+    right = width - length(text) - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function display_width(text) {
+    if (text == "教育网概览") return 10
+    if (text == "黑龙江" || text == "内蒙古") return 6
+    return 4
+  }
+  function label_cell(text,   pad) {
+    pad = label_w - display_width(text)
+    if (pad < 0) pad = 0
+    return text sprintf("%*s", pad, "")
+  }
+  function format_edu_cell(label, latency, loss, latency_color_value, loss_color_value) {
+    return white sprintf("%*s", route_w, label) nc " " latency_color_value sprintf("%*s", latency_w, latency) nc " " loss_color_value sprintf("%*s", loss_w, loss) nc
+  }
+  function cell(status, loss, lat, label, fallback,   l, v, latency, loss_text) {
+    if (label == "") label = fallback
+    if (status != "OK") return format_edu_cell(label, "failed", "failed", red, red)
     l = loss + 0
     v = lat + 0
-    return latency_color(v) sprintf("%4.0fms", v) nc " / " loss_color(l) sprintf("%4s", compact_loss(loss) "%") nc
+    latency = latency_text(v, l)
+    loss_text = compact_loss(loss) "%"
+    return format_edu_cell(label, latency, loss_text, latency_color(v, l), loss_color(l))
   }
   {
     generation = (FILENAME == ARGV[1]) ? 1 : 2
@@ -896,7 +975,9 @@ show_education_combined() {
     prov = $2
     loss = $8
     lat = $9
-    result[prov SUBSEP generation] = cell(status, loss, lat)
+    label = $10
+    fallback = "Hidden"
+    result[prov SUBSEP generation] = cell(status, loss, lat, label, fallback)
     if (!(prov in seen)) {
       seen[prov] = 1
       order[++n] = prov
@@ -910,11 +991,10 @@ show_education_combined() {
     printf "  %s%s教育网 CERNET-IPv4 和 CERNET2-IPv6 统计摘要%s\n", bold, cyan, nc
     printf "  CERNET-IPv4  %s零丢包:%3d%s  %s1-20%%:%3d%s  %s>20%%:%3d%s\n", green, z[1], nc, yellow, y[1], nc, red, h[1], nc
     printf "  CERNET2-IPv6 %s零丢包:%3d%s  %s1-20%%:%3d%s  %s>20%%:%3d%s\n\n", green, z[2], nc, yellow, y[2], nc, red, h[2], nc
-    printf "  %s%s教育网概览%s %s(CERNET-IPv4 | CERNET2-IPv6)%s\n", bold, cyan, nc, dim, nc
+    printf "  %s%s%s%s  %s%s%s %s/ %s%s%s\n", bold, cyan, label_cell("教育网概览"), nc, cyan, center("CERNET-IPv4", edu_cell_w), nc, white, cyan, center("CERNET2-IPv6", edu_cell_w), nc
     for (i = 1; i <= n; i++) {
       prov = order[i]
-      prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
-      printf "  %s%s%s%s  CERNET-IPv4 %s  CERNET2-IPv6 %s\n", cyan, prov, nc, prov_pad, result[prov SUBSEP 1], result[prov SUBSEP 2]
+      printf "  %s%s%s  %s %s/ %s\n", cyan, label_cell(prov), nc, result[prov SUBSEP 1], white, result[prov SUBSEP 2]
     }
     printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
   }' "$ipv4_file" "$ipv6_file"
@@ -1181,7 +1261,9 @@ route_label_from_ip_trace() {
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./) return "9808"
       if (ip ~ /^162\.219\.85\./ || ip ~ /^118\.26\.151\./) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./) return "9929"
-      if (ip ~ /^101\.4\./ || ip ~ /^202\.112\./) return "4538"
+      if (ip ~ /^59\.64\./ || ip ~ /^101\.4\./ || ip ~ /^101\.76\./ || ip ~ /^111\.114\./ || ip ~ /^113\.54\./ || ip ~ /^115\.24\./ || ip ~ /^115\.156\./ || ip ~ /^183\.172\./ || ip ~ /^202\.38\.19/ || ip ~ /^202\.112\./ || ip ~ /^202\.113\./ || ip ~ /^202\.114\./ || ip ~ /^202\.115\./ || ip ~ /^202\.116\./ || ip ~ /^202\.117\./ || ip ~ /^202\.118\./ || ip ~ /^202\.119\./ || ip ~ /^202\.120\./ || ip ~ /^202\.194\./ || ip ~ /^202\.196\./ || ip ~ /^202\.197\./ || ip ~ /^202\.198\./ || ip ~ /^202\.200\./ || ip ~ /^202\.201\./ || ip ~ /^202\.202\./ || ip ~ /^202\.207\./ || ip ~ /^210\.2[6-9]\./ || ip ~ /^210\.3[0-9]\./ || ip ~ /^210\.4[0-7]\./ || ip ~ /^219\.22[4-9]\./ || ip ~ /^222\.(1[6-9]|2[0-3])\./ || ip ~ /^222\.19[2-9]\./ || ip ~ /^222\.20[0-7]\./) return "4538"
+      if (ip ~ /^2001:252:/) return "23911"
+      if (ip ~ /^2001:da8:/ || ip ~ /^2001:250:/ || ip ~ /^2402:f000:/) return "23910"
       if (ip ~ /^159\.226\./) return "7497"
       return ""
     }
@@ -1204,6 +1286,7 @@ route_label_from_ip_trace() {
         }
       }
       if (has_asn("58807")) return "CMIN2"
+      if (has_asn("23911")) return "CERNET2"
       if (has_asn("10099")) return "10099"
       if (has_asn("9929")) return "9929"
       if (has_cn2) {
@@ -1214,6 +1297,7 @@ route_label_from_ip_trace() {
       if (has_asn("4134") || has_asn("4847")) return "163"
       if (has_asn("58453") || has_asn("9808") || has_asn("56040") || has_asn("56041") || has_asn("56042") || has_asn("56044") || has_asn("56045") || has_asn("56046") || has_asn("56047") || has_asn("56048")) return "CMI"
       if (has_ctgnet || has_asn("23764")) return "CTGGIA"
+      if (has_asn("23910")) return "CERNET2"
       if (has_asn("4538")) return "CERNET"
       if (has_asn("7497")) return "CSTNET"
       return "Hidden"
@@ -1502,27 +1586,115 @@ collect_route_labels() {
   rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
 }
 
+collect_education_route_labels() {
+  local family="$1" out_file="$2" idx=0 entry prov host fixed_ip port route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label prefix
+  local route_parallel="$PARALLEL"
+  prefix="edu_route${family}"
+  route_total=0
+  if [ "$family" = "6" ]; then
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
+      province_selected "$prov" && route_total=$((route_total + 1))
+    done < <(print_cernet2_entries)
+  else
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
+      province_selected "$prov" && route_total=$((route_total + 1))
+    done < <(print_cernet_entries)
+  fi
+  [ "$route_total" -eq 0 ] && return 0
+
+  if [ "$family" = "6" ]; then
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
+      province_selected "$prov" || continue
+      port=${port:-80}
+      idx=$((idx + 1))
+      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
+        sleep 0.2
+      done
+      route_trace_one "$family" tcp "$prov" "教育网" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
+    done < <(print_cernet2_entries)
+  else
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
+      province_selected "$prov" || continue
+      port=${port:-80}
+      idx=$((idx + 1))
+      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
+        sleep 0.2
+      done
+      route_trace_one "$family" tcp "$prov" "教育网" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
+    done < <(print_cernet_entries)
+  fi
+  wait
+
+  route_raw_file=$(mktemp)
+  ip_file=$(mktemp)
+  cymru_file=$(mktemp)
+  asn_map_file=$(mktemp)
+  for idx in $(seq 1 "$route_total"); do
+    [ -f "${RESULT_DIR}/${prefix}_${idx}" ] && cat "${RESULT_DIR}/${prefix}_${idx}" >> "$route_raw_file"
+    [ -f "${RESULT_DIR}/${prefix}_trace_${idx}" ] && extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${idx}" >> "$ip_file"
+  done
+  sort -u "$ip_file" -o "$ip_file" 2>/dev/null || true
+
+  if [ -s "$ip_file" ]; then
+    query_cymru_asn "$ip_file" "$cymru_file"
+    build_asn_map "$cymru_file" "$asn_map_file"
+  fi
+
+  while IFS='|' read -r status prov isp protocol host value; do
+    if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
+      trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
+      extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
+    elif [ -n "$status" ]; then
+      echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
+    fi
+  done < "$route_raw_file"
+
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$route_raw_file" "${RESULT_DIR}/edu_route_raw_v${family}.txt"
+    cp "$ip_file" "${RESULT_DIR}/edu_route_ips_v${family}.txt"
+    cp "$cymru_file" "${RESULT_DIR}/edu_route_cymru_v${family}.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/edu_route_asn_map_v${family}.txt"
+    cp "$out_file" "${RESULT_DIR}/edu_route_final_v${family}.txt"
+  fi
+
+  rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
+}
+
 set_route_progress_total() {
-  local has_v4="$1" has_v6="$2"
+  local has_v4="$1" has_v6="$2" include_cdn="${3:-1}" include_edu="${4:-0}"
   ROUTE_PROGRESS_TOTAL=0
-  if [ "$has_v4" -eq 1 ]; then
+  if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
     ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
   fi
-  if [ "$has_v6" -eq 1 ]; then
+  if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
     ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 6)))
+  fi
+  if [ "$include_edu" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_cernet_nodes)))
+  fi
+  if [ "$include_edu" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_cernet2_nodes)))
   fi
   return 0
 }
 
 start_route_background() {
-  local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4"
+  local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4" include_cdn="${5:-1}" include_edu="${6:-0}" edu_route_labels_v4="${7:-}" edu_route_labels_v6="${8:-}"
   [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ] || return 0
   (
-    if [ "$has_v4" -eq 1 ]; then
+    if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
       collect_route_labels 4 "$route_labels_v4"
     fi
-    if [ "$has_v6" -eq 1 ]; then
+    if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
       collect_route_labels 6 "$route_labels_v6"
+    fi
+    if [ "$include_edu" -eq 1 ] && [ "$has_v4" -eq 1 ] && [ -n "$edu_route_labels_v4" ]; then
+      collect_education_route_labels 4 "$edu_route_labels_v4"
+    fi
+    if [ "$include_edu" -eq 1 ] && [ "$has_v6" -eq 1 ] && [ -n "$edu_route_labels_v6" ]; then
+      collect_education_route_labels 6 "$edu_route_labels_v6"
     fi
   ) >"$RESULT_DIR/route.log" 2>&1 &
   ROUTE_BACKGROUND_PID=$!
@@ -1649,13 +1821,14 @@ test_one() {
   primary_result=$(probe_target "$group" "$family" "$prov" "$isp" "$host" "$fixed_ip" "$port" "$idx" main)
   IFS='|' read -r p_status _ _ _ _ _ _ p_loss _ <<< "$primary_result"
 
-  if [ "$p_status" = "OK" ] && [ -n "$backup_ip" ] && awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 > 15) }'; then
+  if [ -n "$backup_ip" ] &&
+     { [ "$p_status" != "OK" ] || awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 > 15) }'; }; then
     backup_result=$(probe_target "$group" "$family" "$prov" "$isp" "$backup_host" "$backup_ip" "$backup_port" "$idx" backup)
     IFS='|' read -r b_status _ _ _ _ _ _ b_loss _ <<< "$backup_result"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$group" "$idx" "$prov" "$isp" "$p_loss" "$backup_host" "$backup_ip" "$backup_result" >> "${RESULT_DIR}/backup_retry_meta.txt"
     fi
-    if awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 >= 100) }'; then
+    if [ "$p_status" != "OK" ] || awk -v loss="$p_loss" 'BEGIN { exit !(loss + 0 >= 100) }'; then
       printf "%s\n" "$backup_result" > "$outfile"
       return
     fi
@@ -2356,24 +2529,28 @@ main() {
   if [ "$test_cdn" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then families+=(4); fi
     if [ "$ipv6_enabled" -eq 1 ]; then families+=(6); fi
-    [ "${#families[@]}" -gt 0 ] && check_traceroute
+  fi
+  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
+    check_traceroute
   fi
 
-  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
+  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 edu_route_labels_v4 edu_route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
   sorted_v4=$(mktemp)
   sorted_v6=$(mktemp)
   sorted_cernet=$(mktemp)
   sorted_cernet2=$(mktemp)
   route_labels_v4=$(mktemp)
   route_labels_v6=$(mktemp)
+  edu_route_labels_v4=$(mktemp)
+  edu_route_labels_v6=$(mktemp)
 
   # 三个阶段严格串行，避免路由与测速流量影响延迟重传结果。
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$((${#SPEEDTEST_RATES[@]} * 3))
   fi
-  if [ "$test_cdn" -eq 1 ]; then
-    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled"
+  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
+    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu"
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
@@ -2396,7 +2573,7 @@ main() {
     done
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
-    while IFS='|' read -r prov host fixed_ip port; do
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
@@ -2404,12 +2581,12 @@ main() {
         show_progress
         sleep 0.2
       done
-      test_one "cernet" 4 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" &
+      test_one "cernet" 4 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-443}" &
       show_progress
     done < <(print_cernet_entries)
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
-    while IFS='|' read -r prov host fixed_ip port; do
+    while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
@@ -2417,7 +2594,7 @@ main() {
         show_progress
         sleep 0.2
       done
-      test_one "cernet2" 6 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" &
+      test_one "cernet2" 6 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-443}" &
       show_progress
     done < <(print_cernet2_entries)
   fi
@@ -2427,8 +2604,8 @@ main() {
   done
   show_progress
 
-  if [ "$test_cdn" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled"
+  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6"
     wait_route_background
   fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
@@ -2465,8 +2642,10 @@ main() {
       f="${RESULT_DIR}/cernet_${i}"
       if [ -f "$f" ]; then
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
-        echo "CERNET,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat," >> "$CSV"
-        echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_cernet"
+        route_label=$(awk -F'|' -v p="$prov" '$2 == p { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$edu_route_labels_v4")
+        route_label=${route_label:-Hidden}
+        echo "CERNET,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
+        echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat|$route_label" >> "$sorted_cernet"
       fi
     done
   fi
@@ -2475,8 +2654,10 @@ main() {
       f="${RESULT_DIR}/cernet2_${i}"
       if [ -f "$f" ]; then
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
-        echo "CERNET2,IPv6,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat," >> "$CSV"
-        echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_cernet2"
+        route_label=$(awk -F'|' -v p="$prov" '$2 == p { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$edu_route_labels_v6")
+        route_label=${route_label:-Hidden}
+        echo "CERNET2,IPv6,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
+        echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat|$route_label" >> "$sorted_cernet2"
       fi
     done
   fi
@@ -2519,7 +2700,7 @@ main() {
   fi
   echo ""
 
-  rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6"
+  rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6" "$edu_route_labels_v4" "$edu_route_labels_v6"
 }
 
 parse_args "$@"
