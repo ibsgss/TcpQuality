@@ -913,11 +913,28 @@ show_provider_summary() {
     loss_w = 6
     summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
   }
-'"$(awk_table_helpers)"'
+  function compact_loss(v) {
+    return int(v + 0.5)
+  }
+  function center(text, width,   left, right) {
+    left = int((width - length(text)) / 2)
+    right = width - length(text) - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function center_display(text, width, display_width_value,   left, right) {
+    left = int((width - display_width_value) / 2)
+    right = width - display_width_value - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
   function header_align_latency(text,   left, right) {
     left = route_w + 1 + latency_w - display_width(text)
     right = summary_cell_w - route_w - 1 - latency_w
     return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function display_width(text) {
+    if (text == "三网概览") return 8
+    if (text == "黑龙江" || text == "内蒙古") return 6
+    return 4
   }
   function label_cell(text,   pad) {
     pad = label_w - display_width(text)
