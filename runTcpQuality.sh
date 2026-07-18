@@ -1330,7 +1330,8 @@ build_asn_map() {
 
 route_label_from_ip_trace() {
   local trace_file="$1" asn_map_file="$2" trace_ip_file="$3"
-  awk -F'|' '
+  local target_isp="${4:-}"
+  awk -F'|' -v target_isp="$target_isp" '
     function infer_asn_from_ip(ip) {
       if (ip ~ /^59\.43\./) return "4809"
       if (ip ~ /^203\.22\.182\./ || ip ~ /^203\.22\.178\./ || ip ~ /^203\.22\.179\./ || ip ~ /^203\.128\.224\./ || ip ~ /^69\.194\./) return "23764"
@@ -1362,6 +1363,18 @@ route_label_from_ip_trace() {
     }
     function is_163_ip(ip) {
       return ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./ || ip ~ /^240e:/
+    }
+    function is_telecom_access_asn(asn) {
+      return asn == "4134" || asn == "4811" || asn == "4812" || asn == "4847" || asn == "23724" || asn == "134756" || asn == "133776" || asn == "139201" || asn == "139203" || asn == "148969" || asn == "38283" || asn == "58540" || asn == "58563"
+    }
+    function is_telecom_access_ip(ip) {
+      return ip ~ /^1\.202\./ || ip ~ /^27\.129\./ || ip ~ /^36\.110\./ || ip ~ /^36\.112\./ || ip ~ /^58\.213\./ || ip ~ /^101\.95\./ || ip ~ /^101\.226\./ || ip ~ /^106\.227\./ || ip ~ /^111\.74\./ || ip ~ /^117\.21\./ || ip ~ /^117\.68\./ || ip ~ /^124\.127\./ || ip ~ /^140\.249\./ || ip ~ /^180\.102\./ || ip ~ /^183\.47\./ || ip ~ /^219\.148\./ || ip ~ /^220\.181\./
+    }
+    function is_mobile_access_asn(asn) {
+      return asn == "24547" || asn == "132510"
+    }
+    function is_mobile_access_ip(ip) {
+      return ip ~ /^111\.63\./ || ip ~ /^183\.201\./ || ip ~ /^183\.203\./
     }
     function is_oversea_163_ip(ip) {
       return ip ~ /^218\.30\./ || ip ~ /^145\.14\./ || ip ~ /^5\.154\./
@@ -1433,7 +1446,7 @@ route_label_from_ip_trace() {
         if (ips[h] !~ /^59\.43\.245\./) continue
         for (n = h + 1; n <= max_hop; n++) {
           if (ips[n] ~ /^59\.43\./) continue
-          return is_163_ip(ips[n])
+          return is_163_ip(ips[n]) || (target_isp == "电信" && (is_telecom_access_asn(asns[n]) || is_telecom_access_ip(ips[n])))
         }
       }
       return 0
@@ -1442,13 +1455,15 @@ route_label_from_ip_trace() {
       if (asn == "10099") return is_10099_entry_ip(ip)
       if (asn == "9929" || asn == "4837" || asn == "4808") return 1
       if (asn == "4809") return !is_oversea_cn2_ip(ip)
-      if (asn == "4134") return is_163_ip(ip)
+      if (asn == "4134") return is_163_ip(ip) || (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip)))
       if (asn == "4847") return 1
       if (asn == "23764" || is_ctgnet_ip(ip)) return !is_ctgnet_transit_ip(ip)
       if (asn == "58807" || asn == "58453" || asn == "9808") return 1
       if (asn ~ /^5604[0-8]$/) return 1
+      if (target_isp == "移动" && (is_mobile_access_asn(asn) || is_mobile_access_ip(ip))) return 1
       if (asn == "23911" || asn == "23910" || asn == "4538" || asn == "7497") return 1
       if (is_163_ip(ip)) return 1
+      if (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip))) return 1
       return 0
     }
     function label_from_mainland_hop(hop, asn, ip,   h) {
@@ -1457,6 +1472,7 @@ route_label_from_ip_trace() {
       if (asn == "4837" || asn == "4808") return "4837"
       if (asn == "4134" && is_163_ip(ip)) return "163"
       if (asn == "4847" || is_163_ip(ip)) return "163"
+      if (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip))) return "163"
       if (asn == "23764" || is_ctgnet_ip(ip)) return ""
       if (asn == "4809") {
         if (has_cn2_to_163(hop)) return "CN2GT"
@@ -1467,9 +1483,37 @@ route_label_from_ip_trace() {
       }
       if (asn == "58807") return "CMIN2"
       if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
+      if (target_isp == "移动" && (is_mobile_access_asn(asn) || is_mobile_access_ip(ip))) return "CMI"
       if (asn == "23911" || asn == "23910") return "CERNET2"
       if (asn == "4538") return "CERNET"
       if (asn == "7497") return "CSTNET"
+      return ""
+    }
+    function is_local_probe_asn(asn) {
+      return asn == "" || asn == "749"
+    }
+    function is_target_isp_hop(asn, ip) {
+      if (target_isp == "电信") return is_163_ip(ip) || is_telecom_access_asn(asn) || is_telecom_access_ip(ip)
+      if (target_isp == "联通") return is_unicom_backbone_asn(asn) || is_unicom_backbone_ip(ip) || is_unicom_access_asn(asn)
+      if (target_isp == "移动") return asn == "58807" || asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/ || is_mobile_access_asn(asn) || is_mobile_access_ip(ip)
+      return 0
+    }
+    function visible_hops_match_target_isp(   h) {
+      if (max_hop <= 0) return 0
+      for (h = 1; h <= max_hop; h++) {
+        if (is_local_probe_asn(asns[h])) continue
+        if (is_target_isp_hop(asns[h], ips[h])) continue
+        return 0
+      }
+      return 1
+    }
+    function label_from_target_ip(   asn) {
+      if (dest_ip == "" || !visible_hops_match_target_isp()) return ""
+      asn = asn_by_ip[dest_ip]
+      if (asn == "") asn = infer_asn_from_ip(dest_ip)
+      if (target_isp == "电信" && (is_163_ip(dest_ip) || is_telecom_access_asn(asn) || is_telecom_access_ip(dest_ip))) return "163"
+      if (target_isp == "联通" && (is_unicom_backbone_asn(asn) || is_unicom_backbone_ip(dest_ip) || is_unicom_access_asn(asn))) return unicom_route_combo_label()
+      if (target_isp == "移动" && (asn == "58807" || asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/ || is_mobile_access_asn(asn) || is_mobile_access_ip(dest_ip))) return "CMI"
       return ""
     }
     function classify(   hop, label, first_cn2, has_ctgnet, has_cn2, has_v6) {
@@ -1503,6 +1547,8 @@ route_label_from_ip_trace() {
       if (has_asn("23910")) return "CERNET2"
       if (has_asn("4538")) return "CERNET"
       if (has_asn("7497")) return "CSTNET"
+      label = label_from_target_ip()
+      if (label != "") return label
       return "Hidden"
     }
     FILENAME == ARGV[1] {
@@ -1520,7 +1566,15 @@ route_label_from_ip_trace() {
       add_asn(asn)
       next
     }
-    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ { next }
+    /^#/ {
+      if (NF >= 6) dest_ip = $6
+      next
+    }
+    /^target[[:space:]]/ {
+      if (split($0, target_fields, /[[:space:]]+/) >= 2) dest_ip = target_fields[2]
+      next
+    }
+    /^traceroute[[:space:]]/ { next }
     {
       while (match($0, /[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/)) {
         ip = substr($0, RSTART, RLENGTH)
@@ -1736,7 +1790,7 @@ run_route_mode() {
     if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
       trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
       extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$isp")
       echo "OK|$prov|$isp|$protocol|$host|$label" >> "$route_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|$protocol|$host|$value" >> "$route_file"
@@ -1796,7 +1850,7 @@ collect_route_labels() {
     if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
       trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
       extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$isp")
       echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
@@ -1872,7 +1926,7 @@ collect_education_route_labels() {
     if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
       trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
       extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file")
+      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$isp")
       echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
