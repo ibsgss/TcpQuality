@@ -27,7 +27,7 @@ bootstrap_nixos_environment() {
   for arg in "$@"; do
     case "$arg" in
       -h|--help) return 0 ;;
-      --speedtest|--only-speedtest) need_speedtest=1 ;;
+      --all|--speedtest|--only-speedtest) need_speedtest=1 ;;
     esac
   done
 
@@ -247,6 +247,7 @@ require_raw_socket_privilege() {
 
 PACKETS=30
 MAX_PACKETS=600
+COUNT_EXPLICIT=0
 PACKET_SIZES=(40 80 160 320 640 1200)
 # 默认使用标准 TCP SYN，不携带数据；仅在显式指定 -s/--size 时构造指定长度报文。
 PACKET_SIZE_OVERRIDE="0"
@@ -264,6 +265,11 @@ SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
 SPEEDTEST_ONLY=0
+INTERNATIONAL_ENABLED=1
+INTERNATIONAL_ONLY=0
+INTL_REQUESTED=0
+INTERNATIONAL_PROGRESS_TOTAL=0
+INTERNATIONAL_PACKETS=15
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -294,6 +300,55 @@ cleanup_result_dir() {
   esac
 }
 trap cleanup_result_dir EXIT
+
+# ===================== 国际互联目标 =====================
+# 常用网站使用更接近日常访问/API 的入口；CDN 使用常见静态资源或边缘入口。
+INTERNATIONAL_SITE_TARGETS=(
+  'Adobe Assets|assets.adobe.com'
+  'Amazon|www.amazon.com'
+  'Apple iCloud|www.icloud.com'
+  'AWS STS|sts.amazonaws.com'
+  'ChatGPT|chatgpt.com'
+  'Claude|claude.ai'
+  'Cloudflare Dashboard|dash.cloudflare.com'
+  'Discord Gateway|gateway.discord.gg'
+  'Dropbox API|api.dropboxapi.com'
+  'Facebook|www.facebook.com'
+  'GitHub API|api.github.com'
+  'GitLab|gitlab.com'
+  'Gmail|mail.google.com'
+  'Google Search|www.google.com'
+  'Instagram|www.instagram.com'
+  'Microsoft Login|login.microsoftonline.com'
+  'Netflix API|api-global.netflix.com'
+  'NodeSeek|www.nodeseek.com'
+  'Notion API|api.notion.com'
+  'OpenAI API|api.openai.com'
+  'PayPal API|api-m.paypal.com'
+  'Reddit OAuth|oauth.reddit.com'
+  'Slack App|app.slack.com'
+  'Spotify Web|open.spotify.com'
+  'Steam|store.steampowered.com'
+  'Telegram API|api.telegram.org'
+  'Wikipedia|www.wikipedia.org'
+  'X|x.com'
+  'YouTube API|youtubei.googleapis.com'
+  'Zoom API|api.zoom.us'
+)
+
+INTERNATIONAL_CDN_TARGETS=(
+  'Akamai|www.akamai.com'
+  'AWS CloudFront|d1.awsstatic.com'
+  'CacheFly|cachefly.cachefly.net'
+  'CDN77|www.cdn77.com'
+  'Cloudflare CDNJS|cdnjs.cloudflare.com'
+  'Fastly|www.fastly.com'
+  'Google Static|fonts.gstatic.com'
+  'jsDelivr|cdn.jsdelivr.net'
+  'QUANTIL|www.quantil.com'
+  'Tencent EdgeOne|edgeone.ai'
+  'Vercel Edge|vercel.com'
+)
 
 # ===================== 省份筛选 =====================
 province_from_code() {
@@ -497,12 +552,13 @@ NixOS:
   -v4, --v4         仅探测 IPv4
   -v6, --v6         仅探测 IPv6
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
-  --all             探测三网、CERNET 和 CERNET2
+  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
   --speedtest       追加国内三网分阶段 Speedtest（避免影响延迟探测）
   --only-speedtest  仅运行国内三网分阶段 Speedtest
+  --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
   --debug           保留临时文件并输出调试信息，便于排查线路识别问题
@@ -546,6 +602,7 @@ parse_args() {
           exit 1
         fi
         PACKETS="$2"
+        COUNT_EXPLICIT=1
         shift 2
         ;;
       -s|--size)
@@ -578,6 +635,7 @@ parse_args() {
         ;;
       --all)
         TEST_ALL=1
+        SPEEDTEST_ENABLED=1
         shift
         ;;
       --route)
@@ -600,6 +658,12 @@ parse_args() {
       --only-speedtest)
         SPEEDTEST_ENABLED=1
         SPEEDTEST_ONLY=1
+        shift
+        ;;
+      --intl)
+        INTL_REQUESTED=1
+        INTERNATIONAL_ENABLED=1
+        UPLOAD_REPORT=1
         shift
         ;;
       --debug)
@@ -629,6 +693,17 @@ parse_args() {
         ;;
     esac
   done
+
+  if [ "$INTL_REQUESTED" -eq 1 ] \
+    && [ "$ONLY_IPV4" -eq 0 ] \
+    && [ "$ONLY_IPV6" -eq 0 ] \
+    && [ "$TEST_CERNET" -eq 0 ] \
+    && [ "$TEST_ALL" -eq 0 ] \
+    && [ "$ROUTE_MODE" -eq 0 ] \
+    && [ "$SPEEDTEST_ENABLED" -eq 0 ] \
+    && [ -z "$SELECTED_PROVINCES" ]; then
+    INTERNATIONAL_ONLY=1
+  fi
 }
 
 # ===================== 工具函数 =====================
@@ -696,6 +771,10 @@ count_route_progress() {
   find "$RESULT_DIR" -maxdepth 1 -type f -name 'summary_route[46]_[0-9]*' ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
 }
 
+count_international_progress() {
+  find "$RESULT_DIR" -maxdepth 1 -type f -name 'internet_[0-9]*' 2>/dev/null | wc -l | tr -d ' '
+}
+
 count_selected_cdn_nodes() {
   local family="$1" prov count=0
   while IFS='|' read -r prov _; do
@@ -717,20 +796,23 @@ read_speedtest_progress() {
 }
 
 show_all_progress() {
-  local latency_done route_done speed_done speed_total speed_progress now state complete force
+  local latency_done route_done internet_done speed_done speed_total speed_progress now state complete force
   force=${1:-0}
   latency_done=$(count_results)
   [ "$latency_done" -gt "$TOTAL" ] && latency_done="$TOTAL"
   route_done=$(count_route_progress)
   [ "$route_done" -gt "$ROUTE_PROGRESS_TOTAL" ] && route_done="$ROUTE_PROGRESS_TOTAL"
+  internet_done=$(count_international_progress)
+  [ "$internet_done" -gt "$INTERNATIONAL_PROGRESS_TOTAL" ] && internet_done="$INTERNATIONAL_PROGRESS_TOTAL"
   speed_progress=$(read_speedtest_progress)
   speed_done=${speed_progress%%|*}
   speed_total=${speed_progress#*|}
   now=$(date +%s)
-  state="all:${latency_done}/${TOTAL}:${route_done}/${ROUTE_PROGRESS_TOTAL}:${speed_done}/${speed_total}"
+  state="all:${latency_done}/${TOTAL}:${route_done}/${ROUTE_PROGRESS_TOTAL}:${internet_done}/${INTERNATIONAL_PROGRESS_TOTAL}:${speed_done}/${speed_total}"
   complete=0
   if [ "$latency_done" -ge "$TOTAL" ] \
     && { [ "$ROUTE_PROGRESS_TOTAL" -eq 0 ] || [ "$route_done" -ge "$ROUTE_PROGRESS_TOTAL" ]; } \
+    && { [ "$INTERNATIONAL_PROGRESS_TOTAL" -eq 0 ] || [ "$internet_done" -ge "$INTERNATIONAL_PROGRESS_TOTAL" ]; } \
     && { [ "$SPEEDTEST_ENABLED" -ne 1 ] || [ "$speed_done" -ge "$speed_total" ]; }; then
     complete=1
   fi
@@ -746,12 +828,19 @@ show_all_progress() {
   if [ "$PROGRESS_LINES_PRINTED" -gt 0 ]; then
     printf '\033[%dA' "$PROGRESS_LINES_PRINTED"
   fi
-  printf '\r\033[2K  %b延迟重传%b ' "$CYAN" "$NC"
-  bar "$latency_done" "$TOTAL"
-  printf '\n'
+  if [ "$TOTAL" -gt 0 ]; then
+    printf '\r\033[2K  %b延迟重传%b ' "$CYAN" "$NC"
+    bar "$latency_done" "$TOTAL"
+    printf '\n'
+  fi
   if [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ]; then
     printf '\r\033[2K  %b回程识别%b ' "$CYAN" "$NC"
     bar "$route_done" "$ROUTE_PROGRESS_TOTAL"
+    printf '\n'
+  fi
+  if [ "$INTERNATIONAL_PROGRESS_TOTAL" -gt 0 ]; then
+    printf '\r\033[2K  %b国际互联%b ' "$CYAN" "$NC"
+    bar "$internet_done" "$INTERNATIONAL_PROGRESS_TOTAL"
     printf '\n'
   fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
@@ -759,7 +848,7 @@ show_all_progress() {
     bar "$speed_done" "$speed_total"
     printf '\n'
   fi
-  PROGRESS_LINES_PRINTED=$((1 + (SPEEDTEST_ENABLED == 1) + (ROUTE_PROGRESS_TOTAL > 0)))
+  PROGRESS_LINES_PRINTED=$(((TOTAL > 0) + (SPEEDTEST_ENABLED == 1) + (ROUTE_PROGRESS_TOTAL > 0) + (INTERNATIONAL_PROGRESS_TOTAL > 0)))
 }
 
 show_progress() {
@@ -769,6 +858,49 @@ show_progress() {
   else
     show_single_progress "$force"
   fi
+}
+
+awk_table_helpers() {
+  cat <<'AWK'
+  function display_width(text) {
+    if (text == "三网概览") return 8
+    if (text == "教育网概览") return 10
+    if (text == "黑龙江" || text == "内蒙古") return 6
+    if (text == "服务" || text == "域名" || text == "可达" || text == "延迟") return 4
+    if (text == "丢包率") return 6
+    if (text == "重传") return 4
+    if (text == "✓" || text == "x") return 1
+    return length(text)
+  }
+  function compact_loss(v) {
+    return int(v + 0.5)
+  }
+  function center(text, width,   left, right) {
+    left = int((width - length(text)) / 2)
+    right = width - length(text) - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function center_display(text, width, display_width_value,   left, right) {
+    left = int((width - display_width_value) / 2)
+    right = width - display_width_value - left
+    return sprintf("%*s%s%*s", left, "", text, right, "")
+  }
+  function pad_right(text, width,   pad) {
+    pad = width - display_width(text)
+    if (pad < 0) pad = 0
+    return text sprintf("%*s", pad, "")
+  }
+  function pad_left(text, width,   pad) {
+    pad = width - display_width(text)
+    if (pad < 0) pad = 0
+    return sprintf("%*s", pad, "") text
+  }
+  function sep(width,   s, i) {
+    s = ""
+    for (i = 0; i < width; i++) s = s "-"
+    return s
+  }
+AWK
 }
 
 show_provider_summary() {
@@ -781,29 +913,11 @@ show_provider_summary() {
     loss_w = 6
     summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
   }
-  function compact_loss(v) {
-    return int(v + 0.5)
-  }
-  function center(text, width,   left, right) {
-    left = int((width - length(text)) / 2)
-    right = width - length(text) - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
-  }
-  function center_display(text, width, display_width,   left, right) {
-    left = int((width - display_width) / 2)
-    right = width - display_width - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
-  }
+'"$(awk_table_helpers)"'
   function header_align_latency(text,   left, right) {
     left = route_w + 1 + latency_w - display_width(text)
     right = summary_cell_w - route_w - 1 - latency_w
     return sprintf("%*s%s%*s", left, "", text, right, "")
-  }
-  function display_width(text) {
-    if (text == "三网概览") return 8
-    if (text == "教育网概览") return 10
-    if (text == "黑龙江" || text == "内蒙古") return 6
-    return 4
   }
   function label_cell(text,   pad) {
     pad = label_w - display_width(text)
@@ -2134,6 +2248,226 @@ export -f get_ipv6_route
 export -f is_public_ipv4
 export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE
 
+# ===================== 国际互联 TCP ping =====================
+international_task_count() {
+  printf '%s' "$((${#INTERNATIONAL_SITE_TARGETS[@]} + ${#INTERNATIONAL_CDN_TARGETS[@]}))"
+}
+
+resolve_first_public_ipv4() {
+  local domain="$1" ip
+  if command -v getent >/dev/null 2>&1; then
+    while read -r ip _; do
+      if is_public_ipv4 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1, $2}' | awk '!seen[$1]++')
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    while read -r ip; do
+      if is_public_ipv4 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(dig +time=3 +tries=1 +short A "$domain" 2>/dev/null)
+  fi
+  if command -v host >/dev/null 2>&1; then
+    while read -r ip; do
+      if is_public_ipv4 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(host -t A "$domain" 2>/dev/null | awk '/has address/ {print $NF}')
+  fi
+  return 1
+}
+
+international_test_one() {
+  local idx="$1" category="$2" name="$3" domain="$4" ip result status _prov _isp _host _ip sent rcv loss lat
+  local outfile="${RESULT_DIR}/internet_${idx}"
+  local PACKETS="$INTERNATIONAL_PACKETS"
+  ip=$(resolve_first_public_ipv4 "$domain" || true)
+  if [ -z "$ip" ]; then
+    printf 'FAIL|%s|%s|%s||0|0|100.00|-1\n' "$category" "$name" "$domain" > "$outfile"
+    return
+  fi
+  result=$(probe_target "internet" 4 "$name" "$category" "$domain" "$ip" 443 "$idx" main)
+  IFS='|' read -r status _prov _isp _host _ip sent rcv loss lat <<< "$result"
+  if [ "$status" = "OK" ] && [ "${rcv:-0}" -gt 0 ] 2>/dev/null; then
+    printf 'OK|%s|%s|%s|%s|%s|%s|%s|%s\n' "$category" "$name" "$domain" "$ip" "$sent" "$rcv" "$loss" "$lat" > "$outfile"
+  else
+    printf 'FAIL|%s|%s|%s|%s|%s|%s|%s|-1\n' "$category" "$name" "$domain" "$ip" "${sent:-0}" "${rcv:-0}" "${loss:-100.00}" > "$outfile"
+  fi
+}
+
+run_international_tests() {
+  local idx=0 launched=0 done entry name domain category running total
+  total=$(international_task_count)
+  INTERNATIONAL_PROGRESS_TOTAL="$total"
+  [ "$total" -gt 0 ] || return 0
+
+  category="网站"
+  for entry in "${INTERNATIONAL_SITE_TARGETS[@]}"; do
+    name=${entry%%|*}
+    domain=${entry#*|}
+    idx=$((idx + 1))
+    while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+      show_progress
+      sleep 0.2
+    done
+    international_test_one "$idx" "$category" "$name" "$domain" &
+    launched=$((launched + 1))
+    show_progress
+  done
+
+  category="CDN"
+  for entry in "${INTERNATIONAL_CDN_TARGETS[@]}"; do
+      name=${entry%%|*}
+      domain=${entry#*|}
+      idx=$((idx + 1))
+      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+        show_progress
+        sleep 0.2
+      done
+      international_test_one "$idx" "$category" "$name" "$domain" &
+      launched=$((launched + 1))
+      show_progress
+  done
+
+  while [ "$(count_international_progress)" -lt "$total" ]; do
+    show_progress
+    sleep 0.2
+  done
+  wait
+  show_progress
+}
+
+append_international_csv() {
+  local csv="$1" f status category name domain ip sent rcv loss lat total i
+  total=$(international_task_count)
+  for ((i = 1; i <= total; i++)); do
+    f="${RESULT_DIR}/internet_${i}"
+    [ -f "$f" ] || continue
+    IFS='|' read -r status category name domain ip sent rcv loss lat < "$f"
+    echo "国际互联,IPv4,$name,$category,$domain,$ip,$status,$sent,$rcv,$loss,$lat,TCP443" >> "$csv"
+  done
+}
+
+show_international_results() {
+  local file_list=("$RESULT_DIR"/internet_[0-9]*) total i f
+  [ -f "${file_list[0]}" ] || return 0
+  total=$(international_task_count)
+  {
+    for ((i = 1; i <= total; i++)); do
+      f="${RESULT_DIR}/internet_${i}"
+      [ -f "$f" ] && cat "$f"
+    done
+  } | awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    name_w = 24
+    domain_w = 32
+    reachable_w = 4
+    latency_w = 10
+    loss_w = 8
+  }
+'"$(awk_table_helpers)"'
+  function latency_color(category, v, ok) {
+    if (!ok) return red
+    if (category == "CDN") {
+      if (v > 10) return red
+      if (v > 2) return yellow
+      return green
+    }
+    if (v > 150) return red
+    if (v > 50) return yellow
+    return green
+  }
+  function loss_color(loss, ok) {
+    if (!ok || loss + 0 >= 100) return red
+    if (loss + 0 > 0) return yellow
+    return green
+  }
+  function row(category, name, domain, status, loss, lat,   ok, mark, latency, loss_text) {
+    ok = (status == "OK" && loss + 0 < 100)
+    mark = ok ? "✓" : "x"
+    latency = ok ? sprintf("%.3fms", lat + 0) : "-1ms"
+    loss_text = sprintf("%d%%", int(loss + 0.5))
+    printf "  %s  %s  %s%s%s  %s%s%s  %s%s%s\n", \
+      pad_right(name, name_w), pad_right(domain, domain_w), \
+      ok ? green : red, pad_right(mark, reachable_w), nc, \
+      latency_color(category, lat + 0, ok), pad_left(latency, latency_w), nc, \
+      loss_color(loss, ok), pad_left(loss_text, loss_w), nc
+  }
+  function header(title) {
+    printf "  %s%s%s\n", bold, cyan title, nc
+    printf "  %s%s  %s  %s  %s  %s%s\n", cyan, \
+      pad_right("服务", name_w), pad_right("域名", domain_w), \
+      pad_right("可达", reachable_w), pad_left("延迟", latency_w), pad_left("重传", loss_w), nc
+    printf "  %s  %s  %s  %s  %s\n", \
+      sep(name_w), sep(domain_w), sep(reachable_w), sep(latency_w), sep(loss_w)
+  }
+  {
+    status = $1
+    category = $2
+    name = $3
+    domain = $4
+    loss = $8
+    lat = $9
+    if (category == "网站") {
+      sites[++sn] = category SUBSEP name SUBSEP domain SUBSEP status SUBSEP loss SUBSEP lat
+    } else {
+      cdns[++cn] = category SUBSEP name SUBSEP domain SUBSEP status SUBSEP loss SUBSEP lat
+    }
+  }
+  END {
+    if (sn > 0) {
+      header("IPv4 常用网站国际互联")
+      for (i = 1; i <= sn; i++) {
+        split(sites[i], a, SUBSEP)
+        row(a[1], a[2], a[3], a[4], a[5], a[6])
+      }
+      printf "  %s颜色: %s0-50ms 正常%s  %s50-150ms 一般%s  %s>150ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, dim
+    }
+    if (cn > 0) {
+      header("IPv4 常用 CDN 国际互联")
+      for (i = 1; i <= cn; i++) {
+        split(cdns[i], a, SUBSEP)
+        row(a[1], a[2], a[3], a[4], a[5], a[6])
+      }
+      printf "  %s颜色: %s0-2ms 正常%s  %s2-10ms 一般%s  %s>10ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, dim
+    }
+  }'
+}
+
+run_international_mode() {
+  local report_time csv
+  require_raw_socket_privilege
+  check_curl
+  check_nping
+  echo -e "${DIM}  国际互联目标: $(international_task_count)  每目标发包: $INTERNATIONAL_PACKETS  并行: $PARALLEL  端口: 443/tcp${NC}"
+  echo
+  MULTI_PROGRESS_MODE=1
+  TOTAL=0
+  ROUTE_PROGRESS_TOTAL=0
+  SPEEDTEST_ENABLED=0
+  run_international_tests
+  printf '\n'
+  report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
+  csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
+  printf '\xEF\xBB\xBF' > "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$csv"
+  append_international_csv "$csv"
+  clear
+  print_header
+  echo -e "  ${DIM}报告时间：${report_time}${NC}"
+  echo
+  show_international_results
+  if [ "$UPLOAD_REPORT" -eq 1 ]; then
+    upload_report "$csv" "${report_time%%（*}"
+  fi
+  echo
+}
+
 # ===================== 国内分阶段测速 =====================
 SPEEDTEST_RATES=(10 200 unlimited)
 SPEEDTEST_IFB="ifb_tqtest"
@@ -2729,6 +3063,12 @@ main() {
 
   init_privilege
 
+  if [ "$INTERNATIONAL_ONLY" -eq 1 ]; then
+    [ "$COUNT_EXPLICIT" -eq 1 ] && INTERNATIONAL_PACKETS="$PACKETS"
+    run_international_mode
+    exit 0
+  fi
+
   if [ "$SPEEDTEST_ONLY" -eq 1 ]; then
     run_speedtest_mode
     exit 0
@@ -2777,8 +3117,12 @@ main() {
   if [ "$TEST_CERNET" -eq 1 ] && [ "$TEST_ALL" -eq 0 ]; then
     test_cdn=0
     test_edu=1
+    INTERNATIONAL_ENABLED=0
   elif [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then
     test_edu=1
+  fi
+  if [ "$want_ipv4" -eq 0 ] || [ "$ipv4_enabled" -eq 0 ]; then
+    INTERNATIONAL_ENABLED=0
   fi
 
   local cdn_node_count cernet_node_count cernet2_node_count
@@ -2810,8 +3154,12 @@ main() {
     echo -e "${RED}[X] 没有可执行的探测任务${NC}"
     exit 1
   fi
+  if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
+    [ "$COUNT_EXPLICIT" -eq 1 ] && INTERNATIONAL_PACKETS="$PACKETS"
+    INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
+  fi
   local size_text="${PACKET_SIZE_OVERRIDE}B"
-  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  每节点发包: $PACKETS  包长: $size_text  并行: $PARALLEL  端口: 80/tcp${NC}"
+  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  国际互联: ${INTERNATIONAL_PROGRESS_TOTAL}  每节点发包: $PACKETS  国际互联每目标: $INTERNATIONAL_PACKETS  包长: $size_text  并行: $PARALLEL  端口: 回程80/tcp，国际443/tcp${NC}"
   echo ""
 
   local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
@@ -2838,6 +3186,9 @@ main() {
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$((${#SPEEDTEST_RATES[@]} * 3))
+  fi
+  if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
+    INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
   fi
   if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
     set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu"
@@ -2898,6 +3249,9 @@ main() {
     start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6"
     wait_route_background
   fi
+  if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
+    run_international_tests
+  fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     start_speedtest_background 0 0 "${SPEEDTEST_RATES[@]}"
     wait_speedtest_background
@@ -2951,6 +3305,9 @@ main() {
       fi
     done
   fi
+  if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
+    append_international_csv "$CSV"
+  fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     append_speedtest_csv "$CSV"
   fi
@@ -2978,6 +3335,10 @@ main() {
     if [ "$test_edu" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
       show_education_results "CERNET2-IPv6" "$sorted_cernet2"
     fi
+  fi
+
+  if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
+    show_international_results
   fi
 
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
