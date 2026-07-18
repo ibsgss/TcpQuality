@@ -279,7 +279,13 @@ REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
-    echo -e "${DIM}Debug 目录：$RESULT_DIR${NC}"
+    local archive="${RESULT_DIR}.tar.gz"
+    if [ -d "$RESULT_DIR" ] && tar -C "$(dirname "$RESULT_DIR")" -czf "$archive" "$(basename "$RESULT_DIR")" 2>/dev/null; then
+      rm -rf "$RESULT_DIR"
+      echo -e "${DIM}Debug 压缩包：$archive${NC}"
+    else
+      echo -e "${YELLOW}[!] Debug 打包失败：$RESULT_DIR${NC}"
+    fi
   else
     rm -rf "$RESULT_DIR"
   fi
@@ -770,7 +776,7 @@ show_provider_summary() {
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     label_w = 10
-    route_w = 10
+    route_w = 11
     latency_w = 6
     loss_w = 6
     summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
@@ -906,10 +912,10 @@ show_education_results() {
   }
   function cell(status, loss, lat, label,   l, v, color) {
     if (label == "") label = title
-    if (status != "OK") return white sprintf("%10s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
+    if (status != "OK") return white sprintf("%11s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
     l = loss + 0
     v = lat + 0
-    return white sprintf("%10s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
+    return white sprintf("%11s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
   }
   {
     status = $1
@@ -942,7 +948,7 @@ show_education_combined() {
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     label_w = 10
-    route_w = 10
+    route_w = 11
     latency_w = 6
     loss_w = 6
     edu_cell_w = route_w + 1 + latency_w + 1 + loss_w
@@ -1238,6 +1244,58 @@ extract_trace_ips() {
   ' "$trace_file"
 }
 
+route_needs_10099_hidden_tcp_retry() {
+  local trace_file="$1"
+  awk '
+    function public_v4(ip, parts, k) {
+      if (split(ip, parts, ".") != 4) return 0
+      for (k = 1; k <= 4; k++) if (parts[k] !~ /^[0-9]+$/ || parts[k] < 0 || parts[k] > 255) return 0
+      if (parts[1] == 0 || parts[1] == 10 || parts[1] == 127 || parts[1] >= 224) return 0
+      if (parts[1] == 100 && parts[2] >= 64 && parts[2] <= 127) return 0
+      if (parts[1] == 169 && parts[2] == 254) return 0
+      if (parts[1] == 172 && parts[2] >= 16 && parts[2] <= 31) return 0
+      if (parts[1] == 192 && parts[2] == 168) return 0
+      if (parts[1] == 198 && (parts[2] == 18 || parts[2] == 19)) return 0
+      return 1
+    }
+    function is_10099(ip) {
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./
+    }
+    function is_4837(ip) {
+      return ip ~ /^219\.158\./
+    }
+    function is_9929(ip) {
+      return ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./
+    }
+    function is_163(ip) {
+      return ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./
+    }
+    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ { next }
+    {
+      line = $0
+      has_ip = 0
+      while (match(line, /[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/)) {
+        ip = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        if (!public_v4(ip)) continue
+        has_ip = 1
+        if (is_10099(ip)) {
+          seen_10099 = 1
+          after_10099 = 1
+          continue
+        }
+        if (!after_10099) continue
+        if (is_4837(ip) || is_9929(ip)) seen_unicom_domestic = 1
+        if (is_163(ip)) seen_163 = 1
+      }
+      if (after_10099 && !seen_163 && !has_ip && $0 ~ /\*/) hidden_after_10099++
+    }
+    END {
+      exit !(seen_10099 && seen_163 && !seen_unicom_domestic && hidden_after_10099 >= 2)
+    }
+  ' "$trace_file"
+}
+
 query_cymru_asn() {
   local ip_file="$1" out_file="$2" req_file
   req_file=$(mktemp)
@@ -1283,7 +1341,7 @@ route_label_from_ip_trace() {
       if (ip ~ /^2408:/) return "4837"
       if (ip ~ /^223\.120\./ || ip ~ /^223\.119\./) return "58453"
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./) return "9808"
-      if (ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^118\.26\.151\./ || ip ~ /^203\.160\.75\./) return "10099"
+      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./) return "10099"
       if (ip ~ /^2401:8a00:/) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./) return "9929"
       if (ip ~ /^59\.64\./ || ip ~ /^101\.4\./ || ip ~ /^101\.76\./ || ip ~ /^111\.114\./ || ip ~ /^113\.54\./ || ip ~ /^115\.24\./ || ip ~ /^115\.156\./ || ip ~ /^183\.172\./ || ip ~ /^202\.38\.19/ || ip ~ /^202\.112\./ || ip ~ /^202\.113\./ || ip ~ /^202\.114\./ || ip ~ /^202\.115\./ || ip ~ /^202\.116\./ || ip ~ /^202\.117\./ || ip ~ /^202\.118\./ || ip ~ /^202\.119\./ || ip ~ /^202\.120\./ || ip ~ /^202\.194\./ || ip ~ /^202\.196\./ || ip ~ /^202\.197\./ || ip ~ /^202\.198\./ || ip ~ /^202\.200\./ || ip ~ /^202\.201\./ || ip ~ /^202\.202\./ || ip ~ /^202\.207\./ || ip ~ /^210\.2[6-9]\./ || ip ~ /^210\.3[0-9]\./ || ip ~ /^210\.4[0-7]\./ || ip ~ /^219\.22[4-9]\./ || ip ~ /^222\.(1[6-9]|2[0-3])\./ || ip ~ /^222\.19[2-9]\./ || ip ~ /^222\.20[0-7]\./) return "4538"
@@ -1339,7 +1397,7 @@ route_label_from_ip_trace() {
         if (asns[h] == "10099" && is_10099_entry_ip(ips[h])) {
           first_unicom = h
           domestic = unicom_domestic_label_from_hop(h)
-          if (domestic != "") return "10099-" domestic
+          if (domestic != "") return "10099->" domestic
           return "10099"
         }
         if (is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h])) {
@@ -1486,7 +1544,7 @@ route_trace_one() {
   local probe_arg="-T"
   [ "$protocol" = "udp" ] && probe_arg="-U"
   local -a args
-  local output rc target_ip target
+  local output rc target_ip target retry_output retry_rc
 
   target_ip="$fixed_ip"
   if [ -z "$target_ip" ]; then
@@ -1506,6 +1564,21 @@ route_trace_one() {
     [ -n "$target_ip" ] && printf "target %s\n" "$target_ip"
     printf "%s\n" "$output"
   } > "$trace_file"
+  if [ "$family" = "4" ] && [ "$protocol" = "tcp" ] && route_needs_10099_hidden_tcp_retry "$trace_file"; then
+    if retry_output=$(traceroute "${args[@]}" 2>&1); then
+      retry_rc=0
+    else
+      retry_rc=$?
+    fi
+    {
+      printf "\n# retry 10099 hidden domestic segment|%s|%s|%s|%s|%s|%s\n" "$prov" "$isp" "$protocol" "$host" "$idx" "$target_ip"
+      [ -n "$target_ip" ] && printf "target %s\n" "$target_ip"
+      printf "%s\n" "$retry_output"
+    } >> "$trace_file"
+    if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
+      printf "%s|%s|%s|%s|%s|%s|%s|retry_10099_hidden\n" "$idx" "$prov" "$isp" "$protocol" "$host" "${target_ip:-DNS_FAIL}" "$retry_rc" >> "${RESULT_DIR}/route_debug_meta.txt"
+    fi
+  fi
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
     printf "%s|%s|%s|%s|%s|%s|%s\n" "$idx" "$prov" "$isp" "$protocol" "$host" "${target_ip:-DNS_FAIL}" "$rc" >> "${RESULT_DIR}/route_debug_meta.txt"
   fi
@@ -1533,7 +1606,7 @@ show_route_results() {
     }
     function cell(status, label,   c) {
       c = color(status, label)
-      return c sprintf("%-10s", label) nc
+      return c sprintf("%-11s", label) nc
     }
     {
       status = $1
@@ -1868,6 +1941,7 @@ wait_route_background() {
 
 export -f route_trace_one
 export -f extract_trace_ips
+export -f route_needs_10099_hidden_tcp_retry
 
 # ===================== 单节点测试 =====================
 probe_target() {
@@ -2616,10 +2690,6 @@ main() {
     fi
     if [ "$ONLY_IPV4" -ne 1 ]; then
       run_route_mode 6
-    fi
-    if [ "$DEBUG_MODE" -eq 1 ]; then
-      echo -e "  ${DIM}Debug 目录：$RESULT_DIR${NC}"
-      echo ""
     fi
     exit 0
   fi
