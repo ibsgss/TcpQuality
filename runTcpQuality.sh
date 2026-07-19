@@ -875,25 +875,29 @@ awk_table_helpers() {
   function compact_loss(v) {
     return int(v + 0.5)
   }
+  function spaces(width) {
+    if (width <= 0) return ""
+    return sprintf("%" width "s", "")
+  }
   function center(text, width,   left, right) {
     left = int((width - length(text)) / 2)
     right = width - length(text) - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
   }
   function center_display(text, width, display_width_value,   left, right) {
     left = int((width - display_width_value) / 2)
     right = width - display_width_value - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
   }
   function pad_right(text, width,   pad) {
     pad = width - display_width(text)
     if (pad < 0) pad = 0
-    return text sprintf("%*s", pad, "")
+    return text spaces(pad)
   }
   function pad_left(text, width,   pad) {
     pad = width - display_width(text)
     if (pad < 0) pad = 0
-    return sprintf("%*s", pad, "") text
+    return spaces(pad) text
   }
   function sep(width,   s, i) {
     s = ""
@@ -916,20 +920,24 @@ show_provider_summary() {
   function compact_loss(v) {
     return int(v + 0.5)
   }
+  function spaces(width) {
+    if (width <= 0) return ""
+    return sprintf("%" width "s", "")
+  }
   function center(text, width,   left, right) {
     left = int((width - length(text)) / 2)
     right = width - length(text) - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
   }
   function center_display(text, width, display_width_value,   left, right) {
     left = int((width - display_width_value) / 2)
     right = width - display_width_value - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
   }
   function header_align_latency(text,   left, right) {
     left = route_w + 1 + latency_w - display_width(text)
     right = summary_cell_w - route_w - 1 - latency_w
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
   }
   function display_width(text) {
     if (text == "三网概览") return 8
@@ -939,10 +947,10 @@ show_provider_summary() {
   function label_cell(text,   pad) {
     pad = label_w - display_width(text)
     if (pad < 0) pad = 0
-    return text sprintf("%*s", pad, "")
+    return text spaces(pad)
   }
   function format_summary_cell(label, latency, loss, latency_color_value, loss_color_value) {
-    return white sprintf("%*s", route_w, label) nc " " latency_color_value sprintf("%*s", latency_w, latency) nc " " loss_color_value sprintf("%*s", loss_w, loss) nc
+    return white sprintf("%" route_w "s", label) nc " " latency_color_value sprintf("%" latency_w "s", latency) nc " " loss_color_value sprintf("%" loss_w "s", loss) nc
   }
   function latency_color(v, l) {
     if (l >= 100) return red
@@ -1105,7 +1113,11 @@ show_education_combined() {
   function center(text, width,   left, right) {
     left = int((width - length(text)) / 2)
     right = width - length(text) - left
-    return sprintf("%*s%s%*s", left, "", text, right, "")
+    return spaces(left) text spaces(right)
+  }
+  function spaces(width) {
+    if (width <= 0) return ""
+    return sprintf("%" width "s", "")
   }
   function display_width(text) {
     if (text == "教育网概览") return 10
@@ -1115,10 +1127,10 @@ show_education_combined() {
   function label_cell(text,   pad) {
     pad = label_w - display_width(text)
     if (pad < 0) pad = 0
-    return text sprintf("%*s", pad, "")
+    return text spaces(pad)
   }
   function format_edu_cell(label, latency, loss, latency_color_value, loss_color_value) {
-    return white sprintf("%*s", route_w, label) nc " " latency_color_value sprintf("%*s", latency_w, latency) nc " " loss_color_value sprintf("%*s", loss_w, loss) nc
+    return white sprintf("%" route_w "s", label) nc " " latency_color_value sprintf("%" latency_w "s", latency) nc " " loss_color_value sprintf("%" loss_w "s", loss) nc
   }
   function cell(status, loss, lat, label, fallback,   l, v, latency, loss_text) {
     if (label == "") label = fallback
@@ -3221,7 +3233,7 @@ main() {
         port=${port:-80}
         province_selected "$prov" || continue
         idx=$((idx + 1))
-        while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
+        while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
           show_progress
           sleep 0.2
         done
@@ -3235,7 +3247,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
+      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
@@ -3248,7 +3260,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ $((idx - $(count_results))) -ge "$PARALLEL" ]; do
+      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
