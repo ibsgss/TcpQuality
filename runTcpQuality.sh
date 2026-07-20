@@ -3566,7 +3566,7 @@ main() {
     done
   fi
   if [ "$large_packet_enabled" -eq 1 ]; then
-    for f in "$RESULT_DIR"/large4_[0-9]*; do
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
       if [ "$large_packet_probe_enabled" -eq 1 ]; then
@@ -3577,7 +3577,7 @@ main() {
       route_label=${route_label:-Hidden}
       echo "IPv4大包,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
       echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_large_v4"
-    done
+    done < <(find "$RESULT_DIR" -maxdepth 1 -type f -name 'large4_[0-9]*' | awk -F_ '{ print $NF "|" $0 }' | sort -t'|' -k1,1n | cut -d'|' -f2-)
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
     for i in $(seq 1 "$TOTAL"); do
