@@ -235,6 +235,14 @@ check_traceroute() {
   check_command traceroute traceroute traceroute traceroute traceroute traceroute traceroute traceroute
 }
 
+check_nexttrace() {
+  if command -v nexttrace &>/dev/null; then
+    return 0
+  fi
+  echo -e "${YELLOW}[!] 未检测到 nexttrace，已跳过 IPv4大包回程质量(beta)${NC}"
+  return 1
+}
+
 require_raw_socket_privilege() {
   if [ "$(id -u)" -ne 0 ]; then
     echo -e "${RED}[X] 运行权限不足，请切换到 root 用户后运行${NC}"
@@ -251,6 +259,14 @@ COUNT_EXPLICIT=0
 PACKET_SIZES=(40 80 160 320 640 1200)
 # 默认使用标准 TCP SYN，不携带数据；仅在显式指定 -s/--size 时构造指定长度报文。
 PACKET_SIZE_OVERRIDE="0"
+LARGE_PACKET_SIZES=(120 240 480 900 950 1000 1050 1100 1150 1200 1200 900)
+LARGE_PACKET_SMALL_SIZES=(120 240 480)
+LARGE_PACKET_BIG_SIZES=(900 950 1000 1050 1100 1150 1200 1200 900)
+LARGE_PACKET_PRECHECK_DOMAIN="www.cloudflare.com"
+LARGE_PACKET_PRECHECK_PACKETS=20
+LARGE_PACKET_PRECHECK_SIZE=1200
+LARGE_PACKET_FIREWALL_LIMITED=0
+LARGE_PACKET_PRECHECK_LOSS=""
 TOTAL=0
 PARALLEL=16
 TEST_CERNET=0
@@ -329,7 +345,7 @@ INTERNATIONAL_SITE_TARGETS=(
   'Slack App|app.slack.com'
   'Spotify Web|open.spotify.com'
   'Steam|store.steampowered.com'
-  'Telegram API|api.telegram.org'
+  'Telegram|telegram.org'
   'Wikipedia|www.wikipedia.org'
   'X|x.com'
   'YouTube API|youtubei.googleapis.com'
@@ -337,16 +353,19 @@ INTERNATIONAL_SITE_TARGETS=(
 )
 
 INTERNATIONAL_CDN_TARGETS=(
-  'Akamai|www.akamai.com'
-  'AWS CloudFront|d1.awsstatic.com'
+  'Akamai Edge|www.akamai.com'
+  'AWS Static|d1.awsstatic.com'
   'CacheFly|cachefly.cachefly.net'
-  'CDN77|www.cdn77.com'
+  'CDN77 Demo|1906714720.rsc.cdn77.org'
   'Cloudflare CDNJS|cdnjs.cloudflare.com'
-  'Fastly|www.fastly.com'
-  'Google Static|fonts.gstatic.com'
+  'Fastly Demo|http-me.fastly.dev'
+  'Google Fonts Static|fonts.gstatic.com'
+  'Google Hosted Libraries|ajax.googleapis.com'
   'jsDelivr|cdn.jsdelivr.net'
-  'QUANTIL|www.quantil.com'
+  'Microsoft Ajax CDN|ajax.aspnetcdn.com'
+  'QUANTIL Edge|www.quantil.com'
   'Tencent EdgeOne|edgeone.ai'
+  'UNPKG|unpkg.com'
   'Vercel Edge|vercel.com'
 )
 
@@ -573,6 +592,7 @@ NixOS:
   - nping: 随 nmap 安装
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
+  - nexttrace: 可选；用于 IPv4大包回程质量(beta) 的 TCP 1200B 大包路由识别
   - speedtest/iproute2: 分阶段测速使用
   - awk/sed/grep: 用于结果解析和展示
 
@@ -743,7 +763,7 @@ count_results() {
       find "$RESULT_DIR" -type f \( -name 'route4_[0-9]*' -o -name 'route6_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
     fi
   else
-    find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'cdn4_[0-9]*' -o -name 'cdn6_[0-9]*' -o -name 'cernet_[0-9]*' -o -name 'cernet2_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
+    find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'cdn4_[0-9]*' -o -name 'cdn6_[0-9]*' -o -name 'large4_[0-9]*' -o -name 'cernet_[0-9]*' -o -name 'cernet2_[0-9]*' \) 2>/dev/null | wc -l | tr -d ' '
   fi
 }
 
@@ -768,7 +788,7 @@ show_single_progress() {
 }
 
 count_route_progress() {
-  find "$RESULT_DIR" -maxdepth 1 -type f -name 'summary_route[46]_[0-9]*' ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
+  find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'summary_route[46]_[0-9]*' -o -name 'summary_large_route4_[0-9]*' \) ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_international_progress() {
@@ -1026,6 +1046,114 @@ show_family_results() {
     printf "\033[0;32m零丢包:%3d\033[0m    \033[0;33m1-20%%:%3d\033[0m    \033[0;31m>20%%:%3d\033[0m\n\n", z, y, h
   }' "$file"
   show_provider_summary "$file" "$route_file"
+}
+
+show_large_packet_results() {
+  local title="$1" file="$2" route_file="${3:-}" firewall_limited="${4:-0}"
+  awk -F'|' -v title="$title" -v firewall_limited="$firewall_limited" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    label_w = 10
+    route_w = 11
+    latency_w = 6
+    loss_w = 6
+    summary_cell_w = route_w + 1 + latency_w + 1 + loss_w
+  }
+  function compact_loss(v) {
+    return int(v + 0.5)
+  }
+  function spaces(width) {
+    if (width <= 0) return ""
+    return sprintf("%" width "s", "")
+  }
+  function display_width(text) {
+    if (text == "三网概览") return 8
+    if (text == "黑龙江" || text == "内蒙古") return 6
+    return 4
+  }
+  function label_cell(text,   pad) {
+    pad = label_w - display_width(text)
+    if (pad < 0) pad = 0
+    return text spaces(pad)
+  }
+  function header_align_latency(text,   left, right) {
+    left = route_w + 1 + latency_w - display_width(text)
+    right = summary_cell_w - route_w - 1 - latency_w
+    return spaces(left) text spaces(right)
+  }
+  function format_summary_cell(label, latency, loss, latency_color_value, loss_color_value) {
+    return white sprintf("%" route_w "s", label) nc " " latency_color_value sprintf("%" latency_w "s", latency) nc " " loss_color_value sprintf("%" loss_w "s", loss) nc
+  }
+  function latency_color(v, l) {
+    if (l >= 100) return red
+    if (v > 240) return red
+    if (v > 150) return yellow
+    return green
+  }
+  function latency_text(v, l) {
+    if (l >= 100) return "-1ms"
+    return sprintf("%.0fms", v)
+  }
+  function loss_color(l) {
+    if (l > 20) return red
+    if (l > 0) return yellow
+    return green
+  }
+  function cell(status, loss, lat, label,   l, v, latency, loss_text) {
+    if (label == "") label = "Hidden"
+    if (status == "SKIP") return format_summary_cell(label, "-", "-", red, red)
+    if (status != "OK") return format_summary_cell(label, "failed", "failed", red, red)
+    l = loss + 0
+    v = lat + 0
+    latency = latency_text(v, l)
+    loss_text = compact_loss(loss) "%"
+    return format_summary_cell(label, latency, loss_text, latency_color(v, l), loss_color(l))
+  }
+  function route_label(prov, isp) {
+    return ((prov SUBSEP isp) in route) ? route[prov SUBSEP isp] : isp
+  }
+  FILENAME == ARGV[1] && NF >= 6 {
+    if ($1 == "OK") route[$2 SUBSEP $3] = $6
+    else route[$2 SUBSEP $3] = "Hidden"
+    next
+  }
+  FILENAME == ARGV[2] {
+    status = $1
+    prov = $2
+    isp = $3
+    loss = $8
+    lat = $9
+    label = route_label(prov, isp)
+    if (!(prov in seen)) {
+      seen[prov] = 1
+      order[++n] = prov
+    }
+    data[prov SUBSEP isp] = cell(status, loss, lat, label)
+    if (status == "SKIP") h++
+    else if (status != "OK") h++
+    else if (int(loss + 0) == 0) z++
+    else if (int(loss + 0) <= 20) y++
+    else h++
+  }
+  END {
+    printf "  %s%s%s 统计摘要%s\n", bold, cyan, title, nc
+    printf "  %s零重传:%3d%s    %s1-20%%:%3d%s    %s>20%%:%3d%s\n", green, z, nc, yellow, y, nc, red, h, nc
+    if (firewall_limited + 0 == 1) {
+      printf "  %s由于服务商防火墙限制，延迟和丢包无法探测%s\n", red, nc
+    }
+    printf "\n"
+    printf "  %s%s%s%s  %s%s%s %s/ %s%s%s %s/ %s%s%s\n", bold, cyan, label_cell("三网概览"), nc, cyan, header_align_latency("电信"), nc, white, cyan, header_align_latency("联通"), nc, white, cyan, header_align_latency("移动"), nc
+    for (i = 1; i <= n; i++) {
+      prov = order[i]
+      printf "  %s%s%s  %s %s/ %s %s/ %s\n", cyan, label_cell(prov), nc, data[prov SUBSEP "电信"], white, data[prov SUBSEP "联通"], white, data[prov SUBSEP "移动"]
+    }
+    if (firewall_limited + 0 == 1) {
+      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, dim
+      printf "  %s提示: 由于服务商防火墙限制，延迟和丢包无法探测%s\n\n", red, dim
+    } else {
+      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, dim
+      printf "\n"
+    }
+  }' "${route_file:-/dev/null}" "$file"
 }
 
 show_education_results() {
@@ -1369,7 +1497,10 @@ extract_trace_ips() {
       if (ip ~ /^::1$/ || ip ~ /^fe80:/ || ip ~ /^fc/ || ip ~ /^fd/) return 0
       return 1
     }
-    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ { next }
+    /bad integer value|unknown arguments/ { in_usage = 1; next }
+    /^usage:/ { in_usage = 1; next }
+    in_usage { next }
+    /^#/ || /^target[[:space:]]/ || /^traceroute[[:space:]]/ || / -> .*hops max/ || /^NextTrace[[:space:]]/ || /^IP Geo Data Provider:/ { next }
     {
       for (i = 1; i <= NF; i++) {
         field = $i
@@ -1717,7 +1848,10 @@ route_label_from_ip_trace() {
       if (split($0, target_fields, /[[:space:]]+/) >= 2) dest_ip = target_fields[2]
       next
     }
-    /^traceroute[[:space:]]/ { next }
+    /bad integer value|unknown arguments/ { in_usage = 1; next }
+    /^usage:/ { in_usage = 1; next }
+    in_usage { next }
+    /^traceroute[[:space:]]/ || / -> .*hops max/ || /^NextTrace[[:space:]]/ || /^IP Geo Data Provider:/ { next }
     {
       while (match($0, /[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*/)) {
         ip = substr($0, RSTART, RLENGTH)
@@ -1737,6 +1871,7 @@ route_label_from_ip_trace() {
 
 route_trace_one() {
   local family="$1" protocol="$2" prov="$3" isp="$4" host="$5" idx="$6" port="${7:-80}" fixed_ip="${8:-}" prefix="${9:-route}"
+  local packet_length="${10:-44}"
   local outfile="${RESULT_DIR}/${prefix}_${idx}" trace_file="${RESULT_DIR}/${prefix}_trace_${idx}"
   local probe_arg="-T"
   [ "$protocol" = "udp" ] && probe_arg="-U"
@@ -1749,18 +1884,35 @@ route_trace_one() {
     return
   fi
   target="$target_ip"
-  args=(-n "-${family}" "$probe_arg" -p "$port" -q 3 -w 2 -m 30 "$target" 44)
-
-  if output=$(traceroute "${args[@]}" 2>&1); then
-    rc=0
+  if [ "$protocol" = "nexttrace" ]; then
+    if [ "$family" != "4" ]; then
+      echo "FAIL|$prov|$isp|$protocol|$host|UNSUPPORTED_FAMILY" > "$outfile"
+      return
+    fi
+    args=(-4 -T -p "$port" --psize "$packet_length" -M -d disable-geoip -n -q 3 -m 30 "$target")
+    if output=$(nexttrace "${args[@]}" 2>&1); then
+      rc=0
+    else
+      rc=$?
+    fi
   else
-    rc=$?
+    args=(-n "-${family}" "$probe_arg" -p "$port" -q 3 -w 2 -m 30 "$target" "$packet_length")
+    if output=$(traceroute "${args[@]}" 2>&1); then
+      rc=0
+    else
+      rc=$?
+    fi
   fi
   {
     printf "# %s|%s|%s|%s|%s|%s\n" "$prov" "$isp" "$protocol" "$host" "$idx" "$target_ip"
     [ -n "$target_ip" ] && printf "target %s\n" "$target_ip"
     printf "%s\n" "$output"
   } > "$trace_file"
+  if [ "$protocol" = "nexttrace" ] && [ "$rc" -ne 0 ] &&
+     printf "%s\n" "$output" | grep -Eq '(^usage:|bad integer value|unknown arguments)'; then
+    echo "FAIL|$prov|$isp|$protocol|$host|NEXTTRACE_ERROR" > "$outfile"
+    return
+  fi
   if [ "$family" = "4" ] && [ "$protocol" = "tcp" ] && route_needs_10099_hidden_tcp_retry "$trace_file"; then
     if retry_output=$(traceroute "${args[@]}" 2>&1); then
       retry_rc=0
@@ -1843,7 +1995,7 @@ show_route_results() {
 }
 
 run_route_mode() {
-  local family="${1:-4}" idx=0 entry prov isp host protocol route_raw_file route_file ip_file cymru_file asn_map_file prefix
+  local family="${1:-4}" idx=0 entry prov isp host fixed_ip port backup_host backup_ip backup_port protocol route_raw_file route_file ip_file cymru_file asn_map_file prefix
   local route_parallel="$PARALLEL"
   local -a protocols=()
   if [ "$ROUTE_PROTOCOL" = "both" ]; then
@@ -1886,7 +2038,7 @@ run_route_mode() {
 
   show_progress
   for protocol in "${protocols[@]}"; do
-    while IFS='|' read -r prov isp host fixed_ip port; do
+    while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
       province_selected "$prov" || continue
       idx=$((idx + 1))
       while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
@@ -1954,23 +2106,25 @@ run_route_mode() {
 }
 
 collect_route_labels() {
-  local family="$1" out_file="$2" idx=0 entry prov isp host route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label prefix
+  local family="$1" out_file="$2" idx=0 entry prov isp host fixed_ip port backup_host backup_ip backup_port route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label prefix
+  prefix="${3:-summary_route${family}}"
+  local packet_length="${4:-44}"
+  local route_protocol="${5:-tcp}"
   local route_parallel="$PARALLEL"
-  prefix="summary_route${family}"
   route_total=0
   while IFS='|' read -r prov isp host _; do
     province_selected "$prov" && route_total=$((route_total + 1))
   done < <(print_cdn_entries "$family")
   [ "$route_total" -eq 0 ] && return 0
 
-  while IFS='|' read -r prov isp host fixed_ip port; do
+  while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
     province_selected "$prov" || continue
     port=${port:-80}
     idx=$((idx + 1))
     while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
       sleep 0.2
     done
-    route_trace_one "$family" tcp "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
+    route_trace_one "$family" "$route_protocol" "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" "$packet_length" &
   done < <(print_cdn_entries "$family")
   wait
 
@@ -1994,9 +2148,9 @@ collect_route_labels() {
       trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
       extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
       label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$isp")
-      echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
+      echo "OK|$prov|$isp|$protocol|$host|$label" >> "$out_file"
     elif [ -n "$status" ]; then
-      echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
+      echo "$status|$prov|$isp|$protocol|$host|${value:-Hidden}" >> "$out_file"
     fi
   done < "$route_raw_file"
 
@@ -2088,9 +2242,12 @@ collect_education_route_labels() {
 }
 
 set_route_progress_total() {
-  local has_v4="$1" has_v6="$2" include_cdn="${3:-1}" include_edu="${4:-0}"
+  local has_v4="$1" has_v6="$2" include_cdn="${3:-1}" include_edu="${4:-0}" include_large="${5:-0}"
   ROUTE_PROGRESS_TOTAL=0
   if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
+  fi
+  if [ "$include_large" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
     ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
   fi
   if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
@@ -2106,11 +2263,14 @@ set_route_progress_total() {
 }
 
 start_route_background() {
-  local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4" include_cdn="${5:-1}" include_edu="${6:-0}" edu_route_labels_v4="${7:-}" edu_route_labels_v6="${8:-}"
+  local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4" include_cdn="${5:-1}" include_edu="${6:-0}" edu_route_labels_v4="${7:-}" edu_route_labels_v6="${8:-}" large_route_labels_v4="${9:-}" include_large="${10:-0}"
   [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ] || return 0
   (
     if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
       collect_route_labels 4 "$route_labels_v4"
+    fi
+    if [ "$include_large" -eq 1 ] && [ "$has_v4" -eq 1 ] && [ -n "$large_route_labels_v4" ]; then
+      collect_route_labels 4 "$large_route_labels_v4" "summary_large_route4" 1200 nexttrace
     fi
     if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
       collect_route_labels 6 "$route_labels_v6"
@@ -2164,11 +2324,26 @@ probe_target() {
   fi
 
   local sent=0 rcvd=0 loss_pct avg_rtt rtt_sum="0" one_sent one_rcvd one_rtt one_success i packet_size payload_size header_size
+  local large_packet_mode="${LARGE_PACKET_MODE:-0}" large_big_target=0 large_big_used=0 large_small_used=0 remaining big_remaining small_remaining
   header_size=40
   [ "$family" = "6" ] && header_size=60
+  if [ "$large_packet_mode" -eq 1 ]; then
+    large_big_target=$(((PACKETS * 3 + 3) / 4))
+  fi
   for ((i = 1; i <= PACKETS; i++)); do
     if [ -n "$PACKET_SIZE_OVERRIDE" ]; then
       packet_size="$PACKET_SIZE_OVERRIDE"
+    elif [ "$large_packet_mode" -eq 1 ]; then
+      remaining=$((PACKETS - i + 1))
+      big_remaining=$((large_big_target - large_big_used))
+      small_remaining=$((PACKETS - large_big_target - large_small_used))
+      if [ "$big_remaining" -ge "$remaining" ] || [ "$small_remaining" -le 0 ] || [ $((RANDOM % remaining)) -lt "$big_remaining" ]; then
+        packet_size="${LARGE_PACKET_BIG_SIZES[$((RANDOM % ${#LARGE_PACKET_BIG_SIZES[@]}))]}"
+        large_big_used=$((large_big_used + 1))
+      else
+        packet_size="${LARGE_PACKET_SMALL_SIZES[$((RANDOM % ${#LARGE_PACKET_SMALL_SIZES[@]}))]}"
+        large_small_used=$((large_small_used + 1))
+      fi
     else
       packet_size="${PACKET_SIZES[$((RANDOM % ${#PACKET_SIZES[@]}))]}"
     fi
@@ -2270,12 +2445,46 @@ test_one() {
   printf "%s\n" "$primary_result" > "$outfile"
 }
 
+large_packet_precheck() {
+  local ip result status _prov _isp _host _ip sent rcv loss lat
+  ip=$(resolve_first_public_ipv4 "$LARGE_PACKET_PRECHECK_DOMAIN" || true)
+  if [ -z "$ip" ]; then
+    LARGE_PACKET_FIREWALL_LIMITED=1
+    LARGE_PACKET_PRECHECK_LOSS="100.00"
+    return 1
+  fi
+
+  local PACKETS="$LARGE_PACKET_PRECHECK_PACKETS"
+  local PACKET_SIZE_OVERRIDE="$LARGE_PACKET_PRECHECK_SIZE"
+  result=$(probe_target "largepre" 4 "Cloudflare" "预检" "$LARGE_PACKET_PRECHECK_DOMAIN" "$ip" 443 0 precheck)
+  IFS='|' read -r status _prov _isp _host _ip sent rcv loss lat <<< "$result"
+  LARGE_PACKET_PRECHECK_LOSS="${loss:-100.00}"
+  if [ "$status" != "OK" ] || awk -v loss="${loss:-100}" 'BEGIN { exit !(loss + 0 >= 100) }'; then
+    LARGE_PACKET_FIREWALL_LIMITED=1
+    return 1
+  fi
+  LARGE_PACKET_FIREWALL_LIMITED=0
+  return 0
+}
+
+test_large_one() {
+  local PACKET_SIZE_OVERRIDE=""
+  local LARGE_PACKET_MODE=1
+  test_one "$@"
+}
+
+write_large_skip_result() {
+  local prov="$1" isp="$2" host="$3" fixed_ip="$4" idx="$5"
+  printf 'SKIP|%s|%s|%s|%s|0|0|-|-\n' "$prov" "$isp" "$host" "${fixed_ip:-FIREWALL_LIMITED}" > "${RESULT_DIR}/large4_${idx}"
+}
+
 export -f probe_target
 export -f combine_probe_results
 export -f test_one
+export -f test_large_one
 export -f get_ipv6_route
 export -f is_public_ipv4
-export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE
+export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE LARGE_PACKET_SIZES
 
 # ===================== 国际互联 TCP ping =====================
 international_task_count() {
@@ -3124,6 +3333,7 @@ main() {
   detect_ip_stack
 
   local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 test_edu=0 want_ipv4=1 want_ipv6=1
+  local large_packet_enabled=0 large_packet_probe_enabled=0 large_node_count=0
   if [ "$TEST_ALL" -eq 1 ]; then
     want_ipv4=1
     want_ipv6=1
@@ -3162,8 +3372,22 @@ main() {
   cernet_node_count=$(count_cernet_nodes)
   cernet2_node_count=$(count_cernet2_nodes)
 
+  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then
+    large_packet_enabled=1
+    large_node_count="$cdn4_node_count"
+    if ! check_nexttrace; then
+      large_packet_enabled=0
+      large_packet_probe_enabled=0
+    elif large_packet_precheck; then
+      large_packet_probe_enabled=1
+    else
+      large_packet_probe_enabled=0
+    fi
+  fi
+
   TOTAL=0
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + cdn4_node_count)); fi
+  if [ "$large_packet_probe_enabled" -eq 1 ]; then TOTAL=$((TOTAL + large_node_count)); fi
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet_node_count)); fi
   if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
@@ -3187,8 +3411,15 @@ main() {
     [ "$COUNT_EXPLICIT" -eq 1 ] && INTERNATIONAL_PACKETS="$PACKETS"
     INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
   fi
-  local size_text="${PACKET_SIZE_OVERRIDE}B"
-  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL  国际互联: ${INTERNATIONAL_PROGRESS_TOTAL}  每节点发包: $PACKETS  国际互联每目标: $INTERNATIONAL_PACKETS  包长: $size_text  并行: $PARALLEL  端口: 回程80/tcp，国际443/tcp${NC}"
+  local size_text="${PACKET_SIZE_OVERRIDE}B" large_text=""
+  if [ "$large_packet_enabled" -eq 1 ]; then
+    if [ "$large_packet_probe_enabled" -eq 1 ]; then
+      large_text="  IPv4大包: ${large_node_count}"
+    else
+      large_text="  IPv4大包: 防火墙限制"
+    fi
+  fi
+  echo -e "${DIM}  检测范围: $(province_filter_text)  探测节点: $TOTAL${large_text}  国际互联: ${INTERNATIONAL_PROGRESS_TOTAL}  每节点发包: $PACKETS  国际互联每目标: $INTERNATIONAL_PACKETS  包长: $size_text  并行: $PARALLEL  端口: 回程80/tcp，国际443/tcp${NC}"
   echo ""
 
   local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
@@ -3201,13 +3432,15 @@ main() {
     check_traceroute
   fi
 
-  local sorted_v4 sorted_v6 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 edu_route_labels_v4 edu_route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
+  local sorted_v4 sorted_v6 sorted_large_v4 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 route_labels_large_v4 edu_route_labels_v4 edu_route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
   sorted_v4=$(mktemp)
   sorted_v6=$(mktemp)
+  sorted_large_v4=$(mktemp)
   sorted_cernet=$(mktemp)
   sorted_cernet2=$(mktemp)
   route_labels_v4=$(mktemp)
   route_labels_v6=$(mktemp)
+  route_labels_large_v4=$(mktemp)
   edu_route_labels_v4=$(mktemp)
   edu_route_labels_v6=$(mktemp)
 
@@ -3220,7 +3453,7 @@ main() {
     INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
   fi
   if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
-    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu"
+    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$large_packet_probe_enabled"
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
@@ -3241,6 +3474,19 @@ main() {
         show_progress
       done < <(print_cdn_entries "$family")
     done
+  fi
+  if [ "$large_packet_probe_enabled" -eq 1 ]; then
+    while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
+      port=${port:-80}
+      province_selected "$prov" || continue
+      idx=$((idx + 1))
+      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
+        show_progress
+        sleep 0.2
+      done
+      test_large_one "large4" 4 "$prov" "$isp" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-80}" &
+      show_progress
+    done < <(print_cdn_entries 4)
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
     while IFS='|' read -r prov host fixed_ip port backup_host backup_ip backup_port; do
@@ -3274,8 +3520,17 @@ main() {
   done
   show_progress
 
+  if [ "$large_packet_enabled" -eq 1 ] && [ "$large_packet_probe_enabled" -eq 0 ]; then
+    i=0
+    while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
+      province_selected "$prov" || continue
+      i=$((i + 1))
+      write_large_skip_result "$prov" "$isp" "$host" "$fixed_ip" "$i"
+    done < <(print_cdn_entries 4)
+  fi
+
   if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6"
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_probe_enabled"
     wait_route_background
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
@@ -3308,6 +3563,20 @@ main() {
           echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_file"
         fi
       done
+    done
+  fi
+  if [ "$large_packet_enabled" -eq 1 ]; then
+    for f in "$RESULT_DIR"/large4_[0-9]*; do
+      [ -f "$f" ] || continue
+      IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
+      if [ "$large_packet_probe_enabled" -eq 1 ]; then
+        route_label=$(awk -F'|' -v p="$prov" -v i="$isp" '$2 == p && $3 == i { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$route_labels_large_v4")
+      else
+        route_label="Hidden"
+      fi
+      route_label=${route_label:-Hidden}
+      echo "IPv4大包,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
+      echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_large_v4"
     done
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
@@ -3351,6 +3620,9 @@ main() {
     if [ "$ipv4_enabled" -eq 1 ]; then
       show_family_results "IPv4" "$sorted_v4" "$route_labels_v4"
     fi
+    if [ "$large_packet_enabled" -eq 1 ]; then
+      show_large_packet_results "IPv4大包回程质量(beta)" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
+    fi
     if [ "$ipv6_enabled" -eq 1 ]; then
       show_family_results "IPv6" "$sorted_v6" "$route_labels_v6"
     fi
@@ -3380,7 +3652,7 @@ main() {
   fi
   echo ""
 
-  rm -f "$sorted_v4" "$sorted_v6" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6" "$edu_route_labels_v4" "$edu_route_labels_v6"
+  rm -f "$sorted_v4" "$sorted_v6" "$sorted_large_v4" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6" "$route_labels_large_v4" "$edu_route_labels_v4" "$edu_route_labels_v6"
 }
 
 parse_args "$@"
