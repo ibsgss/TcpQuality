@@ -27,17 +27,24 @@ bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
 ## 支持参数
 
 - `-h`、`--help`：显示帮助信息并退出。
-- `-c NUM`、`--count NUM`：设置每个节点的发包数量，默认 30。
+- `-c NUM`、`--count NUM`：设置每个节点的发包数量，范围 1-600，默认 30。
 - `-s NUM`、`--size NUM`：指定 IP 包总长度，单位为 B；`0` 表示标准无负载 SYN，未指定时随机使用内置包长，过小的数值按协议最小头部发送。
 - `-p NUM`、`--parallel NUM`：设置并行节点数，范围 1-31，默认 16。
 - `-v4`、`--v4`：仅探测 IPv4。
 - `-v6`、`--v6`：仅探测 IPv6。
 - `--cernet`：仅探测 CERNET IPv4 和 CERNET2 IPv6。
-- `--all`：检测三网、CERNET 和 CERNET2；出现 `--all` 时会探测全部可用 IP 协议。
+- `--all`：检测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest。
 - `--speedtest`：完成 TCP 质量探测后，追加国内电信、联通、移动分阶段 Speedtest 测速。
 - `--only-speedtest`：仅运行国内电信、联通、移动分阶段 Speedtest 测速。
+- `--intl`：单独使用时仅运行国际互联；与 `-v4`、`-v6`、`--all` 等组合时追加国际互联。
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
+
+## 依赖说明
+
+- `nping`：随 nmap 安装，用于 TCP SYN 探测。
+- `traceroute`：用于自动识别三网 TCP 回程线路。
+- `nexttrace`：可选；用于 IPv4大包回程质量(beta) 的 TCP 大包路由识别。
 
 ## Star History
 
