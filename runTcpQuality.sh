@@ -274,6 +274,7 @@ TEST_ALL=0
 UPLOAD_REPORT=1
 ONLY_IPV4=0
 ONLY_IPV6=0
+ONLY_LARGE=0
 ROUTE_MODE=0
 ROUTE_PROTOCOL="tcp"
 ROUTE_ACTIVE_PREFIX=""
@@ -281,7 +282,7 @@ SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
 SPEEDTEST_ONLY=0
-INTERNATIONAL_ENABLED=1
+INTERNATIONAL_ENABLED=0
 INTERNATIONAL_ONLY=0
 INTL_REQUESTED=0
 INTERNATIONAL_PROGRESS_TOTAL=0
@@ -334,6 +335,7 @@ INTERNATIONAL_SITE_TARGETS=(
   'GitLab|gitlab.com'
   'Gmail|mail.google.com'
   'Google Search|www.google.com'
+  'Google Static|www.gstatic.com'
   'Instagram|www.instagram.com'
   'Microsoft Login|login.microsoftonline.com'
   'Netflix API|api-global.netflix.com'
@@ -570,6 +572,7 @@ NixOS:
                      设置并行节点数，范围 1-31，默认 ${PARALLEL}
   -v4, --v4         仅探测 IPv4
   -v6, --v6         仅探测 IPv6
+  --only-large      仅探测 IPv4大包回程质量(beta)
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
   --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
@@ -649,6 +652,10 @@ parse_args() {
         ONLY_IPV6=1
         shift
         ;;
+      --only-large)
+        ONLY_LARGE=1
+        shift
+        ;;
       --cernet)
         TEST_CERNET=1
         shift
@@ -656,6 +663,7 @@ parse_args() {
       --all)
         TEST_ALL=1
         SPEEDTEST_ENABLED=1
+        INTERNATIONAL_ENABLED=1
         shift
         ;;
       --route)
@@ -714,7 +722,20 @@ parse_args() {
     esac
   done
 
+  if [ "$ONLY_LARGE" -eq 1 ]; then
+    ONLY_IPV4=1
+    ONLY_IPV6=0
+    TEST_CERNET=0
+    TEST_ALL=0
+    ROUTE_MODE=0
+    SPEEDTEST_ENABLED=0
+    SPEEDTEST_ONLY=0
+    INTERNATIONAL_ENABLED=0
+    INTERNATIONAL_ONLY=0
+  fi
+
   if [ "$INTL_REQUESTED" -eq 1 ] \
+    && [ "$ONLY_LARGE" -eq 0 ] \
     && [ "$ONLY_IPV4" -eq 0 ] \
     && [ "$ONLY_IPV6" -eq 0 ] \
     && [ "$TEST_CERNET" -eq 0 ] \
@@ -3332,7 +3353,7 @@ main() {
   check_nping
   detect_ip_stack
 
-  local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 test_edu=0 want_ipv4=1 want_ipv6=1
+  local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 normal_cdn_enabled=1 test_edu=0 want_ipv4=1 want_ipv6=1
   local large_packet_enabled=0 large_packet_probe_enabled=0 large_node_count=0
   if [ "$TEST_ALL" -eq 1 ]; then
     want_ipv4=1
@@ -3355,10 +3376,16 @@ main() {
 
   if [ "$TEST_CERNET" -eq 1 ] && [ "$TEST_ALL" -eq 0 ]; then
     test_cdn=0
+    normal_cdn_enabled=0
     test_edu=1
     INTERNATIONAL_ENABLED=0
   elif [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then
     test_edu=1
+  fi
+  if [ "$ONLY_LARGE" -eq 1 ]; then
+    normal_cdn_enabled=0
+    test_edu=0
+    INTERNATIONAL_ENABLED=0
   fi
   if [ "$want_ipv4" -eq 0 ] || [ "$ipv4_enabled" -eq 0 ]; then
     INTERNATIONAL_ENABLED=0
@@ -3386,12 +3413,12 @@ main() {
   fi
 
   TOTAL=0
-  if [ "$ipv4_enabled" -eq 1 ] && [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + cdn4_node_count)); fi
-  if [ "$large_packet_probe_enabled" -eq 1 ]; then TOTAL=$((TOTAL + large_node_count)); fi
+  if [ "$ipv4_enabled" -eq 1 ] && [ "$normal_cdn_enabled" -eq 1 ]; then TOTAL=$((TOTAL + cdn4_node_count)); fi
+  if [ "$large_packet_probe_enabled" -eq 1 ] || { [ "$ONLY_LARGE" -eq 1 ] && [ "$large_packet_enabled" -eq 1 ]; }; then TOTAL=$((TOTAL + large_node_count)); fi
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet_node_count)); fi
   if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
-    if [ "$test_cdn" -eq 1 ]; then TOTAL=$((TOTAL + cdn6_node_count)); fi
+    if [ "$normal_cdn_enabled" -eq 1 ]; then TOTAL=$((TOTAL + cdn6_node_count)); fi
     if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet2_node_count)); fi
     echo -e "${GREEN}[√] 检测到可用 IPv6${NC}"
   elif [ "$want_ipv6" -eq 1 ]; then
@@ -3424,11 +3451,11 @@ main() {
 
   local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
   local -a families=()
-  if [ "$test_cdn" -eq 1 ]; then
+  if [ "$normal_cdn_enabled" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then families+=(4); fi
     if [ "$ipv6_enabled" -eq 1 ]; then families+=(6); fi
   fi
-  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
+  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
     check_traceroute
   fi
 
@@ -3452,15 +3479,15 @@ main() {
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
   fi
-  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
-    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$large_packet_probe_enabled"
+  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_probe_enabled" -eq 1 ]; then
+    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$large_packet_probe_enabled"
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
 
   local idx=0
   show_progress
-  if [ "$test_cdn" -eq 1 ]; then
+  if [ "$normal_cdn_enabled" -eq 1 ]; then
     for family in "${families[@]}"; do
       while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
         port=${port:-80}
@@ -3529,8 +3556,8 @@ main() {
     done < <(print_cdn_entries 4)
   fi
 
-  if [ "$test_cdn" -eq 1 ] || [ "$test_edu" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$test_cdn" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_probe_enabled"
+  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_probe_enabled" -eq 1 ]; then
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_probe_enabled"
     wait_route_background
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
@@ -3550,7 +3577,7 @@ main() {
   printf '\xEF\xBB\xBF' > "$CSV"
   echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$CSV"
 
-  if [ "$test_cdn" -eq 1 ]; then
+  if [ "$normal_cdn_enabled" -eq 1 ]; then
     for family in "${families[@]}"; do
       if [ "$family" = "4" ]; then sorted_file="$sorted_v4"; else sorted_file="$sorted_v6"; fi
       if [ "$family" = "4" ]; then route_file="$route_labels_v4"; else route_file="$route_labels_v6"; fi
@@ -3616,16 +3643,16 @@ main() {
   echo -e "  ${DIM}报告时间：${report_time}${NC}"
   echo ""
 
-  if [ "$test_cdn" -eq 1 ]; then
+  if [ "$normal_cdn_enabled" -eq 1 ]; then
     if [ "$ipv4_enabled" -eq 1 ]; then
       show_family_results "IPv4" "$sorted_v4" "$route_labels_v4"
-    fi
-    if [ "$large_packet_enabled" -eq 1 ]; then
-      show_large_packet_results "IPv4大包回程质量(beta)" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
     fi
     if [ "$ipv6_enabled" -eq 1 ]; then
       show_family_results "IPv6" "$sorted_v6" "$route_labels_v6"
     fi
+  fi
+  if [ "$large_packet_enabled" -eq 1 ]; then
+    show_large_packet_results "IPv4大包回程质量(beta)" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
   fi
   if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
     show_education_combined "$sorted_cernet" "$sorted_cernet2"
