@@ -56,15 +56,14 @@ bootstrap_nixos_environment() {
     nixpkgs#gnused
     nixpkgs#iproute2
     nixpkgs#iputils
-    nixpkgs#jq
     nixpkgs#kmod
     nixpkgs#ncurses
     nixpkgs#nmap
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
-    # 官方 Ookla CLI 在 nixpkgs 中是 unfree 包，仅测速模式加载。
-    nix_packages+=(nixpkgs#ookla-speedtest)
+    # 分阶段测速已改用 tosutil，进入 Nix 环境后由脚本按需下载官方二进制。
+    :
   fi
 
   echo '[i] NixOS：正在进入临时 Nix 环境（不会修改 systemPackages）...'
@@ -561,7 +560,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 
 NixOS:
   脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
-  使用 --speedtest/--only-speedtest 时会临时加载 unfree 的 ookla-speedtest。
+  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做三网分阶段单流测速。
 
 选项:
   -h, --help        显示帮助信息并退出
@@ -574,12 +573,12 @@ NixOS:
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程质量(beta)
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
-  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest
+  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和国内三网单线程测速
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
-  --speedtest       追加国内三网分阶段 Speedtest（避免影响延迟探测）
-  --only-speedtest  仅运行国内三网分阶段 Speedtest
+  --speedtest       追加国内三网单线程测速（避免影响延迟探测）
+  --only-speedtest  仅运行国内三网单线程测速
   --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
@@ -596,7 +595,7 @@ NixOS:
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace: 可选；用于 IPv4大包回程质量(beta) 的 TCP 1200B 大包路由识别
-  - speedtest/iproute2: 分阶段测速使用
+  - tosutil/iproute2/kmod: 分阶段测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -2732,6 +2731,23 @@ SPEEDTEST_RATES=(10 200 unlimited)
 SPEEDTEST_IFB="ifb_tqtest"
 SPEEDTEST_IFACE=""
 SPEEDTEST_CREATED_IFB=0
+SPEEDTEST_TOSUTIL_URL="https://m645b3e1bb36e-mrap.mrap.accesspoint.tos-global.volces.com/linux/amd64/tosutil"
+SPEEDTEST_TOSUTIL_BIN="${TOSUTIL_BIN:-}"
+SPEEDTEST_TOS_REGION="${TOS_REGION:-cn-beijing}"
+SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
+SPEEDTEST_TOS_SIZE="${TOS_PROBE_SIZE:-5GB}"
+SPEEDTEST_TOS_TIMEOUT="${TOS_TIMEOUT:-15}"
+SPEEDTEST_TOS_WARMUP="${TOS_WARMUP:-5}"
+SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
+SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
+SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
+SPEEDTEST_TOS_REMOTE_LOADED=0
+SPEEDTEST_TOS_CT_CITY="北京"
+SPEEDTEST_TOS_CU_CITY="北京"
+SPEEDTEST_TOS_CM_CITY="北京"
+SPEEDTEST_HOSTS_BACKUP=""
+SPEEDTEST_HOSTS_MARK_BEGIN="# tcpquality-tos-speedtest begin"
+SPEEDTEST_HOSTS_MARK_END="# tcpquality-tos-speedtest end"
 SPEEDTEST_TELECOM_ID=""
 SPEEDTEST_TELECOM_CITY=""
 SPEEDTEST_UNICOM_ID=""
@@ -2743,15 +2759,65 @@ SPEEDTEST_ROWS=()
 speedtest_candidates() {
   case "$1" in
     电信)
-      printf '%s\n' '59386|杭州' '59387|宁波' '5396|苏州' '36663|镇江'
+      printf '%s\n' "$SPEEDTEST_TOS_CT_IP|$SPEEDTEST_TOS_CT_CITY"
       ;;
     联通)
-      printf '%s\n' '24447|上海' '43752|北京'
+      printf '%s\n' "$SPEEDTEST_TOS_CU_IP|$SPEEDTEST_TOS_CU_CITY"
       ;;
     移动)
-      printf '%s\n' '16204|苏州' '54312|杭州' '60584|深圳' '60794|广州' '4575|成都' '25858|北京'
+      printf '%s\n' "$SPEEDTEST_TOS_CM_IP|$SPEEDTEST_TOS_CM_CITY"
       ;;
   esac
+}
+
+load_remote_speedtest_nodes() {
+  local tmp url sep line type family prov isp host ip port target backup_host backup_ip backup_port backup_target
+  local loaded_ct=0 loaded_cu=0 loaded_cm=0
+  [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ] && return 0
+  command -v curl &>/dev/null || return 1
+
+  tmp=$(mktemp)
+  sep="?"
+  [[ "$GET_NODES_URL" == *"?"* ]] && sep="&"
+  url="${GET_NODES_URL}${sep}format=tsv&scope=tos"
+  if ! curl -fsSL --connect-timeout 5 --max-time 30 "$url" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target; do
+    [ "$type" = "type" ] && continue
+    [ "$family" = "4" ] || continue
+    [ -n "$ip" ] || continue
+    case "$type" in
+      tos|tosutil|speedtest) ;;
+      *) continue ;;
+    esac
+    case "$isp" in
+      电信|CT|ChinaTelecom|chinatelecom)
+        SPEEDTEST_TOS_CT_IP="$ip"
+        SPEEDTEST_TOS_CT_CITY="${prov:-北京}"
+        loaded_ct=1
+        ;;
+      联通|CU|ChinaUnicom|chinaunicom)
+        SPEEDTEST_TOS_CU_IP="$ip"
+        SPEEDTEST_TOS_CU_CITY="${prov:-北京}"
+        loaded_cu=1
+        ;;
+      移动|CM|ChinaMobile|chinamobile)
+        SPEEDTEST_TOS_CM_IP="$ip"
+        SPEEDTEST_TOS_CM_CITY="${prov:-北京}"
+        loaded_cm=1
+        ;;
+    esac
+  done < "$tmp"
+  rm -f "$tmp"
+
+  if [ "$loaded_ct" -eq 1 ] || [ "$loaded_cu" -eq 1 ] || [ "$loaded_cm" -eq 1 ]; then
+    SPEEDTEST_TOS_REMOTE_LOADED=1
+    return 0
+  fi
+  return 1
 }
 
 speedtest_selected_id() {
@@ -2790,31 +2856,32 @@ speedtest_cleanup() {
     ip link delete "$SPEEDTEST_IFB" type ifb 2>/dev/null || true
     SPEEDTEST_CREATED_IFB=0
   fi
+  speedtest_restore_hosts
 }
 
 speedtest_dependencies_ready() {
   local cmd
-  for cmd in ip tc nstat modprobe jq curl; do
+  for cmd in ip tc nstat modprobe awk curl; do
     command -v "$cmd" &>/dev/null || return 1
   done
 }
 
 install_speedtest_dependencies() {
   if is_nixos; then
-    echo -e "${RED}[X] Nix 临时环境中的 Speedtest 依赖不完整${NC}" >&2
+    echo -e "${RED}[X] Nix 临时环境中的测速依赖不完整${NC}" >&2
     return 1
   fi
   show_dependency_install_notice
   if command -v apt-get &>/dev/null; then
     $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq \
-      iproute2 kmod jq curl ca-certificates gnupg >/dev/null 2>&1
+      iproute2 kmod gawk curl ca-certificates >/dev/null 2>&1
   elif command -v dnf &>/dev/null; then
-    $USE_SUDO dnf install -y -q iproute kmod jq curl ca-certificates gnupg2 >/dev/null 2>&1
+    $USE_SUDO dnf install -y -q iproute kmod gawk curl ca-certificates >/dev/null 2>&1
   elif command -v yum &>/dev/null; then
-    $USE_SUDO yum install -y -q iproute kmod jq curl ca-certificates gnupg2 >/dev/null 2>&1
+    $USE_SUDO yum install -y -q iproute kmod gawk curl ca-certificates >/dev/null 2>&1
   elif command -v apk &>/dev/null; then
-    $USE_SUDO apk add --no-cache iproute2 kmod jq curl ca-certificates gnupg >/dev/null 2>&1
+    $USE_SUDO apk add --no-cache iproute2 kmod awk curl ca-certificates >/dev/null 2>&1
   else
     return 1
   fi
@@ -2826,53 +2893,30 @@ install_speedtest_dependencies() {
   return 1
 }
 
-is_ookla_speedtest() {
-  local version
-  command -v speedtest &>/dev/null || return 1
-  version=$(speedtest --version 2>&1 || true)
-  printf '%s' "$version" | grep -qi 'ookla'
-}
-
-install_ookla_speedtest() {
-  local installer
-  if is_nixos; then
-    echo -e "${RED}[X] 未找到 Ookla Speedtest；请直接使用 --speedtest 重新运行脚本${NC}" >&2
-    return 1
-  fi
-  show_dependency_install_notice
-
-  if command -v apt-get &>/dev/null; then
-    if dpkg-query -W -f='${Status}' speedtest-cli 2>/dev/null | grep -q 'install ok installed'; then
-      $USE_SUDO apt-get purge -y -qq speedtest-cli >/dev/null 2>&1 || return 1
-    fi
-    installer=$(mktemp /tmp/ookla-repo.XXXXXX.sh)
-    curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh \
-      -o "$installer" || return 1
-    $USE_SUDO bash "$installer" >/dev/null 2>&1 || return 1
-    rm -f "$installer"
-    $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq speedtest >/dev/null 2>&1 || return 1
-  elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
-    installer=$(mktemp /tmp/ookla-repo.XXXXXX.sh)
-    curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh \
-      -o "$installer" || return 1
-    $USE_SUDO bash "$installer" >/dev/null 2>&1 || return 1
-    rm -f "$installer"
-    if command -v dnf &>/dev/null; then
-      $USE_SUDO dnf install -y -q speedtest >/dev/null 2>&1 || return 1
-    else
-      $USE_SUDO yum install -y -q speedtest >/dev/null 2>&1 || return 1
-    fi
-  else
-    return 1
-  fi
-  hash -r
-  if is_ookla_speedtest; then
-    clear_dependency_install_notice
+install_tosutil_speedtest() {
+  if [ -n "$SPEEDTEST_TOSUTIL_BIN" ] && [ -x "$SPEEDTEST_TOSUTIL_BIN" ]; then
     return 0
   fi
+  if command -v tosutil &>/dev/null; then
+    SPEEDTEST_TOSUTIL_BIN=$(command -v tosutil)
+    return 0
+  fi
+  if [ -x ./tosutil ]; then
+    SPEEDTEST_TOSUTIL_BIN="./tosutil"
+    return 0
+  fi
+  show_dependency_install_notice
+  $USE_SUDO curl -fL -o /usr/local/bin/tosutil "$SPEEDTEST_TOSUTIL_URL" >/dev/null 2>&1 || {
+    clear_dependency_install_notice
+    return 1
+  }
+  $USE_SUDO chmod +x /usr/local/bin/tosutil >/dev/null 2>&1 || {
+    clear_dependency_install_notice
+    return 1
+  }
+  SPEEDTEST_TOSUTIL_BIN="/usr/local/bin/tosutil"
   clear_dependency_install_notice
-  return 1
+  return 0
 }
 
 speedtest_retrans_count() {
@@ -2900,50 +2944,140 @@ speedtest_apply_limit() {
 }
 
 speedtest_result_valid() {
-  local file="$1"
-  jq -e '.type == "result" and (.download.bandwidth | numbers) and (.upload.bandwidth | numbers)' \
-    "$file" >/dev/null 2>&1
+  local value="$1"
+  [ "$value" != "failed" ] && [ -n "$value" ]
 }
 
-speedtest_run_node() {
-  local server_id="$1" output_file="$2"
-  speedtest --accept-license --accept-gdpr -s "$server_id" -f json --progress=no \
-    >"$output_file" 2>"${output_file}.err" || return 1
-  speedtest_result_valid "$output_file"
+speedtest_endpoint_hosts() {
+  printf '%s\n' \
+    "tos-${SPEEDTEST_TOS_REGION}.volces.com" \
+    "tos7-public.${SPEEDTEST_TOS_REGION}.tos.volces.com"
 }
 
-speedtest_run_carrier() {
-  local carrier="$1" output_file="$2"
-  local selected_id selected_city
-  local candidate server_id city
-  selected_id=$(speedtest_selected_id "$carrier")
-  selected_city=$(speedtest_selected_city "$carrier")
+speedtest_restore_hosts() {
+  [ -n "${SPEEDTEST_HOSTS_BACKUP:-}" ] && [ -f "$SPEEDTEST_HOSTS_BACKUP" ] || return 0
+  $USE_SUDO cp "$SPEEDTEST_HOSTS_BACKUP" /etc/hosts 2>/dev/null || true
+  rm -f "$SPEEDTEST_HOSTS_BACKUP"
+  SPEEDTEST_HOSTS_BACKUP=""
+}
 
-  if [ -n "$selected_id" ] && speedtest_run_node "$selected_id" "$output_file"; then
+speedtest_force_hosts() {
+  local ip="$1" tmp host
+  [ -n "$ip" ] || return 1
+  if [ -z "${SPEEDTEST_HOSTS_BACKUP:-}" ]; then
+    SPEEDTEST_HOSTS_BACKUP=$(mktemp /tmp/tcpquality-tos-hosts.XXXXXX)
+    cp /etc/hosts "$SPEEDTEST_HOSTS_BACKUP" || return 1
+  fi
+  tmp=$(mktemp /tmp/tcpquality-tos-hosts-new.XXXXXX)
+  awk -v begin="$SPEEDTEST_HOSTS_MARK_BEGIN" -v end="$SPEEDTEST_HOSTS_MARK_END" '
+    $0 == begin {skip=1; next}
+    $0 == end {skip=0; next}
+    !skip {print}
+  ' "$SPEEDTEST_HOSTS_BACKUP" > "$tmp"
+  {
+    echo "$SPEEDTEST_HOSTS_MARK_BEGIN"
+    while IFS= read -r host; do
+      [ -n "$host" ] && echo "$ip $host"
+    done < <(speedtest_endpoint_hosts)
+    echo "$SPEEDTEST_HOSTS_MARK_END"
+  } >> "$tmp"
+  $USE_SUDO cp "$tmp" /etc/hosts || {
+    rm -f "$tmp"
+    return 1
+  }
+  rm -f "$tmp"
+}
+
+speedtest_parse_rate_mbps() {
+  awk '
+    /Average .* rate:/ {
+      value = $(NF)
+      gsub(/[^0-9.]/, "", value)
+      unit = $(NF)
+      if (unit ~ /GB\/s/) value = value * 8000
+      else if (unit ~ /MB\/s/) value = value * 8
+      else if (unit ~ /KB\/s/) value = value * 8 / 1000
+      else if (unit ~ /B\/s/) value = value * 8 / 1000000
+      printf "%.1f", value
+      found = 1
+    }
+    END { if (!found) printf "failed" }
+  '
+}
+
+speedtest_net_bytes() {
+  local probe_type="$1" stat="rx_bytes"
+  [ "$probe_type" = "upload" ] && stat="tx_bytes"
+  cat "/sys/class/net/$SPEEDTEST_IFACE/statistics/$stat" 2>/dev/null || printf -- '-'
+}
+
+speedtest_calc_mbps() {
+  local bytes="$1" seconds="$2"
+  awk -v b="$bytes" -v s="$seconds" 'BEGIN {
+    if (s <= 0 || b < 0) printf "failed";
+    else printf "%.1f", b * 8 / s / 1000000;
+  }'
+}
+
+speedtest_run_probe() {
+  local probe_type="$1" output_file="$2"
+  local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration
+  local output parsed pid elapsed exit_code result
+
+  "$SPEEDTEST_TOSUTIL_BIN" probe -tr "$SPEEDTEST_TOS_REGION" -pt "$probe_type" \
+    -nt "$SPEEDTEST_TOS_NETWORK" -ps "$SPEEDTEST_TOS_SIZE" -timeout "$SPEEDTEST_TOS_TIMEOUT" \
+    >"$output_file" 2>"${output_file}.err" &
+  pid=$!
+
+  elapsed=0
+  while [ "$elapsed" -lt "$SPEEDTEST_TOS_WARMUP" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    printf 'failed|0'
     return 0
   fi
-  speedtest_set_selected "$carrier" "" ""
 
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    server_id=${candidate%%|*}
-    city=${candidate#*|}
-    [ "$server_id" = "$selected_id" ] && continue
-    if speedtest_run_node "$server_id" "$output_file"; then
-      speedtest_set_selected "$carrier" "$server_id" "$city"
-      return 0
-    fi
-  done < <(speedtest_candidates "$carrier")
-
-  if [ -n "$selected_id" ]; then
-    speedtest_set_selected "$carrier" "$selected_id" "$selected_city"
+  start_bytes=$(speedtest_net_bytes "$probe_type")
+  before=$(speedtest_retrans_count)
+  start_time=$(date +%s)
+  if wait "$pid"; then
+    exit_code=0
+  else
+    exit_code=$?
   fi
-  return 1
+  end_time=$(date +%s)
+  end_bytes=$(speedtest_net_bytes "$probe_type")
+  after=$(speedtest_retrans_count)
+  output=$(cat "$output_file" 2>/dev/null || true)
+  parsed=$(printf '%s\n' "$output" | speedtest_parse_rate_mbps || true)
+
+  retrans=$((after - before))
+  [ "$retrans" -ge 0 ] || retrans=0
+
+  if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
+    result="$parsed"
+  else
+    duration=$((end_time - start_time))
+    delta_bytes=$((end_bytes - start_bytes))
+    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
+    [ "$result" != "failed" ] || result="$parsed"
+  fi
+
+  if [ "$exit_code" -ne 0 ] && [ "$parsed" = "failed" ]; then
+    result="failed"
+  fi
+
+  printf '%s|%s' "${result:-failed}" "$retrans"
+  return 0
 }
 
 speedtest_format_mbps() {
   local bandwidth="$1"
-  awk -v bytes="$bandwidth" 'BEGIN{printf "%.1f", bytes*8/1000000}'
+  printf '%s' "$bandwidth"
 }
 
 speedtest_carrier_title() {
@@ -3047,10 +3181,8 @@ speedtest_speed_color() {
     esac
   else
     level_name=$(awk -v value="$value" -v target="${label%Mbps}" 'BEGIN {
-      diff = (value - target) / target
-      if (diff < 0) diff = -diff
-      if (diff <= 0.20) print "ok"
-      else if (diff <= 0.50) print "warn"
+      if (value >= target * 0.8) print "ok"
+      else if (value >= target * 0.6) print "warn"
       else print "bad"
     }')
     case "$level_name" in
@@ -3073,8 +3205,8 @@ speedtest_retrans_color() {
 }
 
 collect_speedtest_results() {
-  local rate label carrier workdir result_file before after retrans index
-  local upload download result row done total offset
+  local rate label carrier workdir result_file index candidate server_id city
+  local upload upload_retrans download download_retrans done total offset
   local carriers=(电信 联通 移动)
   local carrier_values=()
   local rates=("$@")
@@ -3091,7 +3223,7 @@ collect_speedtest_results() {
   fi
 
   [ "$(uname)" = "Linux" ] || {
-    echo -e "${RED}[X] 分阶段 Speedtest 目前仅支持 Linux${NC}"
+    echo -e "${RED}[X] 国内三网单线程测速目前仅支持 Linux${NC}"
     exit 1
   }
   require_raw_socket_privilege
@@ -3100,8 +3232,17 @@ collect_speedtest_results() {
     echo -e "${RED}[X] 测速依赖安装失败${NC}"
     exit 1
   }
-  is_ookla_speedtest || install_ookla_speedtest || {
-    echo -e "${RED}[X] Ookla Speedtest 安装失败${NC}"
+  load_remote_speedtest_nodes || true
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    if [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ]; then
+      echo -e "${DIM}[debug] tosutil 入口来自 getNodes scope=tos${NC}" >&2
+    else
+      echo -e "${DIM}[debug] tosutil 入口使用内置 fallback IP${NC}" >&2
+    fi
+    echo -e "${DIM}[debug] tosutil 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
+  fi
+  install_tosutil_speedtest || {
+    echo -e "${RED}[X] tosutil 安装失败${NC}"
     exit 1
   }
 
@@ -3115,7 +3256,7 @@ collect_speedtest_results() {
     trap 'speedtest_cleanup; exit 130' INT TERM
   fi
 
-  echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
+  echo -e "${BOLD}${CYAN}国内三网单线程测速${NC}"
   echo
   speedtest_show_progress 0 "$total"
 
@@ -3129,18 +3270,28 @@ collect_speedtest_results() {
 
     for carrier in "${carriers[@]}"; do
       workdir=$(mktemp -d "$RESULT_DIR/speedtest.XXXXXX")
-      result_file="$workdir/result.json"
-      before=$(speedtest_retrans_count)
-      if speedtest_run_carrier "$carrier" "$result_file"; then
-        after=$(speedtest_retrans_count)
-        retrans=$((after - before))
-        [ "$retrans" -ge 0 ] || retrans=0
-        upload=$(jq -r '.upload.bandwidth' "$result_file")
-        download=$(jq -r '.download.bandwidth' "$result_file")
-        carrier_values+=("$(speedtest_format_mbps "$upload")|$retrans|$(speedtest_format_mbps "$download")")
+      result_file="$workdir/result"
+      candidate=$(speedtest_candidates "$carrier" | awk 'NF{print; exit}')
+      server_id=${candidate%%|*}
+      city=${candidate#*|}
+      speedtest_set_selected "$carrier" "$server_id" "$city"
+
+      if speedtest_force_hosts "$server_id"; then
+        IFS='|' read -r download download_retrans <<<"$(speedtest_run_probe download "$result_file.download")"
+        IFS='|' read -r upload upload_retrans <<<"$(speedtest_run_probe upload "$result_file.upload")"
+      else
+        download="failed"
+        download_retrans="0"
+        upload="failed"
+        upload_retrans="0"
+      fi
+
+      if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
+        carrier_values+=("$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")")
       else
         carrier_values+=("failed|failed|failed")
       fi
+      rm -rf "$workdir"
       done=$((done + 1))
       speedtest_show_progress "$done" "$total"
     done
@@ -3243,7 +3394,7 @@ show_speedtest_results() {
   local speed_color retrans_color
   local carriers=(电信 联通 移动)
   local results=()
-  echo -e "${BOLD}${CYAN}国内三网分阶段 Speedtest${NC}"
+  echo -e "${BOLD}${CYAN}国内三网单线程测速${NC}"
   echo
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
@@ -3283,10 +3434,10 @@ append_speedtest_csv() {
       carrier="${carriers[$index]}"
       IFS='|' read -r upload retrans download <<<"$result"
       if [ "$upload" = "failed" ]; then
-        printf 'Speedtest,%s,%s,%s,,,%s,%s,%s,%s,,\n' \
+        printf '国内三网单线程测速,%s,%s,%s,,,%s,%s,%s,%s,,\n' \
           "$label" "$carrier" "$(speedtest_selected_city "$carrier")" "FAIL" "$upload" "$retrans" "$download" >> "$csv"
       else
-        printf 'Speedtest,%s,%s,%s,%s,,%s,%s,%s,%s,,\n' \
+        printf '国内三网单线程测速,%s,%s,%s,%s,,%s,%s,%s,%s,,\n' \
           "$label" "$carrier" "$(speedtest_selected_city "$carrier")" "$(speedtest_selected_id "$carrier")" \
           "OK" "$upload" "$retrans" "$download" >> "$csv"
       fi
