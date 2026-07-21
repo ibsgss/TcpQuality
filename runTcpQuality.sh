@@ -2125,12 +2125,143 @@ run_route_mode() {
   rm -f "$route_raw_file" "$route_file" "$ip_file" "$cymru_file" "$asn_map_file"
 }
 
+# 默认仍按 16 并发运行；只有内存不够时，才减少同时启动的 NextTrace 数量。
+# 容器可能同时受自己和上级的内存限制，因此逐级检查，取最先会用完的那一级。
+cgroup_tree_headroom_kb() {
+  local root="$1" dir="$2" limit_file="$3" usage_file="$4"
+  local limit usage headroom min_headroom=""
+
+  [ -d "$root" ] || return 1
+  [ -d "$dir" ] || dir="$root"
+  case "$dir" in
+    "$root"|"$root"/*) ;;
+    *) return 1 ;;
+  esac
+
+  while :; do
+    # max 或特别大的数字表示“没有设置内存上限”，跳过即可。
+    if [ -r "$dir/$limit_file" ] && [ -r "$dir/$usage_file" ] &&
+       IFS= read -r limit < "$dir/$limit_file" &&
+       IFS= read -r usage < "$dir/$usage_file" &&
+       [[ "$limit" =~ ^[0-9]+$ ]] && [[ "$usage" =~ ^[0-9]+$ ]] &&
+       [ "${#limit}" -lt 19 ] && [ "${#usage}" -lt 19 ]; then
+      if [ "$limit" -gt "$usage" ]; then
+        headroom=$((limit - usage))
+      else
+        headroom=0
+      fi
+      if [ -z "$min_headroom" ] || [ "$headroom" -lt "$min_headroom" ]; then
+        min_headroom="$headroom"
+      fi
+    fi
+
+    if [ "$dir" = "$root" ]; then
+      break
+    fi
+    dir=${dir%/*}
+  done
+
+  [ -n "$min_headroom" ] || return 1
+  printf '%s\n' "$((min_headroom / 1024))"
+}
+
+cgroup_v2_headroom_kb() {
+  local root="/sys/fs/cgroup" rel dir
+  [ -d "$root" ] || return 1
+  rel=$(awk -F: '$1 == "0" { print $3; exit }' /proc/self/cgroup 2>/dev/null) || rel=""
+  if [[ "$rel" == *".."* ]]; then
+    dir="$root"
+  else
+    dir="${root}${rel%/}"
+  fi
+  cgroup_tree_headroom_kb "$root" "$dir" memory.max memory.current
+}
+
+cgroup_v1_headroom_kb() {
+  local root="/sys/fs/cgroup/memory" rel dir
+  rel=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3; exit }' /proc/self/cgroup 2>/dev/null) || rel=""
+  if [ ! -d "$root" ] && [ -r /sys/fs/cgroup/memory.limit_in_bytes ]; then
+    root="/sys/fs/cgroup"
+  fi
+  [ -d "$root" ] || return 1
+  if [[ "$rel" == *".."* ]]; then
+    dir="$root"
+  else
+    dir="${root}${rel%/}"
+  fi
+  cgroup_tree_headroom_kb "$root" "$dir" memory.limit_in_bytes memory.usage_in_bytes
+}
+
+effective_available_memory_kb() {
+  local host_available cgroup_available
+  host_available=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null) || host_available=""
+  [[ "$host_available" =~ ^[0-9]+$ ]] || return 1
+
+  # 容器里看到的可能是宿主机内存；同时检查容器剩余内存，哪个少就按哪个计算。
+  if cgroup_available=$(cgroup_v2_headroom_kb); then
+    if [ "$cgroup_available" -lt "$host_available" ]; then
+      host_available="$cgroup_available"
+    fi
+  elif cgroup_available=$(cgroup_v1_headroom_kb); then
+    if [ "$cgroup_available" -lt "$host_available" ]; then
+      host_available="$cgroup_available"
+    fi
+  fi
+  printf '%s\n' "$host_available"
+}
+
+calculate_nexttrace_parallel() {
+  local requested="$1" available_kb="$2"
+  local reserve_kb safe_parallel usable_kb
+
+  if ! [[ "$requested" =~ ^[0-9]+$ ]] || [ "$requested" -lt 1 ]; then
+    requested=1
+  fi
+  if ! [[ "$available_kb" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$requested"
+    return 0
+  fi
+
+  # 每个 NextTrace 实测约占 39 MiB，这里按 48 MiB 估算，并给系统额外留下 32-96 MiB。
+  reserve_kb=$((available_kb / 8))
+  if [ "$reserve_kb" -lt 32768 ]; then
+    reserve_kb=32768
+  elif [ "$reserve_kb" -gt 98304 ]; then
+    reserve_kb=98304
+  fi
+  usable_kb=$((available_kb - reserve_kb))
+  if [ "$usable_kb" -gt 0 ]; then
+    safe_parallel=$((usable_kb / 49152))
+  else
+    safe_parallel=0
+  fi
+  if [ "$safe_parallel" -lt 1 ]; then
+    safe_parallel=1
+  elif [ "$safe_parallel" -gt "$requested" ]; then
+    safe_parallel="$requested"
+  fi
+  printf '%s\n' "$safe_parallel"
+}
+
+nexttrace_parallel_limit() {
+  local requested="$1" available_kb
+  if available_kb=$(effective_available_memory_kb); then
+    calculate_nexttrace_parallel "$requested" "$available_kb"
+  else
+    printf '%s\n' "$requested"
+  fi
+}
+
 collect_route_labels() {
   local family="$1" out_file="$2" idx=0 entry prov isp host fixed_ip port backup_host backup_ip backup_port route_total route_raw_file ip_file cymru_file asn_map_file trace_ip_file status protocol value label prefix
   prefix="${3:-summary_route${family}}"
   local packet_length="${4:-44}"
   local route_protocol="${5:-tcp}"
   local route_parallel="$PARALLEL"
+  if [ "$route_protocol" = "nexttrace" ]; then
+    # 这里只降低 NextTrace 并发，不改变普通 traceroute 和用户设置的并发上限。
+    route_parallel=$(nexttrace_parallel_limit "$PARALLEL")
+  fi
   route_total=0
   while IFS='|' read -r prov isp host _; do
     province_selected "$prov" && route_total=$((route_total + 1))
