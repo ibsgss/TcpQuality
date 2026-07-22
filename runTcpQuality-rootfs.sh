@@ -142,6 +142,23 @@ configure_interactive_args() {
   INTERACTIVE_ARGS=("$@")
 }
 
+has_non_debug_args() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = "--debug" ] && continue
+    return 0
+  done
+  return 1
+}
+
+has_debug_arg() {
+  local arg
+  for arg in "$@"; do
+    [ "$arg" = "--debug" ] && return 0
+  done
+  return 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --distro)
@@ -197,13 +214,17 @@ if [ "${TCPQUALITY_MOUNT_NS:-0}" -eq 1 ]; then
     mount -o rprivate / >/dev/null 2>&1 || true
 fi
 
-if [ "$#" -eq 0 ]; then
-  configure_interactive_args
-  set -- "${INTERACTIVE_ARGS[@]}"
+if has_debug_arg "$@"; then
+  DEBUG_MODE=1
 fi
-for arg in "$@"; do
-  [ "$arg" = "--debug" ] && DEBUG_MODE=1
-done
+if ! has_non_debug_args "$@"; then
+  configure_interactive_args
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    set -- "${INTERACTIVE_ARGS[@]}" --debug
+  else
+    set -- "${INTERACTIVE_ARGS[@]}"
+  fi
+fi
 if [ "$#" -gt 0 ]; then
   printf "[i] 主脚本参数:"
   printf " %q" "$@"
