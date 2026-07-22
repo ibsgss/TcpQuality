@@ -19,6 +19,8 @@ DEBIAN_SUITE="${TCPQUALITY_DEBIAN_SUITE:-bookworm}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
+DEBUG_MODE=0
+MIN_ROOTFS_FREE_KB=$((700 * 1024))
 
 usage() {
   cat <<'EOF'
@@ -199,6 +201,9 @@ if [ "$#" -eq 0 ]; then
   configure_interactive_args
   set -- "${INTERACTIVE_ARGS[@]}"
 fi
+for arg in "$@"; do
+  [ "$arg" = "--debug" ] && DEBUG_MODE=1
+done
 if [ "$#" -gt 0 ]; then
   printf "[i] 主脚本参数:"
   printf " %q" "$@"
@@ -268,7 +273,7 @@ persist_guest_outputs() {
   [ -n "${GUEST_TMP_HOST:-}" ] && [ -d "$GUEST_TMP_HOST" ] || return 0
   mkdir -p "$OUTPUT_DIR" || return 0
 
-  for artifact in "$GUEST_TMP_HOST"/*.csv "$GUEST_TMP_HOST"/*.tar.gz; do
+  for artifact in "$GUEST_TMP_HOST"/*.csv "$GUEST_TMP_HOST"/*.tar.gz "$GUEST_TMP_HOST"/*.log; do
     [ -f "$artifact" ] || continue
     base=$(basename -- "$artifact")
     destination="$OUTPUT_DIR/$base"
@@ -575,6 +580,36 @@ canonical_dir() {
   (CDPATH= cd -- "$1" 2>/dev/null && pwd -P)
 }
 
+available_kb() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4+0}'
+}
+
+select_temp_base() {
+  local base best="" best_free=0 free
+  local -a candidates=()
+  [ -n "${TCPQUALITY_ROOTFS_TMPDIR:-}" ] && candidates+=("$TCPQUALITY_ROOTFS_TMPDIR")
+  [ -n "${TMPDIR:-}" ] && candidates+=("$TMPDIR")
+  candidates+=("/var/tmp" "/tmp")
+
+  for base in "${candidates[@]}"; do
+    [ -d "$base" ] && [ -w "$base" ] || continue
+    free=$(available_kb "$base")
+    [ "$free" -gt 0 ] || continue
+    if [ "$free" -ge "$MIN_ROOTFS_FREE_KB" ]; then
+      printf '%s\n' "$base"
+      return 0
+    fi
+    if [ "$free" -gt "$best_free" ]; then
+      best="$base"
+      best_free="$free"
+    fi
+  done
+
+  [ -n "$best" ] || die "没有可写的临时目录"
+  echo "[!] 临时目录可用空间不足 $((MIN_ROOTFS_FREE_KB / 1024))MB，使用最大可用目录: $best ($((best_free / 1024))MB)" >&2
+  printf '%s\n' "$best"
+}
+
 validate_rootfs() {
   local resolved rootfs_id=""
   resolved=$(canonical_dir "$ROOTFS_DIR") || die "无法解析 rootfs 路径: $ROOTFS_DIR"
@@ -623,7 +658,7 @@ prepare_rootfs() {
     validate_rootfs
     return
   fi
-  TEMP_ROOT_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/tcpquality-rootfs.XXXXXX")
+  TEMP_ROOT_PARENT=$(mktemp -d "$(select_temp_base)/tcpquality-rootfs.XXXXXX")
   ROOTFS_DIR="$TEMP_ROOT_PARENT/rootfs"
   mkdir -p "$ROOTFS_DIR"
   CREATED_ROOTFS=1
@@ -683,13 +718,31 @@ mount_guest() {
 
 install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
-    env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk gnupg grep iproute2 iputils-ping jq kmod nmap ncurses-bin procps sed tar traceroute tzdata >/dev/null && rm -rf /var/lib/apt/lists/*' \
-      || die "Debian rootfs 依赖安装失败"
+    local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
+    if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iproute2 iputils-ping kmod nmap ncurses-bin sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      >"$apt_log" 2>&1; then
+      echo "[X] Debian rootfs 依赖安装失败" >&2
+      echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
+      if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo "[i] apt/dpkg 日志末尾:" >&2
+        tail -n 80 "$apt_log" >&2 || true
+      fi
+      return 1
+    fi
   else
-    env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
-      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk gnupg grep iproute2 iputils jq kmod ncurses nmap-nping procps-ng sed tar traceroute tzdata' \
-      || die "Alpine rootfs 依赖安装失败"
+    local apk_log="$GUEST_TMP_HOST/alpine-rootfs-apk.log"
+    if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iproute2 iputils kmod ncurses nmap-nping sed tar traceroute tzdata' \
+      >"$apk_log" 2>&1; then
+      echo "[X] Alpine rootfs 依赖安装失败" >&2
+      echo "[i] apk 日志已保留: $apk_log" >&2
+      if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo "[i] apk 日志末尾:" >&2
+        tail -n 80 "$apk_log" >&2 || true
+      fi
+      return 1
+    fi
   fi
 }
 
@@ -724,7 +777,7 @@ case "$OUTPUT_DIR/" in
   "$ROOTFS_DIR/"*) die "输出目录不能位于 rootfs 内部: $OUTPUT_DIR" ;;
 esac
 mount_guest
-install_guest_deps
+install_guest_deps || exit 1
 prepare_guest_files
 echo "[i] 进入临时 ${DISTRO} rootfs；退出后自动清理"
 if [ "$KEEP_ROOTFS" -eq 1 ]; then
