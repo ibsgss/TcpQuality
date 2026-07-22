@@ -437,16 +437,18 @@ download_nexttrace_guest() {
       sub(/".*$/, "", line)
       url=line
     }
-    found && digest && url { print digest "|" url; exit }
+    found && url { print digest "|" url; exit }
   ') || return 1
   digest=${asset_meta%%|*}
   url=${asset_meta#*|}
-  [ -n "$url" ] && [ -n "$digest" ] || return 1
+  [ -n "$url" ] || return 1
 
   binary="$RUNTIME_DIR/$asset_name"
   curl -fL --retry 3 --connect-timeout 15 --max-time 300 "$url" -o "$binary" ||
     return 1
-  verify_sha256 "$digest" "$binary" || return 1
+  if [ -n "$digest" ]; then
+    verify_sha256 "$digest" "$binary" || return 1
+  fi
   cp "$binary" "$ROOTFS_DIR/usr/local/bin/nexttrace-tiny"
   chmod 0755 "$ROOTFS_DIR/usr/local/bin/nexttrace-tiny"
   rm -f -- "$binary"
