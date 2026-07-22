@@ -899,7 +899,7 @@ show_all_progress() {
     printf '\n'
   fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
-    printf '\r\033[2K  %b三网单线程速度%b ' "$CYAN" "$NC"
+    printf '\r\033[2K  %b速度测试%b ' "$CYAN" "$NC"
     bar "$speed_done" "$speed_total"
     printf '\n'
   fi
@@ -3876,13 +3876,13 @@ main() {
   if [ "$large_packet_enabled" -eq 1 ]; then
     show_large_packet_results "IPv4大包回程" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
   fi
-  if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
+  if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet" ] && [ -s "$sorted_cernet2" ]; then
     show_education_combined "$sorted_cernet" "$sorted_cernet2"
   else
-    if [ "$test_edu" -eq 1 ] && [ "$ipv4_enabled" -eq 1 ]; then
+    if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet" ]; then
       show_education_results "CERNET-IPv4" "$sorted_cernet"
     fi
-    if [ "$test_edu" -eq 1 ] && [ "$ipv6_enabled" -eq 1 ]; then
+    if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet2" ]; then
       show_education_results "CERNET2-IPv6" "$sorted_cernet2"
     fi
   fi

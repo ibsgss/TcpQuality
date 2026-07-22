@@ -94,13 +94,13 @@ configure_interactive_args() {
   answer=$(prompt_answer "运行三网回程测试？（包含 IPv4/IPv6 和 IPv4大包，回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" || run_route=1
 
-  answer=$(prompt_answer "运行教育网回程测试？（CERNET/CERNET2，回车默认 'n'）[y/n]：" "n")
-  answer_is_yes "$answer" && run_edu=1
+  answer=$(prompt_answer "运行教育网回程测试？（CERNET/CERNET2，回车默认 'y'）[y/n]：" "y")
+  answer_is_no "$answer" || run_edu=1
 
   answer=$(prompt_answer "运行国际互联测试？（回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" || run_intl=1
 
-  answer=$(prompt_answer "运行三网单线程速度？（回车默认 'n'）[y/n]：" "n")
+  answer=$(prompt_answer "运行三网单线程速度？（回车默认 'y'）[y/n]：" "y")
   if ! answer_is_no "$answer"; then
     if [ "$DISTRO" = alpine ]; then
       die "Alpine 实验模式不运行三网单线程速度；请使用默认 Debian rootfs"
