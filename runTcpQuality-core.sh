@@ -3032,7 +3032,7 @@ speedtest_restore_hosts() {
   if [ "$SPEEDTEST_HOSTS_EXISTED" -eq 1 ]; then
     $USE_SUDO cp "$SPEEDTEST_HOSTS_BACKUP" /etc/hosts 2>/dev/null || true
   else
-    $USE_SUDO rm -f /etc/hosts 2>/dev/null || true
+    printf '127.0.0.1 localhost\n::1 localhost\n' | $USE_SUDO tee /etc/hosts >/dev/null 2>&1 || true
   fi
   rm -f "$SPEEDTEST_HOSTS_BACKUP"
   SPEEDTEST_HOSTS_BACKUP=""
@@ -3042,6 +3042,9 @@ speedtest_restore_hosts() {
 speedtest_force_hosts() {
   local ip="$1" tmp host
   [ -n "$ip" ] || return 1
+  if [ ! -e /etc/hosts ]; then
+    printf '127.0.0.1 localhost\n::1 localhost\n' | $USE_SUDO tee /etc/hosts >/dev/null || return 1
+  fi
   if [ -z "${SPEEDTEST_HOSTS_BACKUP:-}" ]; then
     SPEEDTEST_HOSTS_BACKUP=$(mktemp /tmp/tcpquality-tos-hosts.XXXXXX)
     if [ -f /etc/hosts ]; then

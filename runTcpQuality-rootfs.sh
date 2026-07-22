@@ -288,6 +288,7 @@ DOCKER_IMAGE=""
 DOCKER_REMOVE_IMAGE=0
 MOUNTED=()
 UNMOUNT_FAILED=0
+INTERRUPTED=0
 persist_guest_outputs() {
   local artifact base destination stem suffix counter
   [ "$OUTPUTS_PERSISTED" -eq 0 ] || return 0
@@ -343,7 +344,9 @@ cleanup() {
   local i target
   set +e
   terminate_child TERM
-  persist_guest_outputs
+  if [ "$INTERRUPTED" -eq 0 ]; then
+    persist_guest_outputs
+  fi
   if [ -n "${DOCKER_CID:-}" ]; then
     docker rm -f "$DOCKER_CID" >/dev/null 2>&1 || true
     DOCKER_CID=""
@@ -369,7 +372,8 @@ cleanup() {
   if [ -n "${RUNTIME_DIR:-}" ] && [ -d "$RUNTIME_DIR" ]; then
     rm -rf -- "$RUNTIME_DIR"
   fi
-  if [ "$CREATED_ROOTFS" -eq 1 ] && [ "$KEEP_ROOTFS" -eq 0 ] &&
+  if [ "$CREATED_ROOTFS" -eq 1 ] &&
+     { [ "$KEEP_ROOTFS" -eq 0 ] || [ "$INTERRUPTED" -eq 1 ]; } &&
      [ -n "${TEMP_ROOT_PARENT:-}" ] && [ -d "$TEMP_ROOT_PARENT" ]; then
     if [ "$UNMOUNT_FAILED" -eq 0 ]; then
       rm -rf -- "$TEMP_ROOT_PARENT"
@@ -377,10 +381,14 @@ cleanup() {
       echo "[!] 存在未卸载的挂载点，已保留临时 rootfs: $TEMP_ROOT_PARENT" >&2
     fi
   fi
+  if [ "$INTERRUPTED" -eq 1 ] && [ "$UNMOUNT_FAILED" -eq 0 ]; then
+    echo "[i] 已清理相关依赖" >&2
+  fi
 }
 on_interrupt() {
   local signal="${1:-TERM}" status=143
   [ "$signal" = INT ] && status=130
+  INTERRUPTED=1
   terminate_child "$signal"
   cleanup
   trap - EXIT
