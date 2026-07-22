@@ -421,27 +421,31 @@ download_nexttrace_guest() {
     *) return 1 ;;
   esac
   asset_name="nexttrace-tiny_linux_${asset_arch}"
-  api_json=$(curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 "$NEXTTRACE_RELEASE_API") ||
-    return 1
-  asset_meta=$(printf '%s\n' "$api_json" | awk -v name="$asset_name" '
-    index($0, "\"name\": \"" name "\"") { found=1 }
-    found && index($0, "\"digest\":") {
-      line=$0
-      sub(/^.*"digest": "sha256:/, "", line)
-      sub(/".*$/, "", line)
-      digest=line
-    }
-    found && index($0, "\"browser_download_url\":") {
-      line=$0
-      sub(/^.*"browser_download_url": "/, "", line)
-      sub(/".*$/, "", line)
-      url=line
-    }
-    found && url { print digest "|" url; exit }
-  ') || return 1
-  digest=${asset_meta%%|*}
-  url=${asset_meta#*|}
-  [ -n "$url" ] || return 1
+  api_json=$(curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 "$NEXTTRACE_RELEASE_API" 2>/dev/null || true)
+  if [ -n "$api_json" ]; then
+    asset_meta=$(printf '%s\n' "$api_json" | awk -v name="$asset_name" '
+      index($0, "\"name\": \"" name "\"") { found=1 }
+      found && index($0, "\"digest\":") {
+        line=$0
+        sub(/^.*"digest": "sha256:/, "", line)
+        sub(/".*$/, "", line)
+        digest=line
+      }
+      found && index($0, "\"browser_download_url\":") {
+        line=$0
+        sub(/^.*"browser_download_url": "/, "", line)
+        sub(/".*$/, "", line)
+        url=line
+      }
+      found && url { print digest "|" url; exit }
+    ') || true
+    digest=${asset_meta%%|*}
+    url=${asset_meta#*|}
+  fi
+  if [ -z "$url" ]; then
+    digest=
+    url="https://github.com/nxtrace/NTrace-core/releases/latest/download/$asset_name"
+  fi
 
   binary="$RUNTIME_DIR/$asset_name"
   curl -fL --retry 3 --connect-timeout 15 --max-time 300 "$url" -o "$binary" ||
