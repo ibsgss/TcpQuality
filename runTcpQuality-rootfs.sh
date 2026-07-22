@@ -752,17 +752,9 @@ guest_command=(
   chroot "$ROOTFS_DIR" /bin/bash /root/runTcpQuality.sh "$@"
 )
 
-if command -v setsid >/dev/null 2>&1; then
-  setsid "${guest_command[@]}" &
-  CHILD_SESSION=1
-else
-  "${guest_command[@]}" &
-fi
-CHILD_PID=$!
 set +e
-wait "$CHILD_PID"
+"${guest_command[@]}"
 guest_rc=$?
 set -e
-CHILD_PID=""
 persist_guest_outputs
 exit "$guest_rc"
