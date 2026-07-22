@@ -735,6 +735,9 @@ mount_guest() {
   rm -f -- "$ROOTFS_DIR/etc/resolv.conf"
   cp -L /etc/resolv.conf "$ROOTFS_DIR/etc/resolv.conf" 2>/dev/null ||
     printf 'nameserver 1.1.1.1\n' > "$ROOTFS_DIR/etc/resolv.conf"
+  if [ ! -e "$ROOTFS_DIR/etc/hosts" ]; then
+    printf '127.0.0.1 localhost\n::1 localhost\n' > "$ROOTFS_DIR/etc/hosts"
+  fi
 }
 
 install_guest_deps() {

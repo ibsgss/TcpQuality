@@ -2765,6 +2765,7 @@ SPEEDTEST_TOS_CT_CANDIDATES="${TOS_CT_IP:-42.81.80.86}|北京|cn-beijing"
 SPEEDTEST_TOS_CU_CANDIDATES="${TOS_CU_IP:-221.194.175.109}|北京|cn-beijing"
 SPEEDTEST_TOS_CM_CANDIDATES="${TOS_CM_IP:-120.255.0.180}|北京|cn-beijing"
 SPEEDTEST_HOSTS_BACKUP=""
+SPEEDTEST_HOSTS_EXISTED=0
 SPEEDTEST_HOSTS_MARK_BEGIN="# tcpquality-tos-speedtest begin"
 SPEEDTEST_HOSTS_MARK_END="# tcpquality-tos-speedtest end"
 SPEEDTEST_TELECOM_ID=""
@@ -3028,9 +3029,14 @@ speedtest_endpoint_hosts() {
 
 speedtest_restore_hosts() {
   [ -n "${SPEEDTEST_HOSTS_BACKUP:-}" ] && [ -f "$SPEEDTEST_HOSTS_BACKUP" ] || return 0
-  $USE_SUDO cp "$SPEEDTEST_HOSTS_BACKUP" /etc/hosts 2>/dev/null || true
+  if [ "$SPEEDTEST_HOSTS_EXISTED" -eq 1 ]; then
+    $USE_SUDO cp "$SPEEDTEST_HOSTS_BACKUP" /etc/hosts 2>/dev/null || true
+  else
+    $USE_SUDO rm -f /etc/hosts 2>/dev/null || true
+  fi
   rm -f "$SPEEDTEST_HOSTS_BACKUP"
   SPEEDTEST_HOSTS_BACKUP=""
+  SPEEDTEST_HOSTS_EXISTED=0
 }
 
 speedtest_force_hosts() {
@@ -3038,7 +3044,13 @@ speedtest_force_hosts() {
   [ -n "$ip" ] || return 1
   if [ -z "${SPEEDTEST_HOSTS_BACKUP:-}" ]; then
     SPEEDTEST_HOSTS_BACKUP=$(mktemp /tmp/tcpquality-tos-hosts.XXXXXX)
-    cp /etc/hosts "$SPEEDTEST_HOSTS_BACKUP" || return 1
+    if [ -f /etc/hosts ]; then
+      cp /etc/hosts "$SPEEDTEST_HOSTS_BACKUP" || return 1
+      SPEEDTEST_HOSTS_EXISTED=1
+    else
+      : > "$SPEEDTEST_HOSTS_BACKUP" || return 1
+      SPEEDTEST_HOSTS_EXISTED=0
+    fi
   fi
   tmp=$(mktemp /tmp/tcpquality-tos-hosts-new.XXXXXX)
   awk -v begin="$SPEEDTEST_HOSTS_MARK_BEGIN" -v end="$SPEEDTEST_HOSTS_MARK_END" '
