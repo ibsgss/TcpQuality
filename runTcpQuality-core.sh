@@ -2645,7 +2645,7 @@ large_packet_precheck() {
   result=$(probe_target "largepre" 4 "Cloudflare" "预检" "$LARGE_PACKET_PRECHECK_DOMAIN" "$ip" 443 0 precheck)
   IFS='|' read -r status _prov _isp _host _ip sent rcv loss lat <<< "$result"
   LARGE_PACKET_PRECHECK_LOSS="${loss:-100.00}"
-  if [ "$status" != "OK" ] || awk -v loss="${loss:-100}" 'BEGIN { exit !(loss + 0 >= 100) }'; then
+  if [ "$status" != "OK" ] || awk -v loss="${loss:-100}" 'BEGIN { exit !(loss + 0 >= 80) }'; then
     LARGE_PACKET_FIREWALL_LIMITED=1
     return 1
   fi
