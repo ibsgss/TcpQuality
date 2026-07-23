@@ -4002,12 +4002,12 @@ main() {
     if [ "$ipv4_enabled" -eq 1 ]; then
       show_family_results "IPv4回程" "$sorted_v4" "$route_labels_v4"
     fi
+    if [ "$large_packet_enabled" -eq 1 ]; then
+      show_large_packet_results "IPv4大包回程" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
+    fi
     if [ "$ipv6_enabled" -eq 1 ]; then
       show_family_results "IPv6回程" "$sorted_v6" "$route_labels_v6"
     fi
-  fi
-  if [ "$large_packet_enabled" -eq 1 ]; then
-    show_large_packet_results "IPv4大包回程" "$sorted_large_v4" "$route_labels_large_v4" "$LARGE_PACKET_FIREWALL_LIMITED"
   fi
   if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet" ] && [ -s "$sorted_cernet2" ]; then
     show_education_combined "$sorted_cernet" "$sorted_cernet2"
