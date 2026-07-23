@@ -2350,7 +2350,7 @@ probe_target() {
   # 不使用 --privileged：macOS 下该选项会强制二层发包，容易因无法解析下一跳 MAC 而失败。
   local -a nping_base_args=(--tcp -p "$port" --flags syn)
   local -a nping_l2_args=()
-  local nping_l2_ready=0 nping_l2_failed=0
+  local nping_l2_ready=0 nping_l2_failed=0 nping_use_l2=0
   if [ "$family" = "6" ]; then
     nping_base_args=(-6 "${nping_base_args[@]}")
   fi
@@ -2361,6 +2361,23 @@ probe_target() {
   [ "$family" = "6" ] && header_size=60
   if [ "$large_packet_mode" -eq 1 ]; then
     large_big_target=$(((PACKETS * 3 + 3) / 4))
+  fi
+  if [ "$family" = "6" ]; then
+    local pre_raw pre_sent pre_rcvd
+    pre_raw=$(nping "${nping_base_args[@]}" -c 2 "$ip" 2>&1 || true)
+    pre_sent=$(printf "%s\n" "$pre_raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+    pre_rcvd=$(printf "%s\n" "$pre_raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+    if [[ "$pre_sent" =~ ^[0-9]+$ ]] && [ "$pre_sent" -gt 0 ] &&
+       [[ "$pre_rcvd" =~ ^[0-9]+$ ]] && [ "$pre_rcvd" -eq 0 ]; then
+      if route_data=$(get_ipv6_route "$ip"); then
+        IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
+        nping_l2_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" --tcp -p "$port" --flags syn)
+        nping_l2_ready=1
+        nping_use_l2=1
+      else
+        nping_l2_failed=1
+      fi
+    fi
   fi
   for ((i = 1; i <= PACKETS; i++)); do
     if [ -n "$PACKET_SIZE_OVERRIDE" ]; then
@@ -2382,13 +2399,15 @@ probe_target() {
     payload_size=0
     [ "$packet_size" -gt 0 ] && payload_size=$((packet_size - header_size))
     [ "$payload_size" -lt 0 ] && payload_size=0
+    local -a current_nping_args=("${nping_base_args[@]}")
+    [ "$nping_use_l2" -eq 1 ] && current_nping_args=("${nping_l2_args[@]}")
     if [ "$packet_size" -eq 0 ]; then
-      if raw=$(nping "${nping_base_args[@]}" -c 1 "$ip" 2>&1); then
+      if raw=$(nping "${current_nping_args[@]}" -c 1 "$ip" 2>&1); then
         nping_rc=0
       else
         nping_rc=$?
       fi
-    elif raw=$(nping "${nping_base_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+    elif raw=$(nping "${current_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
       nping_rc=0
     else
       nping_rc=$?
@@ -2399,7 +2418,7 @@ probe_target() {
     one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
 
     if { ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] || ! [[ "$one_rcvd" =~ ^[0-9]+$ ]] || [ "$one_rcvd" -eq 0 ]; } &&
-       [ "$family" = "6" ] && [ "$nping_l2_failed" -eq 0 ]; then
+       [ "$family" = "6" ] && [ "$nping_use_l2" -eq 0 ] && [ "$nping_l2_failed" -eq 0 ]; then
       if [ "$nping_l2_ready" -eq 0 ]; then
         if route_data=$(get_ipv6_route "$ip"); then
           IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
@@ -2410,6 +2429,7 @@ probe_target() {
         fi
       fi
       if [ "$nping_l2_ready" -eq 1 ]; then
+        nping_use_l2=1
         if [ "$packet_size" -eq 0 ]; then
           if raw=$(nping "${nping_l2_args[@]}" -c 1 "$ip" 2>&1); then
             nping_rc=0
