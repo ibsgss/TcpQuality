@@ -1824,7 +1824,8 @@ route_label_from_ip_trace() {
       if (asn == "") asn = infer_asn_from_ip(dest_ip)
       if (target_isp == "电信" && (is_163_ip(dest_ip) || is_telecom_access_asn(asn) || is_telecom_access_ip(dest_ip))) return "163"
       if (target_isp == "联通" && (is_unicom_backbone_asn(asn) || is_unicom_backbone_ip(dest_ip) || is_unicom_access_asn(asn))) return unicom_route_combo_label()
-      if (target_isp == "移动" && (asn == "58807" || asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/ || is_mobile_access_asn(asn) || is_mobile_access_ip(dest_ip))) return "CMI"
+      if (target_isp == "移动" && asn == "58807") return "CMIN2"
+      if (target_isp == "移动" && (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/ || is_mobile_access_asn(asn) || is_mobile_access_ip(dest_ip))) return "CMI"
       return ""
     }
     function classify(   hop, label, first_cn2, has_ctgnet, has_cn2, has_v6) {
@@ -1843,12 +1844,12 @@ route_label_from_ip_trace() {
       }
       label = unicom_route_combo_label()
       if (label != "") return label
+      if (has_asn("58807")) return "CMIN2"
       for (hop = 1; hop <= max_hop; hop++) {
         if (!is_mainland_backbone_hop(asns[hop], ips[hop])) continue
         label = label_from_mainland_hop(hop, asns[hop], ips[hop])
         if (label != "") return label
       }
-      if (has_asn("58807")) return "CMIN2"
       if (has_asn("23911")) return "CERNET2"
       if (has_asn("9929")) return "9929"
       if (has_asn("4837") || has_asn("4808")) return "4837"
