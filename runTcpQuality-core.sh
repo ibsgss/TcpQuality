@@ -2340,22 +2340,83 @@ export -f route_trace_one
 export -f extract_trace_ips
 export -f route_needs_10099_hidden_tcp_retry
 
-nping_response_matches_target() {
-  local raw="$1" target="$2"
-  printf "%s\n" "$raw" | awk -v target="$target" '
-    BEGIN { target = tolower(target) }
-    /^RCVD .* TCP / {
-      line = $0
-      sub(/^.*TCP /, "", line)
-      sub(/ >.*$/, "", line)
-      sub(/:[0-9]+$/, "", line)
-      if (tolower(line) == target) found = 1
+nping_random_source_port() {
+  printf "%s\n" $((20000 + RANDOM % 40000))
+}
+
+nping_random_seq() {
+  printf "%s\n" $((((RANDOM << 16) ^ RANDOM) & 0x7ffffffe))
+}
+
+export -f nping_random_source_port
+export -f nping_random_seq
+
+nping_matching_min_rtt() {
+  local raw="$1"
+  printf "%s\n" "$raw" | awk '
+    function ep_ip(ep) {
+      sub(/:[0-9]+$/, "", ep)
+      return tolower(ep)
     }
-    END { exit !found }
+    function ep_port(ep) {
+      if (match(ep, /:[0-9]+$/)) {
+        return substr(ep, RSTART + 1)
+      }
+      return ""
+    }
+    function parse_tcp_line(line, prefix, time_s, body, parts, left, right) {
+      time_s = line
+      sub(/^[^(]*\(/, "", time_s)
+      sub(/s\).*/, "", time_s)
+      body = line
+      sub(/^.* TCP /, "", body)
+      split(body, parts, " > ")
+      if (!parts[1] || !parts[2]) return 0
+      left = parts[1]
+      right = parts[2]
+      sub(/ .*/, "", right)
+      if (!ep_port(left) || !ep_port(right)) return 0
+      if (prefix == "sent") {
+        sent_time = time_s + 0
+        sent_src_ip = ep_ip(left)
+        sent_src_port = ep_port(left)
+        sent_dst_ip = ep_ip(right)
+        sent_dst_port = ep_port(right)
+        have_sent = 1
+      } else {
+        rcvd_time = time_s + 0
+        rcvd_src_ip = ep_ip(left)
+        rcvd_src_port = ep_port(left)
+        rcvd_dst_ip = ep_ip(right)
+        rcvd_dst_port = ep_port(right)
+      }
+      return 1
+    }
+    /^SENT .* TCP / && !have_sent {
+      parse_tcp_line($0, "sent")
+    }
+    /^RCVD .* TCP / && have_sent {
+      if (parse_tcp_line($0, "rcvd") &&
+          rcvd_src_ip == sent_dst_ip &&
+          rcvd_src_port == sent_dst_port &&
+          rcvd_dst_ip == sent_src_ip &&
+          rcvd_dst_port == sent_src_port) {
+        rtt_ms = (rcvd_time - sent_time) * 1000
+        if (!found || rtt_ms < min_rtt) min_rtt = rtt_ms
+        found = 1
+      }
+    }
+    END {
+      if (found) {
+        printf "%.3f\n", min_rtt
+      } else {
+        exit 1
+      }
+    }
   '
 }
 
-export -f nping_response_matches_target
+export -f nping_matching_min_rtt
 
 # ===================== 单节点测试 =====================
 probe_target() {
@@ -2378,6 +2439,7 @@ probe_target() {
   fi
 
   local sent=0 rcvd=0 loss_pct avg_rtt rtt_sum="0" one_sent one_rcvd one_rtt one_success i packet_size payload_size header_size
+  local source_port tcp_seq
   local large_packet_mode="${LARGE_PACKET_MODE:-0}" large_big_target=0 large_big_used=0 large_small_used=0 remaining big_remaining small_remaining
   header_size=40
   [ "$family" = "6" ] && header_size=60
@@ -2416,6 +2478,9 @@ probe_target() {
     [ "$payload_size" -lt 0 ] && payload_size=0
     local -a current_nping_args=("${nping_base_args[@]}")
     [ "$nping_use_l2" -eq 1 ] && current_nping_args=("${nping_l2_args[@]}")
+    source_port=$(nping_random_source_port)
+    tcp_seq=$(nping_random_seq)
+    current_nping_args+=(-g "$source_port" --seq "$tcp_seq")
     if [ "$packet_size" -eq 0 ]; then
       if raw=$(nping "${current_nping_args[@]}" -c 1 "$ip" 2>&1); then
         nping_rc=0
@@ -2430,8 +2495,9 @@ probe_target() {
 
     one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-    one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
-    if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+    if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw"); then
+      one_rcvd=1
+    elif [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ]; then
       if [ "$DEBUG_MODE" -eq 1 ]; then
         printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_${group}_${idx}_${label}_${i}.log"
       fi
@@ -2452,21 +2518,25 @@ probe_target() {
       fi
       if [ "$nping_l2_ready" -eq 1 ]; then
         nping_use_l2=1
+        source_port=$(nping_random_source_port)
+        tcp_seq=$(nping_random_seq)
+        local -a current_l2_nping_args=("${nping_l2_args[@]}" -g "$source_port" --seq "$tcp_seq")
         if [ "$packet_size" -eq 0 ]; then
-          if raw=$(nping "${nping_l2_args[@]}" -c 1 "$ip" 2>&1); then
+          if raw=$(nping "${current_l2_nping_args[@]}" -c 1 "$ip" 2>&1); then
             nping_rc=0
           else
             nping_rc=$?
           fi
-        elif raw=$(nping "${nping_l2_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+        elif raw=$(nping "${current_l2_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
           nping_rc=0
         else
           nping_rc=$?
         fi
         one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
         one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-        one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
-        if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+        if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw"); then
+          one_rcvd=1
+        elif [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ]; then
           if [ "$DEBUG_MODE" -eq 1 ]; then
             printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_${group}_${idx}_${label}_${i}.log"
           fi
@@ -2496,6 +2566,12 @@ probe_target() {
         return
       fi
       one_success=1
+      if [ "$DEBUG_MODE" -eq 1 ]; then
+        printf "%s\n" "$raw" > "${RESULT_DIR}/nping_success_${group}_${idx}_${label}_${i}.log"
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+          "$group" "$idx" "$label" "$i" "$prov" "$isp" "$host" "$ip" "$one_sent" "$one_rcvd" "$one_rtt" \
+          >> "${RESULT_DIR}/nping_success_meta.txt"
+      fi
       rcvd=$((rcvd + one_success))
       rtt_sum=$(awk -v a="$rtt_sum" -v b="$one_rtt" 'BEGIN { printf "%.6f", a + b }')
     fi
@@ -2578,15 +2654,17 @@ large_packet_precheck() {
 }
 
 ipv6_nping_precheck() {
-  local ip raw sent rcv
+  local ip raw sent rcv source_port tcp_seq
   IPV6_NPING_FORCE_L2=0
   ip=$(resolve_first_public_ipv6 "$LARGE_PACKET_PRECHECK_DOMAIN" || true)
   [ -n "$ip" ] || return 0
 
-  raw=$(nping -6 --tcp -p 443 --flags syn -c "$IPV6_NPING_PRECHECK_PACKETS" "$ip" 2>&1 || true)
+  source_port=$(nping_random_source_port)
+  tcp_seq=$(nping_random_seq)
+  raw=$(nping -6 --tcp -p 443 -g "$source_port" --seq "$tcp_seq" --flags syn -c "$IPV6_NPING_PRECHECK_PACKETS" "$ip" 2>&1 || true)
   sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
   rcv=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-  if [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+  if [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -gt 0 ] && ! nping_matching_min_rtt "$raw" >/dev/null; then
     if [ "$DEBUG_MODE" -eq 1 ]; then
       printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_ipv6_precheck.log"
     fi
