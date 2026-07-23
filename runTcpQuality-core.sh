@@ -266,6 +266,8 @@ LARGE_PACKET_PRECHECK_PACKETS=20
 LARGE_PACKET_PRECHECK_SIZE=1200
 LARGE_PACKET_FIREWALL_LIMITED=0
 LARGE_PACKET_PRECHECK_LOSS=""
+IPV6_NPING_PRECHECK_PACKETS=3
+IPV6_NPING_FORCE_L2=0
 TOTAL=0
 PARALLEL=16
 TEST_CERNET=0
@@ -2362,21 +2364,14 @@ probe_target() {
   if [ "$large_packet_mode" -eq 1 ]; then
     large_big_target=$(((PACKETS * 3 + 3) / 4))
   fi
-  if [ "$family" = "6" ]; then
-    local pre_raw pre_sent pre_rcvd
-    pre_raw=$(nping "${nping_base_args[@]}" -c 2 "$ip" 2>&1 || true)
-    pre_sent=$(printf "%s\n" "$pre_raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-    pre_rcvd=$(printf "%s\n" "$pre_raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-    if [[ "$pre_sent" =~ ^[0-9]+$ ]] && [ "$pre_sent" -gt 0 ] &&
-       [[ "$pre_rcvd" =~ ^[0-9]+$ ]] && [ "$pre_rcvd" -eq 0 ]; then
-      if route_data=$(get_ipv6_route "$ip"); then
-        IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
-        nping_l2_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" --tcp -p "$port" --flags syn)
-        nping_l2_ready=1
-        nping_use_l2=1
-      else
-        nping_l2_failed=1
-      fi
+  if [ "$family" = "6" ] && [ "${IPV6_NPING_FORCE_L2:-0}" -eq 1 ]; then
+    if route_data=$(get_ipv6_route "$ip"); then
+      IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
+      nping_l2_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" --tcp -p "$port" --flags syn)
+      nping_l2_ready=1
+      nping_use_l2=1
+    else
+      nping_l2_failed=1
     fi
   fi
   for ((i = 1; i <= PACKETS; i++)); do
@@ -2548,6 +2543,21 @@ large_packet_precheck() {
   return 0
 }
 
+ipv6_nping_precheck() {
+  local ip raw sent rcv
+  IPV6_NPING_FORCE_L2=0
+  ip=$(resolve_first_public_ipv6 "$LARGE_PACKET_PRECHECK_DOMAIN" || true)
+  [ -n "$ip" ] || return 0
+
+  raw=$(nping -6 --tcp -p 443 --flags syn -c "$IPV6_NPING_PRECHECK_PACKETS" "$ip" 2>&1 || true)
+  sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+  rcv=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+  if [[ "$sent" =~ ^[0-9]+$ ]] && [ "$sent" -gt 0 ] &&
+     [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -eq 0 ]; then
+    IPV6_NPING_FORCE_L2=1
+  fi
+}
+
 test_large_one() {
   local PACKET_SIZE_OVERRIDE=""
   local LARGE_PACKET_MODE=1
@@ -2565,7 +2575,7 @@ export -f test_one
 export -f test_large_one
 export -f get_ipv6_route
 export -f is_public_ipv4
-export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE LARGE_PACKET_SIZES
+export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE LARGE_PACKET_SIZES IPV6_NPING_FORCE_L2
 
 # ===================== 国际互联 TCP ping =====================
 international_task_count() {
@@ -2597,6 +2607,35 @@ resolve_first_public_ipv4() {
         return 0
       fi
     done < <(host -t A "$domain" 2>/dev/null | awk '/has address/ {print $NF}')
+  fi
+  return 1
+}
+
+resolve_first_public_ipv6() {
+  local domain="$1" ip
+  if command -v getent >/dev/null 2>&1; then
+    while read -r ip _; do
+      if is_valid_ipv6 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1, $2}' | awk '!seen[$1]++')
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    while read -r ip; do
+      if is_valid_ipv6 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(dig +time=3 +tries=1 +short AAAA "$domain" 2>/dev/null)
+  fi
+  if command -v host >/dev/null 2>&1; then
+    while read -r ip; do
+      if is_valid_ipv6 "$ip"; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    done < <(host -t AAAA "$domain" 2>/dev/null | awk '/has IPv6 address/ {print $NF}')
   fi
   return 1
 }
@@ -3742,6 +3781,8 @@ main() {
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet_node_count)); fi
   if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
+    ipv6_nping_precheck
+    export IPV6_NPING_FORCE_L2
     if [ "$normal_cdn_enabled" -eq 1 ]; then TOTAL=$((TOTAL + cdn6_node_count)); fi
     if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet2_node_count)); fi
     echo -e "${GREEN}[√] 检测到可用 IPv6${NC}"
