@@ -500,7 +500,9 @@ load_remote_nodes() {
   REMOTE_CERNET_NODES=()
   REMOTE_CERNET2_NODES=()
 
-  while IFS=$'\t' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target; do
+  while IFS= read -r line; do
+    line=${line//$'\t'/'|'}
+    IFS='|' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target <<< "$line"
     [ "$type" = "type" ] && continue
     [ -n "$ip" ] || continue
     port=${port:-80}
@@ -2338,6 +2340,23 @@ export -f route_trace_one
 export -f extract_trace_ips
 export -f route_needs_10099_hidden_tcp_retry
 
+nping_response_matches_target() {
+  local raw="$1" target="$2"
+  printf "%s\n" "$raw" | awk -v target="$target" '
+    BEGIN { target = tolower(target) }
+    /^RCVD .* TCP / {
+      line = $0
+      sub(/^.*TCP /, "", line)
+      sub(/ >.*$/, "", line)
+      sub(/:[0-9]+$/, "", line)
+      if (tolower(line) == target) found = 1
+    }
+    END { exit !found }
+  '
+}
+
+export -f nping_response_matches_target
+
 # ===================== 单节点测试 =====================
 probe_target() {
   local group="$1" family="$2" prov="$3" isp="$4" host="$5" ip="$6" port="${7:-80}" idx="${8:-0}" label="${9:-main}"
@@ -2412,6 +2431,13 @@ probe_target() {
     one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+    if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+      if [ "$DEBUG_MODE" -eq 1 ]; then
+        printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_${group}_${idx}_${label}_${i}.log"
+      fi
+      one_rcvd=0
+      one_rtt=""
+    fi
 
     if { ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] || ! [[ "$one_rcvd" =~ ^[0-9]+$ ]] || [ "$one_rcvd" -eq 0 ]; } &&
        [ "$family" = "6" ] && [ "$nping_use_l2" -eq 0 ] && [ "$nping_l2_failed" -eq 0 ]; then
@@ -2440,6 +2466,13 @@ probe_target() {
         one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
         one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
         one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+        if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+          if [ "$DEBUG_MODE" -eq 1 ]; then
+            printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_${group}_${idx}_${label}_${i}.log"
+          fi
+          one_rcvd=0
+          one_rtt=""
+        fi
       fi
     fi
 
@@ -2944,7 +2977,9 @@ load_remote_speedtest_nodes() {
     return 1
   fi
 
-  while IFS=$'\t' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target; do
+  while IFS= read -r line; do
+    line=${line//$'\t'/'|'}
+    IFS='|' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target <<< "$line"
     [ "$type" = "type" ] && continue
     [ "$family" = "4" ] || continue
     [ -n "$ip" ] || continue
