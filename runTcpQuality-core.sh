@@ -2586,6 +2586,12 @@ ipv6_nping_precheck() {
   raw=$(nping -6 --tcp -p 443 --flags syn -c "$IPV6_NPING_PRECHECK_PACKETS" "$ip" 2>&1 || true)
   sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
   rcv=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+  if [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -gt 0 ] && ! nping_response_matches_target "$raw" "$ip"; then
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      printf "%s\n" "$raw" > "${RESULT_DIR}/nping_mismatch_ipv6_precheck.log"
+    fi
+    rcv=0
+  fi
   if [[ "$sent" =~ ^[0-9]+$ ]] && [ "$sent" -gt 0 ] &&
      [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -eq 0 ]; then
     IPV6_NPING_FORCE_L2=1
