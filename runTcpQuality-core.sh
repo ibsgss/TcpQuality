@@ -2747,7 +2747,24 @@ SPEEDTEST_MODE="${SPEEDTEST_MODE:-regions}"
 SPEEDTEST_IFB="ifb_tqtest"
 SPEEDTEST_IFACE=""
 SPEEDTEST_CREATED_IFB=0
-SPEEDTEST_TOSUTIL_URL="https://m645b3e1bb36e-mrap.mrap.accesspoint.tos-global.volces.com/linux/amd64/tosutil"
+speedtest_tosutil_url() {
+  local arch tos_arch
+  if [ -n "${TOSUTIL_URL:-}" ]; then
+    printf '%s' "$TOSUTIL_URL"
+    return 0
+  fi
+  arch=$(uname -m 2>/dev/null || printf unknown)
+  case "$arch" in
+    x86_64|amd64) tos_arch=amd64 ;;
+    aarch64|arm64) tos_arch=arm64 ;;
+    *)
+      return 1
+      ;;
+  esac
+  printf 'https://m645b3e1bb36e-mrap.mrap.accesspoint.tos-global.volces.com/linux/%s/tosutil' "$tos_arch"
+}
+
+SPEEDTEST_TOSUTIL_URL="${SPEEDTEST_TOSUTIL_URL:-$(speedtest_tosutil_url || true)}"
 SPEEDTEST_TOSUTIL_BIN="${TOSUTIL_BIN:-}"
 SPEEDTEST_TOS_REGION="${TOS_REGION:-cn-beijing}"
 SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
@@ -2967,17 +2984,26 @@ install_speedtest_dependencies() {
 }
 
 install_tosutil_speedtest() {
+  local existing
   if [ -n "$SPEEDTEST_TOSUTIL_BIN" ] && [ -x "$SPEEDTEST_TOSUTIL_BIN" ]; then
-    return 0
+    if "$SPEEDTEST_TOSUTIL_BIN" version >/dev/null 2>&1; then
+      return 0
+    fi
   fi
   if command -v tosutil &>/dev/null; then
-    SPEEDTEST_TOSUTIL_BIN=$(command -v tosutil)
-    return 0
+    existing=$(command -v tosutil)
+    if "$existing" version >/dev/null 2>&1; then
+      SPEEDTEST_TOSUTIL_BIN="$existing"
+      return 0
+    fi
   fi
   if [ -x ./tosutil ]; then
-    SPEEDTEST_TOSUTIL_BIN="./tosutil"
-    return 0
+    if ./tosutil version >/dev/null 2>&1; then
+      SPEEDTEST_TOSUTIL_BIN="./tosutil"
+      return 0
+    fi
   fi
+  [ -n "$SPEEDTEST_TOSUTIL_URL" ] || return 1
   show_dependency_install_notice
   $USE_SUDO curl -fL -o /usr/local/bin/tosutil "$SPEEDTEST_TOSUTIL_URL" >/dev/null 2>&1 || {
     clear_dependency_install_notice
@@ -2987,6 +3013,10 @@ install_tosutil_speedtest() {
     clear_dependency_install_notice
     return 1
   }
+  if ! /usr/local/bin/tosutil version >/dev/null 2>&1; then
+    clear_dependency_install_notice
+    return 1
+  fi
   SPEEDTEST_TOSUTIL_BIN="/usr/local/bin/tosutil"
   clear_dependency_install_notice
   return 0
