@@ -2349,13 +2349,10 @@ probe_target() {
   local raw nping_rc iface source_ip source_mac dest_mac route_data
   # 不使用 --privileged：macOS 下该选项会强制二层发包，容易因无法解析下一跳 MAC 而失败。
   local -a nping_base_args=(--tcp -p "$port" --flags syn)
+  local -a nping_l2_args=()
+  local nping_l2_ready=0 nping_l2_failed=0
   if [ "$family" = "6" ]; then
-    if ! route_data=$(get_ipv6_route "$ip"); then
-      echo "FAIL|$prov|$isp|$host|$ip|0|0|100.00|IPV6_ROUTE_ERROR"
-      return
-    fi
-    IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
-    nping_base_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" "${nping_base_args[@]}")
+    nping_base_args=(-6 "${nping_base_args[@]}")
   fi
 
   local sent=0 rcvd=0 loss_pct avg_rtt rtt_sum="0" one_sent one_rcvd one_rtt one_success i packet_size payload_size header_size
@@ -2400,6 +2397,35 @@ probe_target() {
     one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+
+    if { ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] || ! [[ "$one_rcvd" =~ ^[0-9]+$ ]]; } &&
+       [ "$family" = "6" ] && [ "$nping_l2_failed" -eq 0 ]; then
+      if [ "$nping_l2_ready" -eq 0 ]; then
+        if route_data=$(get_ipv6_route "$ip"); then
+          IFS='|' read -r iface source_ip source_mac dest_mac <<< "$route_data"
+          nping_l2_args=(-6 -e "$iface" -S "$source_ip" --source-mac "$source_mac" --dest-mac "$dest_mac" --tcp -p "$port" --flags syn)
+          nping_l2_ready=1
+        else
+          nping_l2_failed=1
+        fi
+      fi
+      if [ "$nping_l2_ready" -eq 1 ]; then
+        if [ "$packet_size" -eq 0 ]; then
+          if raw=$(nping "${nping_l2_args[@]}" -c 1 "$ip" 2>&1); then
+            nping_rc=0
+          else
+            nping_rc=$?
+          fi
+        elif raw=$(nping "${nping_l2_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+          nping_rc=0
+        else
+          nping_rc=$?
+        fi
+        one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+        one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
+        one_rtt=$(printf "%s\n" "$raw" | sed -nE 's/.*Avg rtt:[[:space:]]*([0-9.]+).*/\1/p' | head -1)
+      fi
+    fi
 
     if ! [[ "$one_sent" =~ ^[0-9]+$ ]] || [ "$one_sent" -ne 1 ] || ! [[ "$one_rcvd" =~ ^[0-9]+$ ]]; then
       if [ "$DEBUG_MODE" -eq 1 ]; then
