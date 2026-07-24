@@ -1486,7 +1486,7 @@ ipv4_available() {
 }
 
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses
+  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses rank_updated rank_reject_reason
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
@@ -1515,11 +1515,16 @@ upload_report() {
     report_url=$(sed -nE 's/.*"url":"([^"]+)".*/\1/p' "$response_file" | head -1)
     today_uses=$(sed -nE 's/.*"todayUses":([0-9]+).*/\1/p' "$response_file" | head -1)
     total_uses=$(sed -nE 's/.*"totalUses":([0-9]+).*/\1/p' "$response_file" | head -1)
+    rank_updated=$(sed -nE 's/.*"rankUpdated":(true|false).*/\1/p' "$response_file" | head -1)
+    rank_reject_reason=$(sed -nE 's/.*"rankRejectReason":"([^"]*)".*/\1/p' "$response_file" | head -1)
   fi
   if [ -n "$report_url" ]; then
     echo -e "  ${WHITE}报告链接：${UNDERLINE}${report_url}${NC}"
     if [ -n "$today_uses" ] && [ -n "$total_uses" ]; then
       echo -e "  ${DIM}今日TCP脚本使用次数：${today_uses}；总使用次数：${total_uses}。感谢使用ibsgss网络质量检测脚本！${NC}"
+    fi
+    if [ "$DEBUG_MODE" -eq 1 ] && [ "$rank_updated" = "false" ] && [ -n "$rank_reject_reason" ]; then
+      echo -e "  ${YELLOW}[!] 排名未更新：${rank_reject_reason}${NC}"
     fi
   else
     echo -e "  ${YELLOW}[!] SVG 报告上传失败（HTTP $http_code），本地 CSV 已保留${NC}"
