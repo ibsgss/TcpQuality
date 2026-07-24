@@ -1494,6 +1494,8 @@ upload_report() {
     -o "$response_file" -w '%{http_code}' \
     -H 'Content-Type: text/csv; charset=utf-8' \
     -H "X-Report-Time: $report_time" \
+    -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
+    -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
     --data-binary "@$csv" "$REPORT_API"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
     rm -f "$response_file"
