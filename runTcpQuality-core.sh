@@ -1498,6 +1498,9 @@ upload_report() {
   fi
 
   response_file=$(mktemp)
+  if [ "$DEBUG_MODE" -eq 1 ] && [ -f "$csv" ]; then
+    cp "$csv" "$RESULT_DIR/report_upload.csv" 2>/dev/null || true
+  fi
   if ! http_code=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 \
     -o "$response_file" -w '%{http_code}' \
     -H 'Content-Type: text/csv; charset=utf-8' \
@@ -1507,8 +1510,16 @@ upload_report() {
     "${rank_headers[@]}" \
     --data-binary "@$csv" "$REPORT_API"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
+      printf '%s\n' "curl_failed" > "$RESULT_DIR/report_upload_http_code.txt"
+    fi
     rm -f "$response_file"
     return
+  fi
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
+    printf '%s\n' "$http_code" > "$RESULT_DIR/report_upload_http_code.txt"
   fi
 
   if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
@@ -3057,8 +3068,14 @@ request_rank_session() {
     -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
     -o "$response_file" "$RANK_SESSION_API" >/dev/null 2>&1; then
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      cp "$response_file" "$RESULT_DIR/rank_session_response.json" 2>/dev/null || true
+    fi
     rm -f "$response_file"
     return 1
+  fi
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    cp "$response_file" "$RESULT_DIR/rank_session_response.json" 2>/dev/null || true
   fi
 
   session_id=$(sed -nE 's/.*"sessionId":"([^"]+)".*/\1/p' "$response_file" | head -1)
