@@ -300,6 +300,9 @@ PROGRESS_LAST_STATE=""
 PROGRESS_LAST_TS=0
 PROGRESS_MIN_INTERVAL=1
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
+RANK_SESSION_API=${TCPQUALITY_RANK_SESSION_API:-${REPORT_API%/generate}/rank/session}
+RANK_SESSION_ID=""
+RANK_SESSION_TOKEN=""
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
@@ -1484,9 +1487,14 @@ ipv4_available() {
 
 upload_report() {
   local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses
+  local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
     return
+  fi
+  if [ -n "${RANK_SESSION_ID:-}" ] && [ -n "${RANK_SESSION_TOKEN:-}" ]; then
+    rank_headers+=(-H "X-TcpQuality-Rank-Session: $RANK_SESSION_ID")
+    rank_headers+=(-H "X-TcpQuality-Rank-Token: $RANK_SESSION_TOKEN")
   fi
 
   response_file=$(mktemp)
@@ -1496,6 +1504,7 @@ upload_report() {
     -H "X-Report-Time: $report_time" \
     -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
+    "${rank_headers[@]}" \
     --data-binary "@$csv" "$REPORT_API"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
     rm -f "$response_file"
@@ -3032,6 +3041,30 @@ speedtest_group_count() {
   speedtest_group_specs | awk 'NF{count++} END{print count + 0}'
 }
 
+request_rank_session() {
+  local response_file session_id token
+  RANK_SESSION_ID=""
+  RANK_SESSION_TOKEN=""
+  command -v curl &>/dev/null || return 1
+
+  response_file=$(mktemp)
+  if ! curl -fsS --connect-timeout 5 --max-time 15 \
+    -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
+    -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
+    -o "$response_file" "$RANK_SESSION_API" >/dev/null 2>&1; then
+    rm -f "$response_file"
+    return 1
+  fi
+
+  session_id=$(sed -nE 's/.*"sessionId":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  token=$(sed -nE 's/.*"token":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  rm -f "$response_file"
+  [ -n "$session_id" ] && [ -n "$token" ] || return 1
+  RANK_SESSION_ID="$session_id"
+  RANK_SESSION_TOKEN="$token"
+  return 0
+}
+
 speedtest_region_title() {
   case "$1" in
     cn-shanghai) printf '上海' ;;
@@ -3568,6 +3601,11 @@ collect_speedtest_results() {
       echo -e "${DIM}[debug] tosutil 入口使用内置 fallback IP${NC}" >&2
     fi
     echo -e "${DIM}[debug] tosutil 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
+  fi
+  if request_rank_session; then
+    [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 已获取${NC}" >&2
+  else
+    [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败，本次报告不会进入排名${NC}" >&2
   fi
   install_tosutil_speedtest || {
     echo -e "${RED}[X] tosutil 安装失败${NC}"
