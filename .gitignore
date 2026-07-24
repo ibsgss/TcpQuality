@@ -2,6 +2,13 @@
 AGENTS.md
 worker/
 
+# Go build artifacts
+/tcpquality
+/tcpquality.exe
+/dist/
+*.test
+*.out
+
 # Local reports and editor metadata
 *.svg
 .DS_Store
