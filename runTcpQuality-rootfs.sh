@@ -88,7 +88,7 @@ answer_is_no() {
 }
 
 configure_interactive_args() {
-  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0
+  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0 upload_rank=1
   local -a selected_args=()
 
   print_interactive_intro
@@ -110,6 +110,9 @@ configure_interactive_args() {
     run_speedtest=1
     ALLOW_SPEEDTEST=1
   fi
+
+  answer=$(prompt_answer "上传并参与速度排名？（回车默认 'y'）[y/n]：" "y")
+  answer_is_no "$answer" && upload_rank=0
 
   if [ "$run_route" -eq 0 ]; then
     if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] && [ "$run_speedtest" -eq 0 ]; then
@@ -137,6 +140,8 @@ configure_interactive_args() {
      [ "$run_intl" -eq 1 ] && [ "$run_speedtest" -eq 1 ]; then
     selected_args=("--all")
   fi
+
+  [ "$upload_rank" -eq 0 ] && selected_args+=("--no-rank-upload")
 
   set -- "${selected_args[@]}"
   INTERACTIVE_ARGS=("$@")

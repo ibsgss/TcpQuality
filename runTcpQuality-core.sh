@@ -273,6 +273,7 @@ PARALLEL=16
 TEST_CERNET=0
 TEST_ALL=0
 UPLOAD_REPORT=1
+REPORT_UPLOAD_FORCED_OFF=0
 ONLY_IPV4=0
 ONLY_IPV6=0
 ONLY_LARGE=0
@@ -591,6 +592,7 @@ NixOS:
   --only-speedtest-staged
                     仅运行北京三网三段限速测试
   --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
+  --no-rank-upload  不上传报告，也不参与速度排名
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
   --debug           保留临时文件并输出调试信息，便于排查线路识别问题
@@ -712,7 +714,12 @@ parse_args() {
       --intl)
         INTL_REQUESTED=1
         INTERNATIONAL_ENABLED=1
-        UPLOAD_REPORT=1
+        [ "$REPORT_UPLOAD_FORCED_OFF" -eq 1 ] || UPLOAD_REPORT=1
+        shift
+        ;;
+      --no-rank-upload)
+        UPLOAD_REPORT=0
+        REPORT_UPLOAD_FORCED_OFF=1
         shift
         ;;
       --debug)
