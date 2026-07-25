@@ -3042,6 +3042,7 @@ SPEEDTEST_MOBILE_ID=""
 SPEEDTEST_MOBILE_CITY=""
 SPEEDTEST_ROWS=()
 SPEEDTEST_RANK_ELIGIBLE=1
+SPEEDTEST_RANK_DISABLED_REASON=""
 SPEEDTEST_COUNTER_CHAIN=""
 SPEEDTEST_COUNTER_HOOK=""
 
@@ -3531,6 +3532,7 @@ speedtest_run_probe() {
     start_bytes=$(speedtest_counter_bytes)
   else
     SPEEDTEST_RANK_ELIGIBLE=0
+    SPEEDTEST_RANK_DISABLED_REASON="target_counter_unavailable"
     start_bytes=$(speedtest_net_bytes "$probe_type")
   fi
   before=$(speedtest_retrans_count)
@@ -3545,6 +3547,7 @@ speedtest_run_probe() {
     end_bytes=$(speedtest_counter_bytes)
     if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
       SPEEDTEST_RANK_ELIGIBLE=0
+      SPEEDTEST_RANK_DISABLED_REASON="target_counter_read_failed"
     fi
   else
     end_bytes=$(speedtest_net_bytes "$probe_type")
@@ -3740,6 +3743,7 @@ collect_speedtest_results() {
   install_speedtest_counter_dependency || true
   if ! command -v iptables &>/dev/null; then
     SPEEDTEST_RANK_ELIGIBLE=0
+    SPEEDTEST_RANK_DISABLED_REASON="iptables_unavailable"
   fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
     if [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ]; then
@@ -3749,10 +3753,11 @@ collect_speedtest_results() {
     fi
     echo -e "${DIM}[debug] tosutil 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
   fi
-  if [ "$SPEEDTEST_RANK_ELIGIBLE" -eq 1 ] && request_rank_session; then
+  if request_rank_session; then
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 已获取${NC}" >&2
   else
-    [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败，本次报告不会进入排名${NC}" >&2
+    [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] || SPEEDTEST_RANK_DISABLED_REASON="rank_session_request_failed"
+    [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败：$SPEEDTEST_RANK_DISABLED_REASON，本次报告不会进入排名${NC}" >&2
   fi
   install_tosutil_speedtest || {
     echo -e "${RED}[X] tosutil 安装失败${NC}"
@@ -3822,6 +3827,8 @@ collect_speedtest_results() {
   if [ "$SPEEDTEST_RANK_ELIGIBLE" -ne 1 ]; then
     RANK_SESSION_ID=""
     RANK_SESSION_TOKEN=""
+    [ "$DEBUG_MODE" -eq 1 ] && [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] && \
+      echo -e "${DIM}[debug] 排名凭证已清除：$SPEEDTEST_RANK_DISABLED_REASON${NC}" >&2
   fi
   if [ -n "${SPEEDTEST_STATE_FILE:-}" ]; then
     {

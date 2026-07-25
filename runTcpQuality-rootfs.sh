@@ -763,7 +763,7 @@ install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iproute2 iputils-ping kmod nmap ncurses-bin sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
       >"$apt_log" 2>&1; then
       echo "[X] Debian rootfs 依赖安装失败" >&2
       echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
@@ -776,7 +776,7 @@ install_guest_deps() {
   else
     local apk_log="$GUEST_TMP_HOST/alpine-rootfs-apk.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
-      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iproute2 iputils kmod ncurses nmap-nping sed tar traceroute tzdata' \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iproute2 iptables iputils kmod ncurses nmap-nping sed tar traceroute tzdata' \
       >"$apk_log" 2>&1; then
       echo "[X] Alpine rootfs 依赖安装失败" >&2
       echo "[i] apk 日志已保留: $apk_log" >&2
