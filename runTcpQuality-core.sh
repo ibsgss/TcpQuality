@@ -1508,12 +1508,15 @@ upload_report() {
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
     return
   fi
-  if grep -q '^Speedtest,' "$csv" 2>/dev/null; then
+  if grep -qE '^(Speedtest|三网单线程速度),' "$csv" 2>/dev/null; then
     ensure_public_ips_for_rank
   fi
   if [ -n "${RANK_SESSION_ID:-}" ] && [ -n "${RANK_SESSION_TOKEN:-}" ]; then
     rank_headers+=(-H "X-TcpQuality-Rank-Session: $RANK_SESSION_ID")
     rank_headers+=(-H "X-TcpQuality-Rank-Token: $RANK_SESSION_TOKEN")
+  fi
+  if [ -n "${SPEEDTEST_RANK_DISABLED_REASON:-}" ]; then
+    rank_headers+=(-H "X-TcpQuality-Rank-Disabled-Reason: $SPEEDTEST_RANK_DISABLED_REASON")
   fi
 
   response_file=$(mktemp)
@@ -3827,6 +3830,8 @@ collect_speedtest_results() {
   if [ "$SPEEDTEST_RANK_ELIGIBLE" -ne 1 ]; then
     RANK_SESSION_ID=""
     RANK_SESSION_TOKEN=""
+    [ "$DEBUG_MODE" -eq 1 ] && [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] && \
+      printf '%s\n' "$SPEEDTEST_RANK_DISABLED_REASON" > "$RESULT_DIR/rank_disabled_reason.txt"
     [ "$DEBUG_MODE" -eq 1 ] && [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] && \
       echo -e "${DIM}[debug] 排名凭证已清除：$SPEEDTEST_RANK_DISABLED_REASON${NC}" >&2
   fi
