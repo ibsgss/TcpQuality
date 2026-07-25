@@ -3416,9 +3416,10 @@ speedtest_force_hosts() {
 speedtest_parse_rate_mbps() {
   awk '
     /Average .* rate:/ {
+      # tosutil 输出格式为 "Average download rate: 78.76MB/s"（数值和单位无空格）
+      unit = $(NF)
       value = $(NF)
       gsub(/[^0-9.]/, "", value)
-      unit = $(NF)
       if (unit ~ /GB\/s/) value = value * 8000
       else if (unit ~ /MB\/s/) value = value * 8
       else if (unit ~ /KB\/s/) value = value * 8 / 1000
@@ -3846,7 +3847,8 @@ collect_speedtest_results() {
       else
         carrier_values+=("failed|failed|failed|$server_id|$city")
       fi
-      rm -rf "$workdir"
+      # debug 模式下保留 tosutil 输出文件，方便排查测速异常
+      [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
       done=$((done + 1))
       speedtest_show_progress "$done" "$total"
     done
