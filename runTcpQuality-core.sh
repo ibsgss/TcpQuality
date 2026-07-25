@@ -1492,12 +1492,24 @@ ipv4_available() {
   [ "$IPV4_WORK" -eq 1 ]
 }
 
+ensure_public_ips_for_rank() {
+  if [ -z "${IPV4_PUBLIC:-}" ]; then
+    get_public_ipv4 || true
+  fi
+  if [ -z "${IPV6_PUBLIC:-}" ]; then
+    get_public_ipv6 || true
+  fi
+}
+
 upload_report() {
   local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses rank_updated rank_reject_reason
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
     return
+  fi
+  if grep -q '^Speedtest,' "$csv" 2>/dev/null; then
+    ensure_public_ips_for_rank
   fi
   if [ -n "${RANK_SESSION_ID:-}" ] && [ -n "${RANK_SESSION_TOKEN:-}" ]; then
     rank_headers+=(-H "X-TcpQuality-Rank-Session: $RANK_SESSION_ID")
@@ -3623,6 +3635,7 @@ collect_speedtest_results() {
     exit 1
   }
   load_remote_speedtest_nodes || true
+  ensure_public_ips_for_rank
   if [ "$DEBUG_MODE" -eq 1 ]; then
     if [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ]; then
       echo -e "${DIM}[debug] tosutil 入口来自 getNodes scope=tos${NC}" >&2
