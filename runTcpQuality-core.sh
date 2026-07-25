@@ -307,6 +307,9 @@ REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 RANK_SESSION_API=${TCPQUALITY_RANK_SESSION_API:-${REPORT_API%/generate}/rank/session}
 RANK_SESSION_ID=""
 RANK_SESSION_TOKEN=""
+RANK_SESSION_STARTED_AT=""
+RANK_SESSION_EXPIRES_AT=""
+RANK_SESSION_IP4=""
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
@@ -1465,9 +1468,16 @@ is_valid_ipv6() {
 
 get_public_ipv4() {
   local api response
-  local apis=("ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
+  local apis=(
+    "https://api.ipify.org"
+    "https://ipv4.icanhazip.com"
+    "https://ifconfig.me/ip"
+    "https://ifconfig.co/ip"
+    "https://ident.me"
+    "https://ip.sb"
+  )
   for api in "${apis[@]}"; do
-    response=$(curl -s4 --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+    response=$(curl -fsS4L --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
     if [[ "$response" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_public_ipv4 "$response"; then
       IPV4_PUBLIC="$response"
       IPV4_WORK=1
@@ -1514,7 +1524,7 @@ ensure_public_ips_for_rank() {
 }
 
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses rank_updated rank_reject_reason
+  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
@@ -1526,6 +1536,9 @@ upload_report() {
   if [ -n "${RANK_SESSION_ID:-}" ] && [ -n "${RANK_SESSION_TOKEN:-}" ]; then
     rank_headers+=(-H "X-TcpQuality-Rank-Session: $RANK_SESSION_ID")
     rank_headers+=(-H "X-TcpQuality-Rank-Token: $RANK_SESSION_TOKEN")
+    rank_headers+=(-H "X-TcpQuality-Rank-Started-At: ${RANK_SESSION_STARTED_AT:-}")
+    rank_headers+=(-H "X-TcpQuality-Rank-Expires-At: ${RANK_SESSION_EXPIRES_AT:-}")
+    rank_headers+=(-H "X-TcpQuality-Rank-Session-IPv4: ${RANK_SESSION_IP4:-}")
   fi
   if [ -n "${SPEEDTEST_RANK_DISABLED_REASON:-}" ]; then
     rank_headers+=(-H "X-TcpQuality-Rank-Disabled-Reason: $SPEEDTEST_RANK_DISABLED_REASON")
@@ -1535,12 +1548,14 @@ upload_report() {
   if [ "$DEBUG_MODE" -eq 1 ] && [ -f "$csv" ]; then
     cp "$csv" "$RESULT_DIR/report_upload.csv" 2>/dev/null || true
   fi
-  if ! http_code=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 \
+  rank_finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  if ! http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
     -o "$response_file" -w '%{http_code}' \
     -H 'Content-Type: text/csv; charset=utf-8' \
     -H "X-Report-Time: $report_time" \
     -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
+    -H "X-TcpQuality-Rank-Finished-At: $rank_finished_at" \
     "${rank_headers[@]}" \
     --data-binary "@$csv" "$REPORT_API"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
@@ -3096,13 +3111,16 @@ speedtest_group_count() {
 }
 
 request_rank_session() {
-  local response_file session_id token
+  local response_file session_id token started_at expires_at session_ip4
   RANK_SESSION_ID=""
   RANK_SESSION_TOKEN=""
+  RANK_SESSION_STARTED_AT=""
+  RANK_SESSION_EXPIRES_AT=""
+  RANK_SESSION_IP4=""
   command -v curl &>/dev/null || return 1
 
   response_file=$(mktemp)
-  if ! curl -fsS --connect-timeout 5 --max-time 15 \
+  if ! curl -4 -fsS --connect-timeout 5 --max-time 15 \
     -H "X-TcpQuality-Public-IPv4: ${IPV4_PUBLIC:-}" \
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
     -o "$response_file" "$RANK_SESSION_API" >/dev/null 2>&1; then
@@ -3118,10 +3136,16 @@ request_rank_session() {
 
   session_id=$(sed -nE 's/.*"sessionId":"([^"]+)".*/\1/p' "$response_file" | head -1)
   token=$(sed -nE 's/.*"token":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  started_at=$(sed -nE 's/.*"startedAt":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  expires_at=$(sed -nE 's/.*"expiresAt":"([^"]+)".*/\1/p' "$response_file" | head -1)
+  session_ip4=$(sed -nE 's/.*"sessionIp4":"([^"]+)".*/\1/p' "$response_file" | head -1)
   rm -f "$response_file"
   [ -n "$session_id" ] && [ -n "$token" ] || return 1
   RANK_SESSION_ID="$session_id"
   RANK_SESSION_TOKEN="$token"
+  RANK_SESSION_STARTED_AT="$started_at"
+  RANK_SESSION_EXPIRES_AT="$expires_at"
+  RANK_SESSION_IP4="$session_ip4"
   return 0
 }
 
@@ -3890,6 +3914,9 @@ collect_speedtest_results() {
   if [ "$SPEEDTEST_RANK_ELIGIBLE" -ne 1 ]; then
     RANK_SESSION_ID=""
     RANK_SESSION_TOKEN=""
+    RANK_SESSION_STARTED_AT=""
+    RANK_SESSION_EXPIRES_AT=""
+    RANK_SESSION_IP4=""
     [ "$DEBUG_MODE" -eq 1 ] && [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] && \
       printf '%s\n' "$SPEEDTEST_RANK_DISABLED_REASON" > "$RESULT_DIR/rank_disabled_reason.txt"
     [ "$DEBUG_MODE" -eq 1 ] && [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] && \
@@ -4028,7 +4055,7 @@ append_speedtest_csv() {
       IFS='|' read -r upload retrans download server_id city <<<"$result"
       city="${city:-$(speedtest_selected_city "$carrier")}"
       server_id="${server_id:-$(speedtest_selected_id "$carrier")}"
-      if [ "$upload" = "failed" ]; then
+      if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
         printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,\n' \
           "$label" "$carrier" "$city" "FAIL" "$upload" "$retrans" "$download" >> "$csv"
       else

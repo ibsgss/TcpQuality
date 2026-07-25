@@ -827,16 +827,22 @@ if [ "$KEEP_ROOTFS" -eq 1 ]; then
   echo "[i] --keep 已启用，rootfs 保留于: $ROOTFS_DIR"
 fi
 
+guest_term="${TERM:-dumb}"
+case "$guest_term" in
+  xterm-ghostty) guest_term=xterm ;;
+  "") guest_term=dumb ;;
+esac
+
 guest_env=(
   HOME=/root
   "PATH=$GUEST_PATH"
   LANG=C.UTF-8
   LC_ALL=C.UTF-8
-  "TERM=${TERM:-dumb}"
+  "TERM=$guest_term"
   TCPQUALITY_INSIDE_ROOTFS=1
 )
 for env_name in \
-  GET_NODES_URL TCPQUALITY_REPORT_API \
+  GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
   http_proxy https_proxy no_proxy all_proxy; do
   if [ "${!env_name+x}" = x ]; then
