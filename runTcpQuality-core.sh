@@ -3568,8 +3568,14 @@ speedtest_run_probe() {
   else
     duration=$((end_time - start_time))
     delta_bytes=$((end_bytes - start_bytes))
-    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
-    [ "$result" != "failed" ] || result="$parsed"
+    if [ "$delta_bytes" -le 0 ] && [ "$parsed" != "failed" ]; then
+      result="$parsed"
+      SPEEDTEST_RANK_ELIGIBLE=0
+      SPEEDTEST_RANK_DISABLED_REASON="target_counter_zero"
+    else
+      result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
+      [ "$result" != "failed" ] || result="$parsed"
+    fi
   fi
 
   if [ "$exit_code" -ne 0 ] && [ "$parsed" = "failed" ]; then
