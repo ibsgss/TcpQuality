@@ -12,6 +12,14 @@
 set -Eeuo pipefail
 
 RAW_BASE="${TCPQUALITY_RAW_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/main}"
+case "$RAW_BASE" in
+  http://*|https://*) ;;
+  *)
+    echo "[!] TCPQUALITY_RAW_BASE 非法，已回退到官方 GitHub 源" >&2
+    RAW_BASE="https://raw.githubusercontent.com/ibsgss/TcpQuality/main"
+    ;;
+esac
+RAW_BASE="${RAW_BASE%/}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
 LOCAL_ROOTFS="$SCRIPT_DIR/runTcpQuality-rootfs.sh"
 LOCAL_CORE="$SCRIPT_DIR/runTcpQuality-core.sh"
