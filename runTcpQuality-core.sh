@@ -3415,15 +3415,28 @@ speedtest_force_hosts() {
 
 speedtest_parse_rate_mbps() {
   awk '
-    /Average .* rate:/ {
-      # tosutil 输出格式为 "Average download rate: 78.76MB/s"（数值和单位无空格）
-      unit = $(NF)
-      value = $(NF)
-      gsub(/[^0-9.]/, "", value)
-      if (unit ~ /GB\/s/) value = value * 8000
-      else if (unit ~ /MB\/s/) value = value * 8
-      else if (unit ~ /KB\/s/) value = value * 8 / 1000
-      else if (unit ~ /B\/s/) value = value * 8 / 1000000
+    tolower($0) ~ /average/ && tolower($0) ~ /rate:/ {
+      line = $0
+      sub(/^.*[Rr][Aa][Tt][Ee]:[[:space:]]*/, "", line)
+      compact = line
+      gsub(/[[:space:]]+/, "", compact)
+      if (match(compact, /[0-9]+([.][0-9]+)?[GgMmKk]?[Bb]\/[Ss]/)) {
+        token = substr(compact, RSTART, RLENGTH)
+        value = token
+        unit = token
+        gsub(/[^0-9.]/, "", value)
+        gsub(/[0-9.[:space:]]/, "", unit)
+      } else {
+        value = $(NF)
+        unit = $(NF)
+        gsub(/[^0-9.]/, "", value)
+      }
+      unit = toupper(unit)
+      if (unit ~ /GB\/S/) value = value * 8000
+      else if (unit ~ /MB\/S/) value = value * 8
+      else if (unit ~ /KB\/S/) value = value * 8 / 1000
+      else if (unit ~ /B\/S/) value = value * 8 / 1000000
+      else next
       printf "%.1f", value
       found = 1
     }
@@ -3502,8 +3515,9 @@ speedtest_counter_bytes() {
 speedtest_calc_mbps() {
   local bytes="$1" seconds="$2"
   awk -v b="$bytes" -v s="$seconds" 'BEGIN {
-    if (s <= 0 || b < 0) printf "failed";
-    else printf "%.1f", b * 8 / s / 1000000;
+    mbps = b * 8 / s / 1000000;
+    if (s <= 0 || b <= 0 || mbps < 0.05) printf "failed";
+    else printf "%.1f", mbps;
   }'
 }
 
