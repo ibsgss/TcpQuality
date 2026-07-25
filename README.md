@@ -7,13 +7,21 @@ TCP 质量检测脚本，默认检测全国三网运营商节点。
 国外服务器推荐使用 GitHub Raw：
 
 ```bash
+# bash / zsh
 bash <(curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
+
+# fish
+curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh | env TERM=xterm bash
 ```
 
 国内服务器推荐使用加速入口：
 
 ```bash
+# bash / zsh
 bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
+
+# fish
+curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 ```
 
 示例报告：
