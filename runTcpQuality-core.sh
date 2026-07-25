@@ -3453,7 +3453,7 @@ speedtest_counter_start() {
   else
     hook="OUTPUT"
   fi
-  chain="TCPQ_TOS_${$}_${RANDOM}"
+  chain="TCPQ_TOS_$$_$RANDOM"
 
   $USE_SUDO iptables -N "$chain" >/dev/null 2>&1 || return 1
   $USE_SUDO iptables -I "$hook" 1 -j "$chain" >/dev/null 2>&1 || {
