@@ -113,6 +113,9 @@ IPV6_PUBLIC=""
 IPV4_WORK=0
 IPV6_WORK=0
 GET_NODES_URL="${GET_NODES_URL:-https://tcpquality.ibsgss.uk/getNodes}"
+GET_NODES_LAST_URL=""
+GET_NODES_LAST_ERROR=""
+GET_NODES_LAST_STATUS=""
 REMOTE_NODES_LOADED=0
 REMOTE_CDN4_NODES=()
 REMOTE_CDN6_NODES=()
@@ -488,16 +491,24 @@ node_scope() {
 
 load_remote_nodes() {
   local scope="${1:-$(node_scope)}"
-  local tmp line type family prov isp host ip port target backup_host backup_ip backup_port backup_target url sep
+  local tmp err line type family prov isp host ip port target backup_host backup_ip backup_port backup_target url sep curl_status
   command -v curl &>/dev/null || return 1
   tmp=$(mktemp)
+  err="${tmp}.err"
   sep="?"
   [[ "$GET_NODES_URL" == *"?"* ]] && sep="&"
   url="${GET_NODES_URL}${sep}format=tsv&scope=${scope}"
-  if ! curl -fsSL --connect-timeout 5 --max-time 30 "$url" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    return 1
+  if ! curl -4 -fsSL --connect-timeout 5 --max-time 30 "$url" > "$tmp" 2>"$err"; then
+    curl_status=$?
+    if ! curl -fsSL --connect-timeout 5 --max-time 30 "$url" > "$tmp" 2>>"$err"; then
+      GET_NODES_LAST_URL="$url"
+      GET_NODES_LAST_ERROR=$(tr '\n' ' ' < "$err" | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-240)
+      GET_NODES_LAST_STATUS="$curl_status"
+      rm -f "$tmp" "$err"
+      return 1
+    fi
   fi
+  rm -f "$err"
 
   REMOTE_CDN4_NODES=()
   REMOTE_CDN6_NODES=()
@@ -533,7 +544,8 @@ require_remote_nodes() {
     return 0
   fi
   echo -e "${RED}[X] 无法从 getNodes 获取节点 IP+端口，请稍后重试${NC}"
-  echo -e "${DIM}    getNodes: ${GET_NODES_URL}  scope=${scope}${NC}"
+  echo -e "${DIM}    getNodes: ${GET_NODES_LAST_URL:-${GET_NODES_URL}}${NC}"
+  [ -n "$GET_NODES_LAST_ERROR" ] && echo -e "${DIM}    curl: ${GET_NODES_LAST_ERROR}${NC}"
   exit 1
 }
 
