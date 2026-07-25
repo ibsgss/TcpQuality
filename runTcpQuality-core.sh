@@ -3041,6 +3041,9 @@ SPEEDTEST_UNICOM_CITY=""
 SPEEDTEST_MOBILE_ID=""
 SPEEDTEST_MOBILE_CITY=""
 SPEEDTEST_ROWS=()
+SPEEDTEST_RANK_ELIGIBLE=1
+SPEEDTEST_COUNTER_CHAIN=""
+SPEEDTEST_COUNTER_HOOK=""
 
 speedtest_candidates() {
   case "$1" in
@@ -3212,6 +3215,7 @@ speedtest_set_selected() {
 }
 
 speedtest_cleanup() {
+  speedtest_counter_stop_current
   if [ -n "${SPEEDTEST_IFACE:-}" ]; then
     tc qdisc del dev "$SPEEDTEST_IFACE" root 2>/dev/null || true
     tc qdisc del dev "$SPEEDTEST_IFACE" ingress 2>/dev/null || true
@@ -3301,6 +3305,25 @@ install_tosutil_speedtest() {
   SPEEDTEST_TOSUTIL_BIN="/usr/local/bin/tosutil"
   clear_dependency_install_notice
   return 0
+}
+
+install_speedtest_counter_dependency() {
+  command -v iptables &>/dev/null && return 0
+  if is_nixos; then
+    return 1
+  fi
+  if command -v apt-get &>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq iptables >/dev/null 2>&1
+  elif command -v dnf &>/dev/null; then
+    $USE_SUDO dnf install -y -q iptables >/dev/null 2>&1
+  elif command -v yum &>/dev/null; then
+    $USE_SUDO yum install -y -q iptables >/dev/null 2>&1
+  elif command -v apk &>/dev/null; then
+    $USE_SUDO apk add --no-cache iptables >/dev/null 2>&1
+  else
+    return 1
+  fi
+  command -v iptables &>/dev/null
 }
 
 speedtest_retrans_count() {
@@ -3409,6 +3432,68 @@ speedtest_net_bytes() {
   cat "/sys/class/net/$SPEEDTEST_IFACE/statistics/$stat" 2>/dev/null || printf -- '-'
 }
 
+speedtest_counter_stop_current() {
+  if [ -n "${SPEEDTEST_COUNTER_CHAIN:-}" ] && [ -n "${SPEEDTEST_COUNTER_HOOK:-}" ]; then
+    $USE_SUDO iptables -D "$SPEEDTEST_COUNTER_HOOK" -j "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+    $USE_SUDO iptables -F "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+    $USE_SUDO iptables -X "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+  fi
+  SPEEDTEST_COUNTER_CHAIN=""
+  SPEEDTEST_COUNTER_HOOK=""
+}
+
+speedtest_counter_start() {
+  local probe_type="$1" server_ip="$2" hook chain
+  speedtest_counter_stop_current
+  command -v iptables &>/dev/null || return 1
+  [ -n "$server_ip" ] || return 1
+
+  if [ "$probe_type" = "download" ]; then
+    hook="INPUT"
+  else
+    hook="OUTPUT"
+  fi
+  chain="TCPQ_TOS_${$}_${RANDOM}"
+
+  $USE_SUDO iptables -N "$chain" >/dev/null 2>&1 || return 1
+  $USE_SUDO iptables -I "$hook" 1 -j "$chain" >/dev/null 2>&1 || {
+    $USE_SUDO iptables -F "$chain" >/dev/null 2>&1 || true
+    $USE_SUDO iptables -X "$chain" >/dev/null 2>&1 || true
+    return 1
+  }
+
+  if [ "$probe_type" = "download" ]; then
+    $USE_SUDO iptables -A "$chain" -p tcp -s "$server_ip" --sport 443 -j RETURN >/dev/null 2>&1 || {
+      SPEEDTEST_COUNTER_CHAIN="$chain"
+      SPEEDTEST_COUNTER_HOOK="$hook"
+      speedtest_counter_stop_current
+      return 1
+    }
+  else
+    $USE_SUDO iptables -A "$chain" -p tcp -d "$server_ip" --dport 443 -j RETURN >/dev/null 2>&1 || {
+      SPEEDTEST_COUNTER_CHAIN="$chain"
+      SPEEDTEST_COUNTER_HOOK="$hook"
+      speedtest_counter_stop_current
+      return 1
+    }
+  fi
+
+  SPEEDTEST_COUNTER_CHAIN="$chain"
+  SPEEDTEST_COUNTER_HOOK="$hook"
+  return 0
+}
+
+speedtest_counter_bytes() {
+  [ -n "${SPEEDTEST_COUNTER_CHAIN:-}" ] || {
+    printf -- '-'
+    return 0
+  }
+  $USE_SUDO iptables -L "$SPEEDTEST_COUNTER_CHAIN" -v -x -n 2>/dev/null | awk '
+    NR > 2 && $3 == "RETURN" { print $2; found=1; exit }
+    END { if (!found) print "-" }
+  '
+}
+
 speedtest_calc_mbps() {
   local bytes="$1" seconds="$2"
   awk -v b="$bytes" -v s="$seconds" 'BEGIN {
@@ -3418,8 +3503,8 @@ speedtest_calc_mbps() {
 }
 
 speedtest_run_probe() {
-  local probe_type="$1" output_file="$2"
-  local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration
+  local probe_type="$1" output_file="$2" server_ip="$3"
+  local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration counter_enabled
   local output parsed pid elapsed exit_code result
 
   "$SPEEDTEST_TOSUTIL_BIN" probe -tr "$SPEEDTEST_TOS_REGION" -pt "$probe_type" \
@@ -3435,11 +3520,19 @@ speedtest_run_probe() {
 
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
+    speedtest_counter_stop_current
     printf 'failed|0'
     return 0
   fi
 
-  start_bytes=$(speedtest_net_bytes "$probe_type")
+  counter_enabled=0
+  if speedtest_counter_start "$probe_type" "$server_ip"; then
+    counter_enabled=1
+    start_bytes=$(speedtest_counter_bytes)
+  else
+    SPEEDTEST_RANK_ELIGIBLE=0
+    start_bytes=$(speedtest_net_bytes "$probe_type")
+  fi
   before=$(speedtest_retrans_count)
   start_time=$(date +%s)
   if wait "$pid"; then
@@ -3448,7 +3541,15 @@ speedtest_run_probe() {
     exit_code=$?
   fi
   end_time=$(date +%s)
-  end_bytes=$(speedtest_net_bytes "$probe_type")
+  if [ "$counter_enabled" -eq 1 ]; then
+    end_bytes=$(speedtest_counter_bytes)
+    if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
+      SPEEDTEST_RANK_ELIGIBLE=0
+    fi
+  else
+    end_bytes=$(speedtest_net_bytes "$probe_type")
+  fi
+  speedtest_counter_stop_current
   after=$(speedtest_retrans_count)
   output=$(cat "$output_file" 2>/dev/null || true)
   parsed=$(printf '%s\n' "$output" | speedtest_parse_rate_mbps || true)
@@ -3636,6 +3737,10 @@ collect_speedtest_results() {
   }
   load_remote_speedtest_nodes || true
   ensure_public_ips_for_rank
+  install_speedtest_counter_dependency || true
+  if ! command -v iptables &>/dev/null; then
+    SPEEDTEST_RANK_ELIGIBLE=0
+  fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
     if [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ]; then
       echo -e "${DIM}[debug] tosutil 入口来自 getNodes scope=tos${NC}" >&2
@@ -3644,7 +3749,7 @@ collect_speedtest_results() {
     fi
     echo -e "${DIM}[debug] tosutil 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
   fi
-  if request_rank_session; then
+  if [ "$SPEEDTEST_RANK_ELIGIBLE" -eq 1 ] && request_rank_session; then
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 已获取${NC}" >&2
   else
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败，本次报告不会进入排名${NC}" >&2
@@ -3691,8 +3796,8 @@ collect_speedtest_results() {
       speedtest_set_selected "$carrier" "$server_id" "$city"
 
       if speedtest_force_hosts "$server_id"; then
-        IFS='|' read -r download download_retrans <<<"$(speedtest_run_probe download "$result_file.download")"
-        IFS='|' read -r upload upload_retrans <<<"$(speedtest_run_probe upload "$result_file.upload")"
+        IFS='|' read -r download download_retrans <<<"$(speedtest_run_probe download "$result_file.download" "$server_id")"
+        IFS='|' read -r upload upload_retrans <<<"$(speedtest_run_probe upload "$result_file.upload" "$server_id")"
       else
         download="failed"
         download_retrans="0"
@@ -3714,6 +3819,10 @@ collect_speedtest_results() {
   done < <(speedtest_group_specs)
 
   speedtest_cleanup
+  if [ "$SPEEDTEST_RANK_ELIGIBLE" -ne 1 ]; then
+    RANK_SESSION_ID=""
+    RANK_SESSION_TOKEN=""
+  fi
   if [ -n "${SPEEDTEST_STATE_FILE:-}" ]; then
     {
       printf 'META\t%s|%s|%s|%s|%s|%s\n' \
