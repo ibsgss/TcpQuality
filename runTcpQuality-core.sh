@@ -3563,18 +3563,40 @@ speedtest_run_probe() {
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
 
-  if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
+  # ===================== 速度结果计算 =====================
+  # 始终以 tosutil 自身报告的速度为准（最准确的链路层测速结果）。
+  # iptables 计数器仅用于防作弊验证（排名资格），不替代 tosutil 的测速值，
+  # 避免因计数器漏计流量（如只捕获 TCP 握手包而未捕获数据流）导致速度显示为 0 Mbps。
+  if [ "$parsed" != "failed" ]; then
     result="$parsed"
-  else
+  elif [ "$counter_enabled" -eq 1 ] && [ "$start_bytes" != "-" ] && [ "$end_bytes" != "-" ]; then
+    # tosutil 解析失败时的回退：使用 iptables 计数器计算
     duration=$((end_time - start_time))
     delta_bytes=$((end_bytes - start_bytes))
-    if [ "$delta_bytes" -le 0 ] && [ "$parsed" != "failed" ]; then
-      result="$parsed"
+    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
+  elif [ "$start_bytes" != "-" ] && [ "$end_bytes" != "-" ]; then
+    # 继续回退：使用网卡接口字节计数
+    duration=$((end_time - start_time))
+    delta_bytes=$((end_bytes - start_bytes))
+    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
+  else
+    result="failed"
+  fi
+
+  # ===================== 防作弊验证（排名资格） =====================
+  # iptables 计数器独立于 tosutil，用于交叉验证流量确实发生。
+  # 当计数器启用但未检测到匹配流量时，仅禁用排名资格，不影响速度结果展示。
+  if [ "$counter_enabled" -eq 1 ]; then
+    if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
       SPEEDTEST_RANK_ELIGIBLE=0
-      SPEEDTEST_RANK_DISABLED_REASON="target_counter_zero"
+      SPEEDTEST_RANK_DISABLED_REASON="target_counter_read_failed"
     else
-      result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
-      [ "$result" != "failed" ] || result="$parsed"
+      duration=$((end_time - start_time))
+      delta_bytes=$((end_bytes - start_bytes))
+      if [ "$delta_bytes" -le 0 ]; then
+        SPEEDTEST_RANK_ELIGIBLE=0
+        SPEEDTEST_RANK_DISABLED_REASON="target_counter_zero"
+      fi
     fi
   fi
 
