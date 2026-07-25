@@ -3572,7 +3572,11 @@ speedtest_run_probe() {
   fi
   speedtest_counter_stop_current
   after=$(speedtest_retrans_count)
-  output=$(cat "$output_file" 2>/dev/null || true)
+  output=$({
+    cat "$output_file" 2>/dev/null || true
+    printf '\n'
+    cat "${output_file}.err" 2>/dev/null || true
+  })
   parsed=$(printf '%s\n' "$output" | speedtest_parse_rate_mbps || true)
 
   retrans=$((after - before))
