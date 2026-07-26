@@ -40,7 +40,6 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `-p NUM`、`--parallel NUM`：设置并行节点数，范围 1-31，默认 16。
 - `-v4`、`--v4`：仅探测 IPv4。
 - `-v6`、`--v6`：仅探测 IPv6。
-- `--trinet`：显式探测默认三网，可与 `--cernet`、`--intl`、`--speedtest` 组合。
 - `--cernet`：仅探测 CERNET IPv4 和 CERNET2 IPv6。
 - `--all`：检测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest。
 - `--speedtest`：完成 TCP 质量探测后，追加国内电信、联通、移动分阶段 Speedtest 测速。

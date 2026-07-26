@@ -123,11 +123,7 @@ configure_interactive_args() {
     fi
   fi
 
-  # 仅为原先会丢失三网测试的组合补充显式基础模式；已有正确组合保持原参数。
-  if [ "$run_route" -eq 1 ] &&
-     { [ "$run_edu" -eq 1 ] || { [ "$run_intl" -eq 1 ] && [ "$run_speedtest" -eq 0 ]; }; }; then
-    selected_args+=("--trinet")
-  fi
+  INTERACTIVE_INCLUDE_DEFAULT_ROUTE="$run_route"
 
   [ "$run_edu" -eq 1 ] && selected_args+=("--cernet")
   [ "$run_intl" -eq 1 ] && selected_args+=("--intl")
@@ -847,6 +843,9 @@ guest_env=(
   "TERM=$guest_term"
   TCPQUALITY_INSIDE_ROOTFS=1
 )
+if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
+  guest_env+=(TCPQUALITY_INCLUDE_DEFAULT_ROUTE=1)
+fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
