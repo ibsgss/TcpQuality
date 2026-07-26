@@ -123,6 +123,12 @@ configure_interactive_args() {
     fi
   fi
 
+  # 仅为原先会丢失三网测试的组合补充显式基础模式；已有正确组合保持原参数。
+  if [ "$run_route" -eq 1 ] &&
+     { [ "$run_edu" -eq 1 ] || { [ "$run_intl" -eq 1 ] && [ "$run_speedtest" -eq 0 ]; }; }; then
+    selected_args+=("--trinet")
+  fi
+
   [ "$run_edu" -eq 1 ] && selected_args+=("--cernet")
   [ "$run_intl" -eq 1 ] && selected_args+=("--intl")
   if [ "$run_speedtest" -eq 1 ]; then
