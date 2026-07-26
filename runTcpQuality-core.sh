@@ -313,6 +313,7 @@ RANK_SESSION_EXPIRES_AT=""
 RANK_SESSION_IP4=""
 RESULT_DIR=$(mktemp -d)
 cleanup_result_dir() {
+  printf '%b' "${NC:-\033[0m}"
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
     local archive="${RESULT_DIR}.tar.gz"
     if [ -d "$RESULT_DIR" ] && tar -C "$(dirname "$RESULT_DIR")" -czf "$archive" "$(basename "$RESULT_DIR")" 2>/dev/null; then
@@ -1093,7 +1094,7 @@ show_provider_summary() {
       prov = order[i]
       printf "  %s%s%s  %s %s/ %s %s/ %s\n", cyan, label_cell(prov), nc, data[prov SUBSEP "电信"], white, data[prov SUBSEP "联通"], white, data[prov SUBSEP "移动"]
     }
-    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
+    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, nc
   }' "${route_file:-/dev/null}" "$file"
 }
 
@@ -1214,10 +1215,10 @@ show_large_packet_results() {
       printf "  %s%s%s  %s %s/ %s %s/ %s\n", cyan, label_cell(prov), nc, data[prov SUBSEP "电信"], white, data[prov SUBSEP "联通"], white, data[prov SUBSEP "移动"]
     }
     if (firewall_limited + 0 == 1) {
-      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, dim
-      printf "  %s提示: 由于服务商防火墙限制，延迟和丢包无法探测%s\n\n", red, dim
+      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, nc
+      printf "  %s提示: 由于服务商防火墙限制，延迟和丢包无法探测%s\n\n", red, nc
     } else {
-      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, dim
+      printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n", dim, green, dim, yellow, dim, red, nc
       printf "\n"
     }
   }' "${route_file:-/dev/null}" "$file"
@@ -1273,7 +1274,7 @@ show_education_results() {
       prov_pad = (prov == "黑龙江" || prov == "内蒙古") ? "  " : "    "
       printf "  %s%s%s%s  %s\n", cyan, prov, nc, prov_pad, result[prov]
     }
-    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
+    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, nc
   }' "$file"
 }
 
@@ -1363,7 +1364,7 @@ show_education_combined() {
       prov = order[i]
       printf "  %s%s%s  %s %s/ %s\n", cyan, label_cell(prov), nc, result[prov SUBSEP 1], white, result[prov SUBSEP 2]
     }
-    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, dim
+    printf "  %s颜色: %s正常%s  %s延迟151-240ms或1-20%%重传%s  %s延迟>240ms或>20%%重传，或失败%s\n\n", dim, green, dim, yellow, dim, red, nc
   }' "$ipv4_file" "$ipv6_file"
 }
 
@@ -2981,7 +2982,7 @@ show_international_results() {
         split(sites[i], a, SUBSEP)
         row(a[1], a[2], a[3], a[4], a[5], a[6])
       }
-      printf "  %s颜色: %s0-50ms 正常%s  %s50-150ms 一般%s  %s>150ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, dim
+      printf "  %s颜色: %s0-50ms 正常%s  %s50-150ms 一般%s  %s>150ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
     }
     if (cn > 0) {
       header("常用 CDN 国际互联")
@@ -2989,7 +2990,7 @@ show_international_results() {
         split(cdns[i], a, SUBSEP)
         row(a[1], a[2], a[3], a[4], a[5], a[6])
       }
-      printf "  %s颜色: %s0-2ms 正常%s  %s2-10ms 一般%s  %s>10ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, dim
+      printf "  %s颜色: %s0-2ms 正常%s  %s2-10ms 一般%s  %s>10ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
     }
   }'
 }
