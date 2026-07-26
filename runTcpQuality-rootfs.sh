@@ -123,6 +123,8 @@ configure_interactive_args() {
     fi
   fi
 
+  INTERACTIVE_INCLUDE_DEFAULT_ROUTE="$run_route"
+
   [ "$run_edu" -eq 1 ] && selected_args+=("--cernet")
   [ "$run_intl" -eq 1 ] && selected_args+=("--intl")
   if [ "$run_speedtest" -eq 1 ]; then
@@ -841,6 +843,9 @@ guest_env=(
   "TERM=$guest_term"
   TCPQUALITY_INSIDE_ROOTFS=1
 )
+if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
+  guest_env+=(TCPQUALITY_INCLUDE_DEFAULT_ROUTE=1)
+fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \

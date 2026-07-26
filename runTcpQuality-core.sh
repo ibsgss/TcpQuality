@@ -275,6 +275,7 @@ TOTAL=0
 PARALLEL=16
 TEST_CERNET=0
 TEST_ALL=0
+INCLUDE_DEFAULT_ROUTE="${TCPQUALITY_INCLUDE_DEFAULT_ROUTE:-0}"
 UPLOAD_REPORT=1
 REPORT_UPLOAD_FORCED_OFF=0
 ONLY_IPV4=0
@@ -479,7 +480,7 @@ count_cernet2_nodes() {
 }
 
 node_scope() {
-  if [ "$TEST_ALL" -eq 1 ]; then
+  if [ "$TEST_ALL" -eq 1 ] || { [ "$INCLUDE_DEFAULT_ROUTE" -eq 1 ] && [ "$TEST_CERNET" -eq 1 ]; }; then
     echo "all"
   elif [ "$TEST_CERNET" -eq 1 ]; then
     echo "cernet"
@@ -770,6 +771,7 @@ parse_args() {
     ONLY_IPV6=0
     TEST_CERNET=0
     TEST_ALL=0
+    INCLUDE_DEFAULT_ROUTE=0
     ROUTE_MODE=0
     SPEEDTEST_ENABLED=0
     SPEEDTEST_ONLY=0
@@ -783,6 +785,7 @@ parse_args() {
     && [ "$ONLY_IPV6" -eq 0 ] \
     && [ "$TEST_CERNET" -eq 0 ] \
     && [ "$TEST_ALL" -eq 0 ] \
+    && [ "$INCLUDE_DEFAULT_ROUTE" -eq 0 ] \
     && [ "$ROUTE_MODE" -eq 0 ] \
     && [ "$SPEEDTEST_ENABLED" -eq 0 ] \
     && [ -z "$SELECTED_PROVINCES" ]; then
@@ -4147,7 +4150,7 @@ main() {
     echo -e "${DIM}[i] 已按参数跳过 IPv4${NC}"
   fi
 
-  if [ "$TEST_CERNET" -eq 1 ] && [ "$TEST_ALL" -eq 0 ]; then
+  if [ "$TEST_CERNET" -eq 1 ] && [ "$TEST_ALL" -eq 0 ] && [ "$INCLUDE_DEFAULT_ROUTE" -eq 0 ]; then
     test_cdn=0
     normal_cdn_enabled=0
     test_edu=1
