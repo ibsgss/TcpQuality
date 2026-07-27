@@ -3932,6 +3932,11 @@ collect_speedtest_results() {
         "$SPEEDTEST_TELECOM_ID" "$SPEEDTEST_TELECOM_CITY" \
         "$SPEEDTEST_UNICOM_ID" "$SPEEDTEST_UNICOM_CITY" \
         "$SPEEDTEST_MOBILE_ID" "$SPEEDTEST_MOBILE_CITY"
+      printf 'RANK\t%s|%s|%s|%s|%s|%s|%s\n' \
+        "${RANK_SESSION_ID:-}" "${RANK_SESSION_TOKEN:-}" \
+        "${RANK_SESSION_STARTED_AT:-}" "${RANK_SESSION_EXPIRES_AT:-}" \
+        "${RANK_SESSION_IP4:-}" "${SPEEDTEST_RANK_ELIGIBLE:-0}" \
+        "${SPEEDTEST_RANK_DISABLED_REASON:-}"
       printf 'ROW\t%s\n' "${SPEEDTEST_ROWS[@]}"
     } > "$SPEEDTEST_STATE_FILE"
   fi
@@ -3948,7 +3953,7 @@ speedtest_set_failed_rows() {
 }
 
 speedtest_load_background_state() {
-  local type value a b c d e f
+  local type value a b c d e f g
   SPEEDTEST_ROWS=()
   [ -s "$SPEEDTEST_STATE_FILE" ] || {
     speedtest_set_failed_rows
@@ -3965,6 +3970,16 @@ speedtest_load_background_state() {
         SPEEDTEST_UNICOM_CITY="$d"
         SPEEDTEST_MOBILE_ID="$e"
         SPEEDTEST_MOBILE_CITY="$f"
+        ;;
+      RANK)
+        IFS='|' read -r a b c d e f g <<<"$value"
+        RANK_SESSION_ID="$a"
+        RANK_SESSION_TOKEN="$b"
+        RANK_SESSION_STARTED_AT="$c"
+        RANK_SESSION_EXPIRES_AT="$d"
+        RANK_SESSION_IP4="$e"
+        SPEEDTEST_RANK_ELIGIBLE="${f:-0}"
+        SPEEDTEST_RANK_DISABLED_REASON="$g"
         ;;
       ROW)
         SPEEDTEST_ROWS+=("$value")
