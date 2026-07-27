@@ -4,6 +4,8 @@
 # 旧命令保持不变：
 #   bash <(curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
 #   bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
+# fish/zsh 不支持或不稳定时可用：
+#   curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 #
 # 默认进入临时 Debian rootfs + chroot 后运行 runTcpQuality-core.sh。
 # 使用 --no-rootfs 可直接在宿主环境运行 core，便于调试。

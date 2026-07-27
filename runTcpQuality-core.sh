@@ -3011,7 +3011,7 @@ run_international_mode() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$csv"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$csv"
   append_international_csv "$csv"
   clear
   print_header
@@ -3095,7 +3095,7 @@ speedtest_candidates() {
 }
 
 speedtest_group_specs() {
-  local rate label
+  local rate label selected_supported=0
   if [ "$SPEEDTEST_MODE" = "staged" ]; then
     for rate in "${SPEEDTEST_RATES[@]}"; do
       label="${rate}Mbps"
@@ -3103,6 +3103,21 @@ speedtest_group_specs() {
       printf '%s|cn-beijing|%s\n' "$label" "$rate"
     done
   else
+    if [ -n "$SELECTED_PROVINCES" ]; then
+      [[ "$SELECTED_PROVINCES" == *"|北京|"* ]] && {
+        printf '%s\n' "北京|cn-beijing|unlimited"
+        selected_supported=1
+      }
+      [[ "$SELECTED_PROVINCES" == *"|上海|"* ]] && {
+        printf '%s\n' "上海|cn-shanghai|unlimited"
+        selected_supported=1
+      }
+      [[ "$SELECTED_PROVINCES" == *"|广东|"* ]] && {
+        printf '%s\n' "广东|cn-guangzhou|unlimited"
+        selected_supported=1
+      }
+      [ "$selected_supported" -eq 1 ] && return 0
+    fi
     printf '%s\n' \
       "北京|cn-beijing|unlimited" \
       "上海|cn-shanghai|unlimited" \
@@ -3561,10 +3576,26 @@ speedtest_calc_mbps() {
   }'
 }
 
+speedtest_parse_cost_ms() {
+  local label="$1"
+  awk -v label="$label" '
+    index(tolower($0), tolower(label)) {
+      value = $0
+      sub(/^.*:[[:space:]]*/, "", value)
+      if (match(value, /-?[0-9]+/)) {
+        print substr(value, RSTART, RLENGTH)
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) print "-" }
+  '
+}
+
 speedtest_run_probe() {
   local probe_type="$1" output_file="$2" server_ip="$3"
   local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration counter_enabled
-  local output parsed pid elapsed exit_code result
+  local output parsed pid elapsed exit_code result connect_ms tls_ms
 
   "$SPEEDTEST_TOSUTIL_BIN" probe -tr "$SPEEDTEST_TOS_REGION" -pt "$probe_type" \
     -nt "$SPEEDTEST_TOS_NETWORK" -ps "$SPEEDTEST_TOS_SIZE" -timeout "$SPEEDTEST_TOS_TIMEOUT" \
@@ -3580,7 +3611,14 @@ speedtest_run_probe() {
   if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     speedtest_counter_stop_current
-    printf 'failed|0'
+    output=$({
+      cat "$output_file" 2>/dev/null || true
+      printf '\n'
+      cat "${output_file}.err" 2>/dev/null || true
+    })
+    connect_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Build connection cost")
+    tls_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Tls handshake cost")
+    printf 'failed|0|%s|%s' "$connect_ms" "$tls_ms"
     return 0
   fi
 
@@ -3618,6 +3656,8 @@ speedtest_run_probe() {
     cat "${output_file}.err" 2>/dev/null || true
   })
   parsed=$(printf '%s\n' "$output" | speedtest_parse_rate_mbps || true)
+  connect_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Build connection cost")
+  tls_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Tls handshake cost")
 
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
@@ -3663,7 +3703,7 @@ speedtest_run_probe() {
     result="failed"
   fi
 
-  printf '%s|%s' "${result:-failed}" "$retrans"
+  printf '%s|%s|%s|%s' "${result:-failed}" "$retrans" "$connect_ms" "$tls_ms"
   return 0
 }
 
@@ -3728,7 +3768,7 @@ speedtest_print_group_header() {
   # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
   printf '  '
   printf '%b' "$CYAN"
-  speedtest_pad_center 54 "$title"
+  speedtest_pad_center 82 "$title"
   printf '%b' "$NC"
   printf '\n'
   printf '  '
@@ -3739,6 +3779,10 @@ speedtest_print_group_header() {
   printf '%b' "$CYAN"; speedtest_pad_left 12 '回程速度'; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 12 '去程速度'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '回程延迟'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '去程延迟'; printf '%b' "$NC"
   printf '\n'
 }
 
@@ -3748,6 +3792,31 @@ speedtest_speed_text() {
     printf 'failed'
   else
     printf '%sMbps' "$value"
+  fi
+}
+
+speedtest_latency_text() {
+  local value="$1"
+  if [[ "$value" =~ ^-?[0-9]+$ ]] && [ "$value" -ge 0 ]; then
+    awk -v value="$value" 'BEGIN { printf "%dms", int(value / 2 + 0.5) }'
+  else
+    printf '-'
+  fi
+}
+
+speedtest_latency_color() {
+  local value="$1" latency
+  if ! [[ "$value" =~ ^-?[0-9]+$ ]] || [ "$value" -lt 0 ]; then
+    printf '%s' "$RED"
+    return
+  fi
+  latency=$(awk -v value="$value" 'BEGIN { printf "%d", int(value / 2 + 0.5) }')
+  if [ "$latency" -gt 240 ]; then
+    printf '%s' "$RED"
+  elif [ "$latency" -gt 150 ]; then
+    printf '%s' "$YELLOW"
+  else
+    printf '%s' "$GREEN"
   fi
 }
 
@@ -3804,7 +3873,7 @@ speedtest_retrans_color() {
 
 collect_speedtest_results() {
   local group group_region rate label carrier workdir result_file index candidate server_id city candidate_region
-  local upload upload_retrans download download_retrans done total offset
+  local upload upload_retrans upload_connect upload_tls download download_retrans download_connect download_tls done total offset
   local carriers=(电信 联通 移动)
   local carrier_values=()
   offset=${SPEEDTEST_PROGRESS_OFFSET:-0}
@@ -3891,19 +3960,23 @@ collect_speedtest_results() {
       speedtest_set_selected "$carrier" "$server_id" "$city"
 
       if speedtest_force_hosts "$server_id"; then
-        IFS='|' read -r download download_retrans <<<"$(speedtest_run_probe download "$result_file.download" "$server_id")"
-        IFS='|' read -r upload upload_retrans <<<"$(speedtest_run_probe upload "$result_file.upload" "$server_id")"
+        IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_run_probe download "$result_file.download" "$server_id")"
+        IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_run_probe upload "$result_file.upload" "$server_id")"
       else
         download="failed"
         download_retrans="0"
+        download_connect="-"
+        download_tls="-"
         upload="failed"
         upload_retrans="0"
+        upload_connect="-"
+        upload_tls="-"
       fi
 
       if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
-        carrier_values+=("$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$server_id|$city")
+        carrier_values+=("$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$server_id|$city|$upload_connect|$upload_tls|$download_connect|$download_tls")
       else
-        carrier_values+=("failed|failed|failed|$server_id|$city")
+        carrier_values+=("failed|failed|failed|$server_id|$city|$upload_connect|$upload_tls|$download_connect|$download_tls")
       fi
       # debug 模式下保留 tosutil 输出文件，方便排查测速异常
       [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
@@ -3948,7 +4021,7 @@ speedtest_set_failed_rows() {
   local label region rate
   while IFS='|' read -r label region rate; do
     [ -n "$label" ] || continue
-    SPEEDTEST_ROWS+=("$label;failed|failed|failed||;failed|failed|failed||;failed|failed|failed||")
+    SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
 }
 
@@ -4028,8 +4101,8 @@ wait_speedtest_background() {
 }
 
 show_speedtest_results() {
-  local row label result1 result2 result3 result upload retrans download server_id city index carrier region upload_text download_text
-  local speed_color retrans_color
+  local row label result1 result2 result3 result upload retrans download server_id city upload_connect upload_tls download_connect download_tls index carrier region upload_text download_text upload_tls_text download_tls_text
+  local speed_color retrans_color tls_color
   local carriers=(电信 联通 移动)
   local results=()
   echo -e "${BOLD}${CYAN}三网单线程速度${NC}"
@@ -4041,7 +4114,7 @@ show_speedtest_results() {
     for index in "${!results[@]}"; do
       result="${results[$index]}"
       carrier="${carriers[$index]}"
-      IFS='|' read -r upload retrans download server_id city <<<"$result"
+      IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
       region="${city:-$(speedtest_selected_city "$carrier")}${carrier}"
       [ -n "${city:-$(speedtest_selected_city "$carrier")}" ] || region="${carrier}失败"
       printf '  '
@@ -4057,6 +4130,14 @@ show_speedtest_results() {
       download_text=$(speedtest_speed_text "$download")
       speed_color=$(speedtest_speed_color "$download" "$label")
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
+      printf '  '
+      upload_tls_text=$(speedtest_latency_text "$upload_tls")
+      tls_color=$(speedtest_latency_color "$upload_tls")
+      printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
+      printf '  '
+      download_tls_text=$(speedtest_latency_text "$download_tls")
+      tls_color=$(speedtest_latency_color "$download_tls")
+      printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
       printf '\n'
     done
     echo
@@ -4064,23 +4145,25 @@ show_speedtest_results() {
 }
 
 append_speedtest_csv() {
-  local csv="$1" row label result1 result2 result3 result upload retrans download server_id city index carrier
+  local csv="$1" row label result1 result2 result3 result upload retrans download server_id city upload_connect upload_tls download_connect download_tls index carrier
   local carriers=(电信 联通 移动)
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
     index=0
     for result in "$result1" "$result2" "$result3"; do
       carrier="${carriers[$index]}"
-      IFS='|' read -r upload retrans download server_id city <<<"$result"
+      IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
       city="${city:-$(speedtest_selected_city "$carrier")}"
       server_id="${server_id:-$(speedtest_selected_id "$carrier")}"
       if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
-        printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,\n' \
-          "$label" "$carrier" "$city" "FAIL" "$upload" "$retrans" "$download" >> "$csv"
+        printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+          "$label" "$carrier" "$city" "FAIL" "$upload" "$retrans" "$download" \
+          "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
       else
-        printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,\n' \
+        printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
           "$label" "$carrier" "$city" "$server_id" \
-          "OK" "$upload" "$retrans" "$download" >> "$csv"
+          "OK" "$upload" "$retrans" "$download" \
+          "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
       fi
       index=$((index + 1))
     done
@@ -4093,7 +4176,7 @@ run_speedtest_mode() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$csv"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$csv"
   append_speedtest_csv "$csv"
   clear
   print_header
@@ -4358,7 +4441,7 @@ main() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   local CSV="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$CSV"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路" >> "$CSV"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$CSV"
 
   if [ "$normal_cdn_enabled" -eq 1 ]; then
     for family in "${families[@]}"; do
