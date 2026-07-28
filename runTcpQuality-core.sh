@@ -1518,6 +1518,10 @@ ipv4_available() {
   [ "$IPV4_WORK" -eq 1 ]
 }
 
+report_api_base() {
+  printf '%s' "${REPORT_API%/generate}"
+}
+
 ensure_public_ips_for_rank() {
   if [ -z "${IPV4_PUBLIC:-}" ]; then
     get_public_ipv4 || true
@@ -1527,8 +1531,55 @@ ensure_public_ips_for_rank() {
   fi
 }
 
+upload_route_trace_bundle() {
+  local report_id="$1" section="$2" prefix="$3" trace_glob bundle list_file manifest_file response_file endpoint http_code count
+  trace_glob="$RESULT_DIR/${prefix}_trace_*"
+  compgen -G "$trace_glob" >/dev/null || return 0
+  command -v tar >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  bundle=$(mktemp "${TMPDIR:-/tmp}/tcpquality-${section}.XXXXXX.tar.gz") || return 0
+  list_file=$(mktemp "${TMPDIR:-/tmp}/tcpquality-${section}.XXXXXX.list") || {
+    rm -f "$bundle"
+    return 0
+  }
+  manifest_file="$RESULT_DIR/${prefix}_trace_manifest.json"
+  count=$(find "$RESULT_DIR" -maxdepth 1 -type f -name "${prefix}_trace_*" | wc -l | tr -d ' ')
+  printf '{"reportId":"%s","section":"%s","prefix":"%s","generatedAt":"%s","traceFiles":%s}\n' \
+    "$report_id" "$section" "$prefix" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${count:-0}" > "$manifest_file"
+  find "$RESULT_DIR" -maxdepth 1 -type f -name "${prefix}_trace_*" -exec basename {} \; > "$list_file"
+  basename "$manifest_file" >> "$list_file"
+  if ! tar -C "$RESULT_DIR" -czf "$bundle" -T "$list_file" 2>/dev/null; then
+    rm -f "$bundle" "$list_file"
+    return 0
+  fi
+
+  response_file=$(mktemp)
+  endpoint="$(report_api_base)/route-traces/${report_id}.${section}.tar.gz"
+  if http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+    -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: application/gzip' \
+    --data-binary "@$bundle" "$endpoint" 2>/dev/null); then
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      printf '%s\n' "$http_code" > "$RESULT_DIR/route_trace_${section}_upload_http_code.txt"
+      cp "$response_file" "$RESULT_DIR/route_trace_${section}_upload_response.json" 2>/dev/null || true
+    fi
+  elif [ "$DEBUG_MODE" -eq 1 ]; then
+    printf '%s\n' "curl_failed" > "$RESULT_DIR/route_trace_${section}_upload_http_code.txt"
+  fi
+  rm -f "$bundle" "$list_file" "$response_file"
+}
+
+upload_route_trace_bundles() {
+  local report_id="$1"
+  [ -n "$report_id" ] || return 0
+  upload_route_trace_bundle "$report_id" "ipv4" "summary_route4"
+  upload_route_trace_bundle "$report_id" "ipv4_large" "summary_large_route4"
+  upload_route_trace_bundle "$report_id" "ipv6" "summary_route6"
+}
+
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file http_code report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
+  local csv="$1" report_time="${2:-}" response_file http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
@@ -1576,11 +1627,15 @@ upload_report() {
   fi
 
   if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    report_id=$(sed -nE 's/.*"id":"([^"]+)".*/\1/p' "$response_file" | head -1)
     report_url=$(sed -nE 's/.*"url":"([^"]+)".*/\1/p' "$response_file" | head -1)
     today_uses=$(sed -nE 's/.*"todayUses":([0-9]+).*/\1/p' "$response_file" | head -1)
     total_uses=$(sed -nE 's/.*"totalUses":([0-9]+).*/\1/p' "$response_file" | head -1)
     rank_updated=$(sed -nE 's/.*"rankUpdated":(true|false).*/\1/p' "$response_file" | head -1)
     rank_reject_reason=$(sed -nE 's/.*"rankRejectReason":"([^"]*)".*/\1/p' "$response_file" | head -1)
+  fi
+  if [ -n "$report_id" ]; then
+    upload_route_trace_bundles "$report_id"
   fi
   if [ -n "$report_url" ]; then
     echo -e "  ${WHITE}报告链接：${UNDERLINE}${report_url}${NC}"
