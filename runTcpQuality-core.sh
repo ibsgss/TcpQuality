@@ -1824,6 +1824,28 @@ route_label_from_ip_trace() {
     function is_mobile_access_ip(ip) {
       return ip ~ /^111\.63\./ || ip ~ /^183\.201\./ || ip ~ /^183\.203\./
     }
+    function is_cmin2_asn(asn) {
+      return asn == "58807"
+    }
+    function is_cmi_asn(asn) {
+      return asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/
+    }
+    function compact_combo_label(label,   parts, n) {
+      n = split(label, parts, "->")
+      if (n > 2) return parts[1] "->" parts[n]
+      return label
+    }
+    function mobile_label_before(last,   h, has_cmin2, has_cmi) {
+      if (last <= 1) return ""
+      for (h = 1; h < last; h++) {
+        if (is_cmin2_asn(asns[h])) has_cmin2 = 1
+        if (is_cmi_asn(asns[h]) || (target_isp == "移动" && (is_mobile_access_asn(asns[h]) || is_mobile_access_ip(ips[h])))) has_cmi = 1
+      }
+      if (has_cmin2 && has_cmi) return "CMIN2->CMI"
+      if (has_cmin2) return "CMIN2"
+      if (has_cmi) return "CMI"
+      return ""
+    }
     function is_oversea_163_ip(ip) {
       return ip ~ /^218\.30\./ || ip ~ /^145\.14\./ || ip ~ /^5\.154\./
     }
@@ -1843,7 +1865,17 @@ route_label_from_ip_trace() {
       return asn == "9929" || asn == "4837" || asn == "4808"
     }
     function is_unicom_access_asn(asn) {
-      return asn == "136958" || asn == "140979"
+      return asn == "17816" || asn == "135061" || asn == "136958" || asn == "140979"
+    }
+    function is_unicom_route_hop(h) {
+      return is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h]) || is_unicom_access_asn(asns[h])
+    }
+    function has_163_before(last,   h) {
+      if (last <= 1) return 0
+      for (h = 1; h < last; h++) {
+        if (asns[h] == "4134" || asns[h] == "4847" || is_163_ip(ips[h])) return 1
+      }
+      return 0
     }
     function unicom_domestic_label_from_hop(first,   h, has_4837) {
       for (h = first + 1; h <= max_hop; h++) {
@@ -1853,7 +1885,7 @@ route_label_from_ip_trace() {
       if (has_4837) return "4837"
       return ""
     }
-    function unicom_route_combo_label(   h, first_unicom, domestic) {
+    function unicom_route_combo_label(   h, first_unicom, domestic, mobile_transit) {
       for (h = 1; h <= max_hop; h++) {
         if (asns[h] == "10099" && is_10099_entry_ip(ips[h])) {
           first_unicom = h
@@ -1861,17 +1893,21 @@ route_label_from_ip_trace() {
           if (domestic != "") return "10099->" domestic
           return "10099"
         }
-        if (is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h])) {
+        if (is_unicom_route_hop(h)) {
           first_unicom = h
           break
         }
       }
-      return unicom_domestic_label_from_hop(first_unicom - 1)
+      domestic = unicom_domestic_label_from_hop(first_unicom - 1)
+      mobile_transit = mobile_label_before(first_unicom)
+      if (target_isp == "联通" && domestic != "" && mobile_transit != "") return compact_combo_label(mobile_transit "->" domestic)
+      if (target_isp == "联通" && domestic != "" && has_163_before(first_unicom)) return "163->" domestic
+      return domestic
     }
     function has_unicom_downstream(first,   h) {
       if (first <= 0) return 0
       for (h = first + 1; h <= max_hop; h++) {
-        if (is_unicom_backbone_asn(asns[h]) || is_unicom_backbone_ip(ips[h])) return 1
+        if (is_unicom_route_hop(h)) return 1
       }
       return 0
     }
