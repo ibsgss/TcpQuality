@@ -1610,6 +1610,67 @@ upload_speedtest_debug_bundle() {
   rm -f "$bundle" "$response_file"
 }
 
+upload_probe_debug_bundle() {
+  local report_id="$1" bundle list_file response_file endpoint http_code count
+  [ "${DEBUG_MODE:-0}" -eq 1 ] || return 0
+  [ -n "$report_id" ] || return 0
+  command -v tar >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  list_file=$(mktemp "${TMPDIR:-/tmp}/tcpquality-probe-debug.XXXXXX.list") || return 0
+  {
+    find "$RESULT_DIR" -maxdepth 1 -type f \
+      \( -name 'nping_*.log' \
+        -o -name 'nping_*_meta.txt' \
+        -o -name 'backup_retry_meta.txt' \
+        -o -name 'route_debug_meta.txt' \
+        -o -name 'report_upload.csv' \
+        -o -name 'report_upload*.json' \
+        -o -name 'report_upload*.txt' \
+        -o -name 'route_trace_*_upload*.json' \
+        -o -name 'route_trace_*_upload*.txt' \
+        -o -name 'speedtest_debug_upload*.json' \
+        -o -name 'speedtest_debug_upload*.txt' \
+        -o -name 'speedtest.log' \
+        -o -name 'speedtest.progress' \
+        -o -name 'speedtest.state' \) \
+      -exec basename {} \;
+    find "$RESULT_DIR" -maxdepth 2 -type f -path '*/speedtest.*/*' \
+      | sed "s#^$RESULT_DIR/##"
+  } | sort -u > "$list_file"
+  count=$(wc -l < "$list_file" | tr -d ' ')
+  [ "${count:-0}" -gt 0 ] 2>/dev/null || {
+    rm -f "$list_file"
+    return 0
+  }
+
+  printf '{"reportId":"%s","generatedAt":"%s","type":"probe-debug","files":%s}\n' \
+    "$report_id" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${count:-0}" > "$RESULT_DIR/probe_debug_manifest.json"
+  printf '%s\n' "probe_debug_manifest.json" >> "$list_file"
+
+  bundle=$(mktemp "${TMPDIR:-/tmp}/tcpquality-probe-debug.XXXXXX.tar.gz") || {
+    rm -f "$list_file"
+    return 0
+  }
+  if ! tar -C "$RESULT_DIR" -czf "$bundle" -T "$list_file" 2>/dev/null; then
+    rm -f "$bundle" "$list_file"
+    return 0
+  fi
+
+  response_file=$(mktemp)
+  endpoint="$(report_api_base)/probe-debug/${report_id}.tar.gz"
+  if http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+    -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: application/gzip' \
+    --data-binary "@$bundle" "$endpoint" 2>/dev/null); then
+    printf '%s\n' "$http_code" > "$RESULT_DIR/probe_debug_upload_http_code.txt"
+    cp "$response_file" "$RESULT_DIR/probe_debug_upload_response.json" 2>/dev/null || true
+  else
+    printf '%s\n' "curl_failed" > "$RESULT_DIR/probe_debug_upload_http_code.txt"
+  fi
+  rm -f "$bundle" "$list_file" "$response_file"
+}
+
 upload_report() {
   local csv="$1" report_time="${2:-}" response_file http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
@@ -1669,6 +1730,7 @@ upload_report() {
   if [ -n "$report_id" ]; then
     upload_route_trace_bundles "$report_id"
     upload_speedtest_debug_bundle "$report_id"
+    upload_probe_debug_bundle "$report_id"
   fi
   if [ -n "$report_url" ]; then
     echo -e "  ${WHITE}报告链接：${UNDERLINE}${report_url}${NC}"
