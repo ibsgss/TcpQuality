@@ -13,12 +13,12 @@
 
 set -Eeuo pipefail
 
-RAW_BASE="${TCPQUALITY_RAW_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/main}"
+RAW_BASE="${TCPQUALITY_RAW_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta}"
 case "$RAW_BASE" in
   http://*|https://*) ;;
   *)
     echo "[!] TCPQUALITY_RAW_BASE 非法，已回退到官方 GitHub 源" >&2
-    RAW_BASE="https://raw.githubusercontent.com/ibsgss/TcpQuality/main"
+    RAW_BASE="https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta"
     ;;
 esac
 RAW_BASE="${RAW_BASE%/}"
