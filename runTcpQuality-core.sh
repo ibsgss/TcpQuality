@@ -251,7 +251,7 @@ require_raw_socket_privilege() {
 # ===================== 远端节点 =====================
 # 节点域名、真实 IP 与端口统一由 GET_NODES_URL 提供，脚本不再内置探测节点或备用节点。
 
-PACKETS=30
+PACKETS=25
 MAX_PACKETS=600
 COUNT_EXPLICIT=0
 PACKET_SIZES=(40 80 160 320 640 1200)
