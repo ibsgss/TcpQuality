@@ -809,26 +809,13 @@ detect_total_memory_mb() {
 }
 
 auto_parallel_by_memory() {
-  local mem_mb
+  local mem_mb parallel
   mem_mb=$(detect_total_memory_mb)
   [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
-  if [ "$mem_mb" -ge 3000 ]; then
-    echo 93
-  elif [ "$mem_mb" -ge 1900 ]; then
-    echo 62
-  elif [ "$mem_mb" -ge 900 ]; then
-    echo 31
-  elif [ "$mem_mb" -ge 480 ]; then
-    echo 16
-  elif [ "$mem_mb" -ge 360 ]; then
-    echo 12
-  elif [ "$mem_mb" -ge 240 ]; then
-    echo 8
-  elif [ "$mem_mb" -ge 120 ]; then
-    echo 4
-  else
-    echo 2
-  fi
+  parallel=$(((mem_mb + 31) / 32))
+  [ "$parallel" -lt 1 ] && parallel=1
+  [ "$parallel" -gt 93 ] && parallel=93
+  echo "$parallel"
 }
 
 apply_auto_parallel() {
