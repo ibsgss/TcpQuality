@@ -1578,6 +1578,99 @@ upload_route_trace_bundles() {
   upload_route_trace_bundle "$report_id" "ipv6" "summary_route6"
 }
 
+upload_speedtest_debug_bundle() {
+  local report_id="$1" debug_dir="$RESULT_DIR/speedtest-debug" bundle response_file endpoint http_code
+  [ -n "$report_id" ] || return 0
+  [ -d "$debug_dir" ] || return 0
+  find "$debug_dir" -type f | grep -q . || return 0
+  command -v tar >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  printf '{"reportId":"%s","generatedAt":"%s","type":"speedtest-debug"}\n' \
+    "$report_id" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$debug_dir/manifest.json"
+  bundle=$(mktemp "${TMPDIR:-/tmp}/tcpquality-speedtest-debug.XXXXXX.tar.gz") || return 0
+  if ! tar -C "$debug_dir" -czf "$bundle" . 2>/dev/null; then
+    rm -f "$bundle"
+    return 0
+  fi
+
+  response_file=$(mktemp)
+  endpoint="$(report_api_base)/speedtest-debug/${report_id}.tar.gz"
+  if http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+    -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: application/gzip' \
+    --data-binary "@$bundle" "$endpoint" 2>/dev/null); then
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      printf '%s\n' "$http_code" > "$RESULT_DIR/speedtest_debug_upload_http_code.txt"
+      cp "$response_file" "$RESULT_DIR/speedtest_debug_upload_response.json" 2>/dev/null || true
+    fi
+  elif [ "$DEBUG_MODE" -eq 1 ]; then
+    printf '%s\n' "curl_failed" > "$RESULT_DIR/speedtest_debug_upload_http_code.txt"
+  fi
+  rm -f "$bundle" "$response_file"
+}
+
+upload_probe_debug_bundle() {
+  local report_id="$1" bundle list_file response_file endpoint http_code count
+  [ "${DEBUG_MODE:-0}" -eq 1 ] || return 0
+  [ -n "$report_id" ] || return 0
+  command -v tar >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  list_file=$(mktemp "${TMPDIR:-/tmp}/tcpquality-probe-debug.XXXXXX.list") || return 0
+  {
+    find "$RESULT_DIR" -maxdepth 1 -type f \
+      \( -name 'nping_*.log' \
+        -o -name 'nping_*_meta.txt' \
+        -o -name 'backup_retry_meta.txt' \
+        -o -name 'route_debug_meta.txt' \
+        -o -name 'report_upload.csv' \
+        -o -name 'report_upload*.json' \
+        -o -name 'report_upload*.txt' \
+        -o -name 'route_trace_*_upload*.json' \
+        -o -name 'route_trace_*_upload*.txt' \
+        -o -name 'speedtest_debug_upload*.json' \
+        -o -name 'speedtest_debug_upload*.txt' \
+        -o -name 'speedtest.log' \
+        -o -name 'speedtest.progress' \
+        -o -name 'speedtest.state' \) \
+      -exec basename {} \;
+    find "$RESULT_DIR" -maxdepth 2 -type f -path '*/speedtest.*/*' \
+      | sed "s#^$RESULT_DIR/##"
+  } | sort -u > "$list_file"
+  count=$(wc -l < "$list_file" | tr -d ' ')
+  [ "${count:-0}" -gt 0 ] 2>/dev/null || {
+    rm -f "$list_file"
+    return 0
+  }
+
+  printf '{"reportId":"%s","generatedAt":"%s","type":"probe-debug","files":%s}\n' \
+    "$report_id" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${count:-0}" > "$RESULT_DIR/probe_debug_manifest.json"
+  printf '%s\n' "probe_debug_manifest.json" >> "$list_file"
+
+  bundle=$(mktemp "${TMPDIR:-/tmp}/tcpquality-probe-debug.XXXXXX.tar.gz") || {
+    rm -f "$list_file"
+    return 0
+  }
+  if ! tar -C "$RESULT_DIR" -czf "$bundle" -T "$list_file" 2>/dev/null; then
+    rm -f "$bundle" "$list_file"
+    return 0
+  fi
+
+  response_file=$(mktemp)
+  endpoint="$(report_api_base)/probe-debug/${report_id}.tar.gz"
+  if http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+    -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: application/gzip' \
+    --data-binary "@$bundle" "$endpoint" 2>/dev/null); then
+    printf '%s\n' "$http_code" > "$RESULT_DIR/probe_debug_upload_http_code.txt"
+    cp "$response_file" "$RESULT_DIR/probe_debug_upload_response.json" 2>/dev/null || true
+  else
+    printf '%s\n' "curl_failed" > "$RESULT_DIR/probe_debug_upload_http_code.txt"
+  fi
+  rm -f "$bundle" "$list_file" "$response_file"
+}
+
 upload_report() {
   local csv="$1" report_time="${2:-}" response_file http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
@@ -1636,6 +1729,8 @@ upload_report() {
   fi
   if [ -n "$report_id" ]; then
     upload_route_trace_bundles "$report_id"
+    upload_speedtest_debug_bundle "$report_id"
+    upload_probe_debug_bundle "$report_id"
   fi
   if [ -n "$report_url" ]; then
     echo -e "  ${WHITE}报告链接：${UNDERLINE}${report_url}${NC}"
@@ -3685,6 +3780,131 @@ speedtest_parse_cost_ms() {
   '
 }
 
+speedtest_write_probe_meta() {
+  local output_file="$1" probe_type="$2" server_ip="$3" exit_code="$4" result="$5" parsed="$6" connect_ms="$7" tls_ms="$8"
+  {
+    printf 'probe_type=%s\n' "$probe_type"
+    printf 'server_ip=%s\n' "$server_ip"
+    printf 'exit_code=%s\n' "$exit_code"
+    printf 'result=%s\n' "$result"
+    printf 'parsed_rate_mbps=%s\n' "$parsed"
+    printf 'connect_ms=%s\n' "$connect_ms"
+    printf 'tls_ms=%s\n' "$tls_ms"
+    printf 'region=%s\n' "$SPEEDTEST_TOS_REGION"
+    printf 'network=%s\n' "$SPEEDTEST_TOS_NETWORK"
+    printf 'object_size=%s\n' "$SPEEDTEST_TOS_SIZE"
+    printf 'timeout=%s\n' "$SPEEDTEST_TOS_TIMEOUT"
+    printf 'recorded_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "${output_file}.meta" 2>/dev/null || true
+}
+
+speedtest_read_sysctl() {
+  local key="$1" path
+  path="/proc/sys/${key//./\/}"
+  if [ -r "$path" ]; then
+    tr '\t' ' ' < "$path" 2>/dev/null | awk '{$1=$1; print}'
+  else
+    sysctl -n "$key" 2>/dev/null | tr '\t' ' ' | awk '{$1=$1; print}'
+  fi
+}
+
+speedtest_qdisc_name() {
+  local iface="${SPEEDTEST_IFACE:-}" root_qdisc default_qdisc
+  if [ -n "$iface" ]; then
+    root_qdisc=$(tc qdisc show dev "$iface" 2>/dev/null | awk '/ root / {print $2; exit}')
+  fi
+  default_qdisc=$(speedtest_read_sysctl net.core.default_qdisc)
+  if [ -n "$default_qdisc" ]; then
+    printf '%s' "$default_qdisc"
+  elif [ -n "$root_qdisc" ] && [ "$root_qdisc" != "noqueue" ]; then
+    printf '%s' "$root_qdisc"
+  elif [ -n "$root_qdisc" ]; then
+    printf '%s' "$root_qdisc"
+  else
+    printf '-'
+  fi
+}
+
+speedtest_tcp_window_bytes() {
+  local values="$1"
+  awk -v values="$values" 'BEGIN {
+    n = split(values, parts, /[[:space:]]+/);
+    if (n >= 3 && parts[3] ~ /^[0-9]+$/) print parts[3];
+    else print "-";
+  }'
+}
+
+speedtest_min_window_bytes() {
+  local tcp_max="$1" core_max="$2"
+  awk -v tcp_max="$tcp_max" -v core_max="$core_max" 'BEGIN {
+    if (tcp_max ~ /^[0-9]+$/ && core_max ~ /^[0-9]+$/) print (tcp_max < core_max ? tcp_max : core_max);
+    else if (tcp_max ~ /^[0-9]+$/) print tcp_max;
+    else if (core_max ~ /^[0-9]+$/) print core_max;
+    else print "-";
+  }'
+}
+
+speedtest_append_tcp_config_csv() {
+  local csv="$1" cc qdisc rmem wmem rwin swin rmem_max wmem_max tcp_rwin tcp_swin
+  cc=$(speedtest_read_sysctl net.ipv4.tcp_congestion_control)
+  qdisc=$(speedtest_qdisc_name)
+  rmem=$(speedtest_read_sysctl net.ipv4.tcp_rmem)
+  wmem=$(speedtest_read_sysctl net.ipv4.tcp_wmem)
+  rmem_max=$(speedtest_read_sysctl net.core.rmem_max)
+  wmem_max=$(speedtest_read_sysctl net.core.wmem_max)
+  tcp_rwin=$(speedtest_tcp_window_bytes "$rmem")
+  tcp_swin=$(speedtest_tcp_window_bytes "$wmem")
+  rwin=$(speedtest_min_window_bytes "$tcp_rwin" "$rmem_max")
+  swin=$(speedtest_min_window_bytes "$tcp_swin" "$wmem_max")
+  printf '三网单线程配置,TCP,%s,%s,,,%s,%s,%s,%s,%s,%s\n' \
+    "${cc:-}" "${qdisc:-}" "OK" "${rmem:-}" "${wmem:-}" "${rwin:-}" "${swin:-}" >> "$csv"
+}
+
+speedtest_safe_debug_name() {
+  printf '%s' "$*" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+speedtest_record_failure_debug() {
+  local group_label="$1" carrier="$2" direction="$3" server_id="$4" city="$5" result_file="$6"
+  local debug_dir name meta_file
+  debug_dir="$RESULT_DIR/speedtest-debug"
+  mkdir -p "$debug_dir" 2>/dev/null || return 0
+  name=$(speedtest_safe_debug_name "${group_label}_${carrier}_${direction}_${server_id:-unknown}")
+  meta_file="$debug_dir/${name}.meta.txt"
+  {
+    printf 'group=%s\n' "$group_label"
+    printf 'carrier=%s\n' "$carrier"
+    printf 'direction=%s\n' "$direction"
+    printf 'server_ip=%s\n' "${server_id:-}"
+    printf 'city=%s\n' "${city:-}"
+    printf 'selected_region=%s\n' "$SPEEDTEST_TOS_REGION"
+    printf 'saved_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if [ -f "${result_file}.meta" ]; then
+      printf '\n[probe_meta]\n'
+      cat "${result_file}.meta" 2>/dev/null || true
+    fi
+  } > "$meta_file" 2>/dev/null || true
+  [ -f "$result_file" ] && cp "$result_file" "$debug_dir/${name}.stdout.txt" 2>/dev/null || true
+  [ -f "${result_file}.err" ] && cp "${result_file}.err" "$debug_dir/${name}.stderr.txt" 2>/dev/null || true
+}
+
+speedtest_record_manual_failure_debug() {
+  local group_label="$1" carrier="$2" server_id="$3" city="$4" reason="$5"
+  local debug_dir name
+  debug_dir="$RESULT_DIR/speedtest-debug"
+  mkdir -p "$debug_dir" 2>/dev/null || return 0
+  name=$(speedtest_safe_debug_name "${group_label}_${carrier}_setup_${server_id:-unknown}")
+  {
+    printf 'group=%s\n' "$group_label"
+    printf 'carrier=%s\n' "$carrier"
+    printf 'server_ip=%s\n' "${server_id:-}"
+    printf 'city=%s\n' "${city:-}"
+    printf 'selected_region=%s\n' "$SPEEDTEST_TOS_REGION"
+    printf 'reason=%s\n' "$reason"
+    printf 'saved_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$debug_dir/${name}.meta.txt" 2>/dev/null || true
+}
+
 speedtest_run_probe() {
   local probe_type="$1" output_file="$2" server_ip="$3"
   local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration counter_enabled
@@ -3702,7 +3922,11 @@ speedtest_run_probe() {
   done
 
   if ! kill -0 "$pid" 2>/dev/null; then
-    wait "$pid" 2>/dev/null || true
+    if wait "$pid" 2>/dev/null; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
     speedtest_counter_stop_current
     output=$({
       cat "$output_file" 2>/dev/null || true
@@ -3711,6 +3935,7 @@ speedtest_run_probe() {
     })
     connect_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Build connection cost")
     tls_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Tls handshake cost")
+    speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "failed" "failed" "$connect_ms" "$tls_ms"
     printf 'failed|0|%s|%s' "$connect_ms" "$tls_ms"
     return 0
   fi
@@ -3796,6 +4021,7 @@ speedtest_run_probe() {
     result="failed"
   fi
 
+  speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$connect_ms" "$tls_ms"
   printf '%s|%s|%s|%s' "${result:-failed}" "$retrans" "$connect_ms" "$tls_ms"
   return 0
 }
@@ -4064,7 +4290,11 @@ collect_speedtest_results() {
         upload_retrans="0"
         upload_connect="-"
         upload_tls="-"
+        speedtest_record_manual_failure_debug "$label" "$carrier" "$server_id" "$city" "force_hosts_failed"
       fi
+
+      [ "$download" = "failed" ] && speedtest_record_failure_debug "$label" "$carrier" "download" "$server_id" "$city" "$result_file.download"
+      [ "$upload" = "failed" ] && speedtest_record_failure_debug "$label" "$carrier" "upload" "$server_id" "$city" "$result_file.upload"
 
       if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
         carrier_values+=("$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$server_id|$city|$upload_connect|$upload_tls|$download_connect|$download_tls")
@@ -4261,6 +4491,7 @@ append_speedtest_csv() {
       index=$((index + 1))
     done
   done
+  speedtest_append_tcp_config_csv "$csv"
 }
 
 run_speedtest_mode() {
