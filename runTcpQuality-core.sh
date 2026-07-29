@@ -817,7 +817,11 @@ auto_parallel_by_memory() {
   local mem_mb
   mem_mb=$(detect_available_memory_mb)
   [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
-  if [ "$mem_mb" -ge 1024 ]; then
+  if [ "$mem_mb" -ge 3072 ]; then
+    echo 93
+  elif [ "$mem_mb" -ge 2048 ]; then
+    echo 62
+  elif [ "$mem_mb" -ge 1024 ]; then
     echo 31
   elif [ "$mem_mb" -ge 512 ]; then
     echo 16
