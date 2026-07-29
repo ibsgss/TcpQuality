@@ -812,7 +812,7 @@ auto_parallel_by_memory() {
   local mem_mb parallel
   mem_mb=$(detect_total_memory_mb)
   [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
-  parallel=$(((mem_mb + 31) / 32))
+  parallel=$(((mem_mb + 47) / 48))
   [ "$parallel" -lt 1 ] && parallel=1
   [ "$parallel" -gt 93 ] && parallel=93
   echo "$parallel"
