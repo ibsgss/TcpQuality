@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 #
-# TcpQuality 节点 TCP 丢包探测脚本
-# 用法: bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
-#
-# 每节点发送 60 个裸 TCP SYN 包，无内核重传
-# TUI 风格实时展示省份/运营商丢包率
+# TcpQuality
 #
 
 set -e
@@ -273,6 +269,7 @@ IPV6_NPING_PRECHECK_PACKETS=3
 IPV6_NPING_FORCE_L2=0
 TOTAL=0
 PARALLEL=16
+PARALLEL_EXPLICIT=0
 TEST_CERNET=0
 TEST_ALL=0
 INCLUDE_DEFAULT_ROUTE="${TCPQUALITY_INCLUDE_DEFAULT_ROUTE:-0}"
@@ -593,7 +590,7 @@ NixOS:
   -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；默认 0
                      小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
-                     设置并行节点数，范围 1-31，默认 ${PARALLEL}
+                     设置并行节点数，范围 1-31，默认按内存自动选择
   -v4, --v4         仅探测 IPv4
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
@@ -671,6 +668,7 @@ parse_args() {
           exit 1
         fi
         PARALLEL="$2"
+        PARALLEL_EXPLICIT=1
         shift 2
         ;;
       -v4|--v4)
@@ -792,6 +790,51 @@ parse_args() {
     && [ -z "$SELECTED_PROVINCES" ]; then
     INTERNATIONAL_ONLY=1
   fi
+}
+
+detect_available_memory_mb() {
+  local mem_kb=""
+  if [ -r /proc/meminfo ]; then
+    mem_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
+      echo $((mem_kb / 1024))
+      return
+    fi
+    mem_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
+      echo $((mem_kb / 1024))
+      return
+    fi
+  fi
+  if command -v free >/dev/null 2>&1; then
+    free -m 2>/dev/null | awk '/^Mem:/ {print $7 ? $7 : $2; exit}'
+    return
+  fi
+  echo 512
+}
+
+auto_parallel_by_memory() {
+  local mem_mb
+  mem_mb=$(detect_available_memory_mb)
+  [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
+  if [ "$mem_mb" -ge 1024 ]; then
+    echo 31
+  elif [ "$mem_mb" -ge 512 ]; then
+    echo 16
+  elif [ "$mem_mb" -ge 384 ]; then
+    echo 12
+  elif [ "$mem_mb" -ge 256 ]; then
+    echo 8
+  elif [ "$mem_mb" -ge 128 ]; then
+    echo 4
+  else
+    echo 2
+  fi
+}
+
+apply_auto_parallel() {
+  [ "$PARALLEL_EXPLICIT" -eq 1 ] && return
+  PARALLEL=$(auto_parallel_by_memory)
 }
 
 # ===================== 工具函数 =====================
@@ -4875,4 +4918,5 @@ main() {
 }
 
 parse_args "$@"
+apply_auto_parallel
 main
