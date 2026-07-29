@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 #
-# TcpQuality 节点 TCP 丢包探测脚本
-# 用法: bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
-#
-# 每节点发送 60 个裸 TCP SYN 包，无内核重传
-# TUI 风格实时展示省份/运营商丢包率
+# TcpQuality
 #
 
 set -e
@@ -255,7 +251,7 @@ require_raw_socket_privilege() {
 # ===================== 远端节点 =====================
 # 节点域名、真实 IP 与端口统一由 GET_NODES_URL 提供，脚本不再内置探测节点或备用节点。
 
-PACKETS=30
+PACKETS=25
 MAX_PACKETS=600
 COUNT_EXPLICIT=0
 PACKET_SIZES=(40 80 160 320 640 1200)
@@ -273,6 +269,7 @@ IPV6_NPING_PRECHECK_PACKETS=3
 IPV6_NPING_FORCE_L2=0
 TOTAL=0
 PARALLEL=16
+PARALLEL_EXPLICIT=0
 TEST_CERNET=0
 TEST_ALL=0
 INCLUDE_DEFAULT_ROUTE="${TCPQUALITY_INCLUDE_DEFAULT_ROUTE:-0}"
@@ -593,7 +590,7 @@ NixOS:
   -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；默认 0
                      小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
-                     设置并行节点数，范围 1-31，默认 ${PARALLEL}
+                     设置并行节点数，范围 1-31，默认按内存自动选择
   -v4, --v4         仅探测 IPv4
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
@@ -671,6 +668,7 @@ parse_args() {
           exit 1
         fi
         PARALLEL="$2"
+        PARALLEL_EXPLICIT=1
         shift 2
         ;;
       -v4|--v4)
@@ -792,6 +790,37 @@ parse_args() {
     && [ -z "$SELECTED_PROVINCES" ]; then
     INTERNATIONAL_ONLY=1
   fi
+}
+
+detect_total_memory_mb() {
+  local mem_kb=""
+  if [ -r /proc/meminfo ]; then
+    mem_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
+      echo $((mem_kb / 1024))
+      return
+    fi
+  fi
+  if command -v free >/dev/null 2>&1; then
+    free -m 2>/dev/null | awk '/^Mem:/ {print $2; exit}'
+    return
+  fi
+  echo 512
+}
+
+auto_parallel_by_memory() {
+  local mem_mb parallel
+  mem_mb=$(detect_total_memory_mb)
+  [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
+  parallel=$(((mem_mb + 31) / 32))
+  [ "$parallel" -lt 1 ] && parallel=1
+  [ "$parallel" -gt 93 ] && parallel=93
+  echo "$parallel"
+}
+
+apply_auto_parallel() {
+  [ "$PARALLEL_EXPLICIT" -eq 1 ] && return
+  PARALLEL=$(auto_parallel_by_memory)
 }
 
 # ===================== 工具函数 =====================
@@ -3798,6 +3827,70 @@ speedtest_write_probe_meta() {
   } > "${output_file}.meta" 2>/dev/null || true
 }
 
+speedtest_read_sysctl() {
+  local key="$1" path
+  path="/proc/sys/${key//./\/}"
+  if [ -r "$path" ]; then
+    tr '\t' ' ' < "$path" 2>/dev/null | awk '{$1=$1; print}'
+  else
+    sysctl -n "$key" 2>/dev/null | tr '\t' ' ' | awk '{$1=$1; print}'
+  fi
+}
+
+speedtest_qdisc_name() {
+  local iface="${SPEEDTEST_IFACE:-}" root_qdisc default_qdisc
+  if [ -n "$iface" ]; then
+    root_qdisc=$(tc qdisc show dev "$iface" 2>/dev/null | awk '/ root / {print $2; exit}')
+  fi
+  default_qdisc=$(speedtest_read_sysctl net.core.default_qdisc)
+  if [ -n "$default_qdisc" ]; then
+    printf '%s' "$default_qdisc"
+  elif [ -n "$root_qdisc" ] && [ "$root_qdisc" != "noqueue" ]; then
+    printf '%s' "$root_qdisc"
+  elif [ -n "$root_qdisc" ]; then
+    printf '%s' "$root_qdisc"
+  else
+    printf '-'
+  fi
+}
+
+speedtest_tcp_window_bytes() {
+  local values="$1"
+  awk -v values="$values" 'BEGIN {
+    n = split(values, parts, /[[:space:]]+/);
+    if (n >= 3 && parts[3] ~ /^[0-9]+$/) print parts[3];
+    else print "-";
+  }'
+}
+
+speedtest_min_window_bytes() {
+  local tcp_max="$1" endpoint_max="$2"
+  awk -v tcp_max="$tcp_max" -v endpoint_max="$endpoint_max" 'BEGIN {
+    if (tcp_max ~ /^[0-9]+$/ && endpoint_max ~ /^[0-9]+$/) print (tcp_max < endpoint_max ? tcp_max : endpoint_max);
+    else if (tcp_max ~ /^[0-9]+$/) print tcp_max;
+    else if (endpoint_max ~ /^[0-9]+$/) print endpoint_max;
+    else print "-";
+  }'
+}
+
+speedtest_append_tcp_config_csv() {
+  local csv="$1" cc qdisc rmem wmem rwin swin tcp_rwin tcp_swin endpoint_window window_scaling moderate_rcvbuf
+  cc=$(speedtest_read_sysctl net.ipv4.tcp_congestion_control)
+  qdisc=$(speedtest_qdisc_name)
+  rmem=$(speedtest_read_sysctl net.ipv4.tcp_rmem)
+  wmem=$(speedtest_read_sysctl net.ipv4.tcp_wmem)
+  window_scaling=$(speedtest_read_sysctl net.ipv4.tcp_window_scaling)
+  moderate_rcvbuf=$(speedtest_read_sysctl net.ipv4.tcp_moderate_rcvbuf)
+  endpoint_window=16777216
+  tcp_rwin=$(speedtest_tcp_window_bytes "$rmem")
+  tcp_swin=$(speedtest_tcp_window_bytes "$wmem")
+  rwin=$(speedtest_min_window_bytes "$tcp_rwin" "$endpoint_window")
+  swin=$(speedtest_min_window_bytes "$tcp_swin" "$endpoint_window")
+  printf '三网单线程配置,TCP,%s,%s,,,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "${cc:-}" "${qdisc:-}" "OK" "${rmem:-}" "${wmem:-}" "${rwin:-}" "${swin:-}" \
+    "${window_scaling:-}" "${moderate_rcvbuf:-}" >> "$csv"
+}
+
 speedtest_safe_debug_name() {
   printf '%s' "$*" | tr -c 'A-Za-z0-9_.-' '_'
 }
@@ -4429,6 +4522,7 @@ append_speedtest_csv() {
       index=$((index + 1))
     done
   done
+  speedtest_append_tcp_config_csv "$csv"
 }
 
 run_speedtest_mode() {
@@ -4810,4 +4904,5 @@ main() {
 }
 
 parse_args "$@"
+apply_auto_parallel
 main
