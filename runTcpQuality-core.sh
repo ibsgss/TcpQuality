@@ -792,14 +792,9 @@ parse_args() {
   fi
 }
 
-detect_available_memory_mb() {
+detect_total_memory_mb() {
   local mem_kb=""
   if [ -r /proc/meminfo ]; then
-    mem_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
-    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
-      echo $((mem_kb / 1024))
-      return
-    fi
     mem_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
     if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
       echo $((mem_kb / 1024))
@@ -807,7 +802,7 @@ detect_available_memory_mb() {
     fi
   fi
   if command -v free >/dev/null 2>&1; then
-    free -m 2>/dev/null | awk '/^Mem:/ {print $7 ? $7 : $2; exit}'
+    free -m 2>/dev/null | awk '/^Mem:/ {print $2; exit}'
     return
   fi
   echo 512
@@ -815,21 +810,21 @@ detect_available_memory_mb() {
 
 auto_parallel_by_memory() {
   local mem_mb
-  mem_mb=$(detect_available_memory_mb)
+  mem_mb=$(detect_total_memory_mb)
   [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
-  if [ "$mem_mb" -ge 3072 ]; then
+  if [ "$mem_mb" -ge 3000 ]; then
     echo 93
-  elif [ "$mem_mb" -ge 2048 ]; then
+  elif [ "$mem_mb" -ge 1900 ]; then
     echo 62
-  elif [ "$mem_mb" -ge 1024 ]; then
+  elif [ "$mem_mb" -ge 900 ]; then
     echo 31
-  elif [ "$mem_mb" -ge 512 ]; then
+  elif [ "$mem_mb" -ge 480 ]; then
     echo 16
-  elif [ "$mem_mb" -ge 384 ]; then
+  elif [ "$mem_mb" -ge 360 ]; then
     echo 12
-  elif [ "$mem_mb" -ge 256 ]; then
+  elif [ "$mem_mb" -ge 240 ]; then
     echo 8
-  elif [ "$mem_mb" -ge 128 ]; then
+  elif [ "$mem_mb" -ge 120 ]; then
     echo 4
   else
     echo 2
