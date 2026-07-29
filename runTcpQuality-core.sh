@@ -3835,29 +3835,31 @@ speedtest_tcp_window_bytes() {
 }
 
 speedtest_min_window_bytes() {
-  local tcp_max="$1" core_max="$2"
-  awk -v tcp_max="$tcp_max" -v core_max="$core_max" 'BEGIN {
-    if (tcp_max ~ /^[0-9]+$/ && core_max ~ /^[0-9]+$/) print (tcp_max < core_max ? tcp_max : core_max);
+  local tcp_max="$1" endpoint_max="$2"
+  awk -v tcp_max="$tcp_max" -v endpoint_max="$endpoint_max" 'BEGIN {
+    if (tcp_max ~ /^[0-9]+$/ && endpoint_max ~ /^[0-9]+$/) print (tcp_max < endpoint_max ? tcp_max : endpoint_max);
     else if (tcp_max ~ /^[0-9]+$/) print tcp_max;
-    else if (core_max ~ /^[0-9]+$/) print core_max;
+    else if (endpoint_max ~ /^[0-9]+$/) print endpoint_max;
     else print "-";
   }'
 }
 
 speedtest_append_tcp_config_csv() {
-  local csv="$1" cc qdisc rmem wmem rwin swin rmem_max wmem_max tcp_rwin tcp_swin
+  local csv="$1" cc qdisc rmem wmem rwin swin tcp_rwin tcp_swin endpoint_window window_scaling moderate_rcvbuf
   cc=$(speedtest_read_sysctl net.ipv4.tcp_congestion_control)
   qdisc=$(speedtest_qdisc_name)
   rmem=$(speedtest_read_sysctl net.ipv4.tcp_rmem)
   wmem=$(speedtest_read_sysctl net.ipv4.tcp_wmem)
-  rmem_max=$(speedtest_read_sysctl net.core.rmem_max)
-  wmem_max=$(speedtest_read_sysctl net.core.wmem_max)
+  window_scaling=$(speedtest_read_sysctl net.ipv4.tcp_window_scaling)
+  moderate_rcvbuf=$(speedtest_read_sysctl net.ipv4.tcp_moderate_rcvbuf)
+  endpoint_window=16777216
   tcp_rwin=$(speedtest_tcp_window_bytes "$rmem")
   tcp_swin=$(speedtest_tcp_window_bytes "$wmem")
-  rwin=$(speedtest_min_window_bytes "$tcp_rwin" "$rmem_max")
-  swin=$(speedtest_min_window_bytes "$tcp_swin" "$wmem_max")
-  printf '三网单线程配置,TCP,%s,%s,,,%s,%s,%s,%s,%s,%s\n' \
-    "${cc:-}" "${qdisc:-}" "OK" "${rmem:-}" "${wmem:-}" "${rwin:-}" "${swin:-}" >> "$csv"
+  rwin=$(speedtest_min_window_bytes "$tcp_rwin" "$endpoint_window")
+  swin=$(speedtest_min_window_bytes "$tcp_swin" "$endpoint_window")
+  printf '三网单线程配置,TCP,%s,%s,,,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "${cc:-}" "${qdisc:-}" "OK" "${rmem:-}" "${wmem:-}" "${rwin:-}" "${swin:-}" \
+    "${window_scaling:-}" "${moderate_rcvbuf:-}" >> "$csv"
 }
 
 speedtest_safe_debug_name() {
