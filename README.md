@@ -24,13 +24,16 @@ bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
 curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 ```
 
+默认入口会在 Linux root 用户下进入临时 Debian rootfs + chroot 后运行检测 core，
+旧命令和参数保持不变。需要直接在宿主环境调试时可加 `--no-rootfs`。
+
 示例报告：
 
 - https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj
 
-![](https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj.png?section=ipv4)
+![](https://tcpquality.ibsgss.uk/r/hUETeLqqyF.png?section=large4)
 
-![](https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj.png?section=speedtest)
+![](https://tcpquality.ibsgss.uk/r/q1ECAn_b5D.png?section=speedtest)
 
 ## 支持参数
 
@@ -40,19 +43,17 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `-p NUM`、`--parallel NUM`：设置并行节点数，范围 1-31，默认 16。
 - `-v4`、`--v4`：仅探测 IPv4。
 - `-v6`、`--v6`：仅探测 IPv6。
+- `--only-large`：仅探测 IPv4大包回程。
 - `--cernet`：仅探测 CERNET IPv4 和 CERNET2 IPv6。
-- `--all`：检测 IPv4/IPv6、CERNET/CERNET2、国际互联和 Speedtest。
-- `--speedtest`：完成 TCP 质量探测后，追加国内电信、联通、移动分阶段 Speedtest 测速。
-- `--only-speedtest`：仅运行国内电信、联通、移动分阶段 Speedtest 测速。
+- `--all`：检测 IPv4/IPv6、CERNET/CERNET2、国际互联和单线程测速。
+- `--speedtest`：完成 TCP 质量探测后，追加单线程测速。
+- `--only-speedtest`：仅运行单线程测速。
 - `--intl`：单独使用时仅运行国际互联；与 `-v4`、`-v6`、`--all` 等组合时追加国际互联。
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
 ## 依赖说明
-
-- `nping`：随 nmap 安装，用于 TCP SYN 探测。
-- `traceroute`：用于自动识别三网 TCP 回程线路。
-- `nexttrace`：可选；用于 IPv4大包回程质量(beta) 的 TCP 大包路由识别。
+默认采用 Debian minimal rootfs + chroot，依赖组件会自动安装。
 
 ## Star History
 
