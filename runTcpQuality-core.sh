@@ -582,7 +582,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 
 NixOS:
   脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
-  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做三网单线程速度。
+  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做单线程测速。
 
 选项:
   -h, --help        显示帮助信息并退出
@@ -595,12 +595,12 @@ NixOS:
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
-  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和三网单线程速度
+  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和单线程测速
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
-  --speedtest       追加三网单线程速度（默认北京/上海/广东三地三网）
-  --only-speedtest  仅运行三网单线程速度（默认北京/上海/广东三地三网）
+  --speedtest       追加单线程测速（默认北京/上海/广东三地三网）
+  --only-speedtest  仅运行单线程测速（默认北京/上海/广东三地三网）
   --speedtest-staged
                     追加北京三网三段限速测试
   --only-speedtest-staged
@@ -622,7 +622,7 @@ NixOS:
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
-  - tosutil/iproute2/kmod: 三网单线程速度使用
+  - tosutil/iproute2/kmod: 单线程测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -1701,7 +1701,7 @@ upload_probe_debug_bundle() {
 }
 
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
+  local csv="$1" report_time="${2:-}" response_file curl_err http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
@@ -1722,6 +1722,7 @@ upload_report() {
   fi
 
   response_file=$(mktemp)
+  curl_err=$(mktemp)
   if [ "$DEBUG_MODE" -eq 1 ] && [ -f "$csv" ]; then
     cp "$csv" "$RESULT_DIR/report_upload.csv" 2>/dev/null || true
   fi
@@ -1734,15 +1735,17 @@ upload_report() {
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
     -H "X-TcpQuality-Rank-Finished-At: $rank_finished_at" \
     "${rank_headers[@]}" \
-    --data-binary "@$csv" "$REPORT_API"); then
+    --data-binary "@$csv" "$REPORT_API" 2>"$curl_err"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
+      cp "$curl_err" "$RESULT_DIR/report_upload_curl.err" 2>/dev/null || true
       printf '%s\n' "curl_failed" > "$RESULT_DIR/report_upload_http_code.txt"
     fi
-    rm -f "$response_file"
+    rm -f "$response_file" "$curl_err"
     return
   fi
+  rm -f "$curl_err"
   if [ "$DEBUG_MODE" -eq 1 ]; then
     cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
     printf '%s\n' "$http_code" > "$RESULT_DIR/report_upload_http_code.txt"
@@ -3271,6 +3274,12 @@ SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
 SPEEDTEST_TOS_SIZE="${TOS_PROBE_SIZE:-5GB}"
 SPEEDTEST_TOS_TIMEOUT="${TOS_TIMEOUT:-15}"
 SPEEDTEST_TOS_WARMUP="${TOS_WARMUP:-5}"
+SPEEDTEST_APPLECDN_ENABLED="${SPEEDTEST_APPLECDN_ENABLED:-1}"
+SPEEDTEST_APPLECDN_DOWNLOAD_URL="${SPEEDTEST_APPLECDN_DOWNLOAD_URL:-https://mensura.cdn-apple.com/api/v1/gm/large}"
+SPEEDTEST_APPLECDN_UPLOAD_URL="${SPEEDTEST_APPLECDN_UPLOAD_URL:-https://mensura.cdn-apple.com/api/v1/gm/slurp}"
+SPEEDTEST_APPLECDN_HOST="${SPEEDTEST_APPLECDN_HOST:-mensura.cdn-apple.com}"
+SPEEDTEST_APPLECDN_MAX_MB="${SPEEDTEST_APPLECDN_MAX_MB:-2048}"
+SPEEDTEST_APPLECDN_USER_AGENT="${SPEEDTEST_APPLECDN_USER_AGENT:-networkQuality/194.80.3 CFNetwork/3860.400.51 Darwin/25.3.0}"
 SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
@@ -4057,6 +4066,167 @@ speedtest_run_probe() {
   return 0
 }
 
+speedtest_applecdn_timeout() {
+  local timeout="$SPEEDTEST_TOS_TIMEOUT"
+  if ! [[ "$timeout" =~ ^[0-9]+$ ]] || [ "$timeout" -le 0 ]; then
+    timeout=15
+  fi
+  printf '%s' "$timeout"
+}
+
+speedtest_applecdn_max_mb() {
+  local max_mb="$SPEEDTEST_APPLECDN_MAX_MB"
+  if ! [[ "$max_mb" =~ ^[0-9]+$ ]] || [ "$max_mb" -le 0 ]; then
+    max_mb=2048
+  fi
+  printf '%s' "$max_mb"
+}
+
+speedtest_applecdn_calc_mbps() {
+  local bytes_per_second="$1"
+  awk -v bps="$bytes_per_second" 'BEGIN {
+    if (bps <= 0) {
+      printf "failed";
+      exit;
+    }
+    mbps = bps * 8 / 1000000;
+    if (mbps < 0.05) printf "failed";
+    else printf "%.1f", mbps;
+  }'
+}
+
+speedtest_applecdn_seconds_to_ms() {
+  local seconds="$1"
+  awk -v s="$seconds" 'BEGIN {
+    if (s <= 0) printf "-";
+    else printf "%d", int(s * 1000 + 0.5);
+  }'
+}
+
+speedtest_ipv6_available() {
+  ip -6 route get 2620:149:a21:f000::133 >/dev/null 2>&1
+}
+
+speedtest_applecdn_curl_download() {
+  local output_file="$1" ip_flag="$2" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local before after retrans speed latency
+  timeout=$(speedtest_applecdn_timeout)
+  before=$(speedtest_retrans_count)
+  set +e
+  meta=$(curl "$ip_flag" -sS -L \
+    --connect-timeout 5 --max-time "$timeout" \
+    -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
+    -H 'Accept: */*' \
+    -H 'Accept-Language: zh-CN,zh-Hans;q=0.9' \
+    -H 'Accept-Encoding: identity' \
+    -o /dev/null \
+    -w '%{size_download}|%{time_total}|%{speed_download}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
+    "$SPEEDTEST_APPLECDN_DOWNLOAD_URL" 2>"${output_file}.err")
+  exit_code=$?
+  set -e
+  after=$(speedtest_retrans_count)
+  retrans=$((after - before))
+  [ "$retrans" -ge 0 ] || retrans=0
+  IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
+  latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
+  [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
+  if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
+    printf 'failed|%s|%s|%s' "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+  else
+    printf '%s|%s|%s|%s' "$speed" "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+  fi
+  {
+    printf 'type=download\n'
+    printf 'exit_code=%s\n' "$exit_code"
+    printf 'http_code=%s\n' "${http_code:-}"
+    printf 'remote_ip=%s\n' "${remote_ip:-}"
+    printf 'bytes=%s\n' "${bytes:-}"
+    printf 'time_total=%s\n' "${total:-}"
+    printf 'speed_download=%s\n' "${curl_speed:-}"
+    printf 'time_connect=%s\n' "${connect:-}"
+    printf 'time_appconnect=%s\n' "${appconnect:-}"
+    printf 'time_starttransfer=%s\n' "${starttransfer:-}"
+  } > "${output_file}.meta.txt" 2>/dev/null || true
+  printf '%s\n' "$meta" > "$output_file" 2>/dev/null || true
+}
+
+speedtest_applecdn_curl_upload() {
+  local output_file="$1" ip_flag="$2" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local speed latency
+  timeout=$(speedtest_applecdn_timeout)
+  max_mb=$(speedtest_applecdn_max_mb)
+  set +e
+  meta=$(
+    dd if=/dev/zero bs=1M count="$max_mb" 2>/dev/null | \
+      curl "$ip_flag" -sS -L \
+        --connect-timeout 5 --max-time "$timeout" \
+        -T - \
+        -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
+        -H 'Accept: */*' \
+        -H 'Accept-Language: zh-CN,zh-Hans;q=0.9' \
+        -H 'Accept-Encoding: identity' \
+        -H 'Upload-Draft-Interop-Version: 6' \
+        -H 'Upload-Complete: ?1' \
+        -o /dev/null \
+        -w '%{size_upload}|%{time_total}|%{speed_upload}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
+        "$SPEEDTEST_APPLECDN_UPLOAD_URL" 2>"${output_file}.err"
+  )
+  exit_code=$?
+  set -e
+  IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
+  latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
+  [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
+  if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
+    printf 'failed|0|%s|%s' "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+  else
+    printf '%s|0|%s|%s' "$speed" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+  fi
+  {
+    printf 'type=upload\n'
+    printf 'exit_code=%s\n' "$exit_code"
+    printf 'http_code=%s\n' "${http_code:-}"
+    printf 'remote_ip=%s\n' "${remote_ip:-}"
+    printf 'bytes=%s\n' "${bytes:-}"
+    printf 'time_total=%s\n' "${total:-}"
+    printf 'speed_upload=%s\n' "${curl_speed:-}"
+    printf 'time_connect=%s\n' "${connect:-}"
+    printf 'time_appconnect=%s\n' "${appconnect:-}"
+    printf 'time_starttransfer=%s\n' "${starttransfer:-}"
+  } > "${output_file}.meta.txt" 2>/dev/null || true
+  printf '%s\n' "$meta" > "$output_file" 2>/dev/null || true
+}
+
+speedtest_collect_applecdn() {
+  local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
+  local apple_values=()
+  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 0
+  for family_name in "Apple IPv4:-4" "Apple IPv6:-6"; do
+    ip_flag="${family_name##*:}"
+    family_name="${family_name%%:*}"
+    if [ "$ip_flag" = "-6" ] && ! speedtest_ipv6_available; then
+      apple_values+=("-|-|-|$SPEEDTEST_APPLECDN_HOST|$family_name|-|-|-|-")
+      continue
+    fi
+    workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn.XXXXXX")
+    result_file="$workdir/result"
+    IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "$ip_flag")"
+    IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "$ip_flag")"
+
+    [ "$download" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "$family_name" "download" "$SPEEDTEST_APPLECDN_HOST" "$family_name" "$result_file.download"
+    [ "$upload" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "$family_name" "upload" "$SPEEDTEST_APPLECDN_HOST" "$family_name" "$result_file.upload"
+
+    if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
+      apple_values+=("$(speedtest_format_mbps "$upload")|$download_retrans|$(speedtest_format_mbps "$download")|$SPEEDTEST_APPLECDN_HOST|$family_name|$upload_connect|$upload_tls|$download_connect|$download_tls")
+    else
+      apple_values+=("failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|$family_name|$upload_connect|$upload_tls|$download_connect|$download_tls")
+    fi
+    [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
+  done
+  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};${apple_values[1]};")
+}
+
 speedtest_format_mbps() {
   local bandwidth="$1"
   printf '%s' "$bandwidth"
@@ -4133,6 +4303,27 @@ speedtest_print_group_header() {
   printf '%b' "$CYAN"; speedtest_pad_left 10 '回程延迟'; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 10 '去程延迟'; printf '%b' "$NC"
+  printf '\n'
+}
+
+speedtest_print_applecdn_header() {
+  printf '  '
+  printf '%b' "$CYAN"
+  speedtest_pad_center 82 'AppleCDN'
+  printf '%b' "$NC"
+  printf '\n'
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '名称'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '下载重传'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '下载速度'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '上传速度'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '下载延迟'; printf '%b' "$NC"
+  printf '  '
+  printf '%b' "$CYAN"; speedtest_pad_left 10 '上传延迟'; printf '%b' "$NC"
   printf '\n'
 }
 
@@ -4223,13 +4414,15 @@ speedtest_retrans_color() {
 
 collect_speedtest_results() {
   local group group_region rate label carrier workdir result_file index candidate server_id city candidate_region
-  local upload upload_retrans upload_connect upload_tls download download_retrans download_connect download_tls done total offset
+  local upload upload_retrans upload_connect upload_tls download download_retrans download_connect download_tls done total offset apple_steps
   local carriers=(电信 联通 移动)
   local carrier_values=()
   offset=${SPEEDTEST_PROGRESS_OFFSET:-0}
   done="$offset"
   total=${SPEEDTEST_PROGRESS_TOTAL:-0}
-  [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]}))
+  apple_steps=0
+  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && apple_steps=1
+  [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]} + apple_steps))
 
   if [ "${SPEEDTEST_APPEND_STATE:-0}" -eq 1 ]; then
     speedtest_load_background_state || true
@@ -4238,7 +4431,7 @@ collect_speedtest_results() {
   fi
 
   [ "$(uname)" = "Linux" ] || {
-  echo -e "${RED}[X] 三网单线程速度目前仅支持 Linux${NC}"
+  echo -e "${RED}[X] 单线程测速目前仅支持 Linux${NC}"
     exit 1
   }
   require_raw_socket_privilege
@@ -4283,7 +4476,7 @@ collect_speedtest_results() {
     trap 'speedtest_cleanup; exit 130' INT TERM
   fi
 
-  echo -e "${BOLD}${CYAN}三网单线程速度${NC}"
+  echo -e "${BOLD}${CYAN}单线程测速${NC}"
   echo
   speedtest_show_progress 0 "$total"
 
@@ -4342,6 +4535,13 @@ collect_speedtest_results() {
   done < <(speedtest_group_specs)
 
   speedtest_cleanup
+  if [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ]; then
+    speedtest_collect_applecdn
+    done=$((done + 1))
+    speedtest_show_progress "$done" "$total"
+  fi
+
+  speedtest_cleanup
   if [ "$SPEEDTEST_RANK_ELIGIBLE" -ne 1 ]; then
     RANK_SESSION_ID=""
     RANK_SESSION_TOKEN=""
@@ -4377,6 +4577,8 @@ speedtest_set_failed_rows() {
     [ -n "$label" ] || continue
     SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
+  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && \
+    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-;")
 }
 
 speedtest_load_background_state() {
@@ -4459,10 +4661,63 @@ show_speedtest_results() {
   local speed_color retrans_color tls_color
   local carriers=(电信 联通 移动)
   local results=()
-  echo -e "${BOLD}${CYAN}三网单线程速度${NC}"
+  echo -e "${BOLD}${CYAN}单线程测速${NC}"
   echo
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
+    if [ "$label" = "AppleCDN" ]; then
+      speedtest_print_applecdn_header
+      for result in "$result1" "$result2"; do
+        [ -n "$result" ] || continue
+        IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
+        printf '  '
+        printf '%b' "$CYAN"; speedtest_pad_left 12 "${city:-AppleCDN}"; printf '%b' "$NC"
+        printf '  '
+        if [ "$retrans" = "-" ]; then
+          printf '%b' "$DIM"; speedtest_pad_left 10 '-'; printf '%b' "$NC"
+        else
+          retrans_color=$(speedtest_retrans_color "$retrans")
+          printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+        fi
+        printf '  '
+        if [ "$download" = "-" ]; then
+          download_text="-"
+          speed_color="$DIM"
+        else
+          download_text=$(speedtest_speed_text "$download")
+          speed_color=$(speedtest_speed_color "$download" "不限")
+        fi
+        printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
+        printf '  '
+        if [ "$upload" = "-" ]; then
+          upload_text="-"
+          speed_color="$DIM"
+        else
+          upload_text=$(speedtest_speed_text "$upload")
+          speed_color=$(speedtest_speed_color "$upload" "不限")
+        fi
+        printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
+        printf '  '
+        download_tls_text=$(speedtest_latency_text "$download_tls")
+        if [ "$download_tls" = "-" ]; then
+          tls_color="$DIM"
+        else
+          tls_color=$(speedtest_latency_color "$download_tls")
+        fi
+        printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
+        printf '  '
+        upload_tls_text=$(speedtest_latency_text "$upload_tls")
+        if [ "$upload_tls" = "-" ]; then
+          tls_color="$DIM"
+        else
+          tls_color=$(speedtest_latency_color "$upload_tls")
+        fi
+        printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
+        printf '\n'
+      done
+      printf '\n'
+      continue
+    fi
     speedtest_print_group_header "$label"
     results=("$result1" "$result2" "$result3")
     for index in "${!results[@]}"; do
@@ -4496,6 +4751,7 @@ show_speedtest_results() {
     done
     echo
   done
+  echo -e "  ${DIM}注：代理速度由回程速度+下载速度的短板决定。${NC}"
 }
 
 append_speedtest_csv() {
@@ -4503,6 +4759,28 @@ append_speedtest_csv() {
   local carriers=(电信 联通 移动)
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
+    if [ "$label" = "AppleCDN" ]; then
+      for result in "$result1" "$result2"; do
+        [ -n "$result" ] || continue
+        IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
+        if [ "$upload" = "-" ] && [ "$download" = "-" ]; then
+          printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "${server_id:-$SPEEDTEST_APPLECDN_HOST}" \
+            "SKIP" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        elif [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
+          printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "FAIL" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        else
+          printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "${server_id:-$SPEEDTEST_APPLECDN_HOST}" \
+            "OK" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        fi
+      done
+      continue
+    fi
     index=0
     for result in "$result1" "$result2" "$result3"; do
       carrier="${carriers[$index]}"
