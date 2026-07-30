@@ -23,7 +23,7 @@ bootstrap_nixos_environment() {
   for arg in "$@"; do
     case "$arg" in
       -h|--help) return 0 ;;
-      --all|--speedtest|--only-speedtest|--speedtest-staged|--only-speedtest-staged) need_speedtest=1 ;;
+      --all|--speedtest|--only-speedtest) need_speedtest=1 ;;
     esac
   done
 
@@ -52,13 +52,12 @@ bootstrap_nixos_environment() {
     nixpkgs#gnused
     nixpkgs#iproute2
     nixpkgs#iputils
-    nixpkgs#kmod
     nixpkgs#ncurses
     nixpkgs#nmap
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
-    # 分阶段测速已改用 tosutil，进入 Nix 环境后由脚本按需下载官方二进制。
+    # 单线程测速会按需下载官方 tosutil 二进制。
     :
   fi
 
@@ -601,10 +600,6 @@ NixOS:
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
   --speedtest       追加单线程测速（默认北京/上海/广东三地三网）
   --only-speedtest  仅运行单线程测速（默认北京/上海/广东三地三网）
-  --speedtest-staged
-                    追加北京三网三段限速测试
-  --only-speedtest-staged
-                    仅运行北京三网三段限速测试
   --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
   --no-rank-upload  不上传报告，也不参与速度排名
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
@@ -622,7 +617,7 @@ NixOS:
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
-  - tosutil/iproute2/kmod: 单线程测速使用
+  - tosutil/iproute2: 单线程测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -713,17 +708,6 @@ parse_args() {
       --only-speedtest)
         SPEEDTEST_ENABLED=1
         SPEEDTEST_ONLY=1
-        shift
-        ;;
-      --speedtest-staged)
-        SPEEDTEST_ENABLED=1
-        SPEEDTEST_MODE="staged"
-        shift
-        ;;
-      --only-speedtest-staged)
-        SPEEDTEST_ENABLED=1
-        SPEEDTEST_ONLY=1
-        SPEEDTEST_MODE="staged"
         shift
         ;;
       --intl)
@@ -3244,12 +3228,8 @@ run_international_mode() {
   echo
 }
 
-# ===================== 国内分阶段测速 =====================
-SPEEDTEST_RATES=(10 200 unlimited)
-SPEEDTEST_MODE="${SPEEDTEST_MODE:-regions}"
-SPEEDTEST_IFB="ifb_tqtest"
+# ===================== 国内单线程测速 =====================
 SPEEDTEST_IFACE=""
-SPEEDTEST_CREATED_IFB=0
 speedtest_tosutil_url() {
   local arch tos_arch
   if [ -n "${TOSUTIL_URL:-}" ]; then
@@ -3321,34 +3301,26 @@ speedtest_candidates() {
 }
 
 speedtest_group_specs() {
-  local rate label selected_supported=0
-  if [ "$SPEEDTEST_MODE" = "staged" ]; then
-    for rate in "${SPEEDTEST_RATES[@]}"; do
-      label="${rate}Mbps"
-      [ "$rate" = "unlimited" ] && label="不限"
-      printf '%s|cn-beijing|%s\n' "$label" "$rate"
-    done
-  else
-    if [ -n "$SELECTED_PROVINCES" ]; then
-      [[ "$SELECTED_PROVINCES" == *"|北京|"* ]] && {
-        printf '%s\n' "北京|cn-beijing|unlimited"
-        selected_supported=1
-      }
-      [[ "$SELECTED_PROVINCES" == *"|上海|"* ]] && {
-        printf '%s\n' "上海|cn-shanghai|unlimited"
-        selected_supported=1
-      }
-      [[ "$SELECTED_PROVINCES" == *"|广东|"* ]] && {
-        printf '%s\n' "广东|cn-guangzhou|unlimited"
-        selected_supported=1
-      }
-      [ "$selected_supported" -eq 1 ] && return 0
-    fi
-    printf '%s\n' \
-      "北京|cn-beijing|unlimited" \
-      "上海|cn-shanghai|unlimited" \
-      "广东|cn-guangzhou|unlimited"
+  local selected_supported=0
+  if [ -n "$SELECTED_PROVINCES" ]; then
+    [[ "$SELECTED_PROVINCES" == *"|北京|"* ]] && {
+      printf '%s\n' "北京|cn-beijing|unlimited"
+      selected_supported=1
+    }
+    [[ "$SELECTED_PROVINCES" == *"|上海|"* ]] && {
+      printf '%s\n' "上海|cn-shanghai|unlimited"
+      selected_supported=1
+    }
+    [[ "$SELECTED_PROVINCES" == *"|广东|"* ]] && {
+      printf '%s\n' "广东|cn-guangzhou|unlimited"
+      selected_supported=1
+    }
+    [ "$selected_supported" -eq 1 ] && return 0
   fi
+  printf '%s\n' \
+    "北京|cn-beijing|unlimited" \
+    "上海|cn-shanghai|unlimited" \
+    "广东|cn-guangzhou|unlimited"
 }
 
 speedtest_group_count() {
@@ -3501,16 +3473,6 @@ speedtest_set_selected() {
 
 speedtest_cleanup() {
   speedtest_counter_stop_current
-  if [ -n "${SPEEDTEST_IFACE:-}" ]; then
-    tc qdisc del dev "$SPEEDTEST_IFACE" root 2>/dev/null || true
-    tc qdisc del dev "$SPEEDTEST_IFACE" ingress 2>/dev/null || true
-  fi
-  tc qdisc del dev "$SPEEDTEST_IFB" root 2>/dev/null || true
-  if [ "${SPEEDTEST_CREATED_IFB:-0}" -eq 1 ]; then
-    ip link set "$SPEEDTEST_IFB" down 2>/dev/null || true
-    ip link delete "$SPEEDTEST_IFB" type ifb 2>/dev/null || true
-    SPEEDTEST_CREATED_IFB=0
-  fi
   speedtest_restore_hosts
 }
 
@@ -3519,11 +3481,6 @@ speedtest_dependencies_ready() {
   for cmd in ip nstat awk curl; do
     command -v "$cmd" &>/dev/null || return 1
   done
-  if [ "$SPEEDTEST_MODE" = "staged" ]; then
-    for cmd in tc modprobe; do
-      command -v "$cmd" &>/dev/null || return 1
-    done
-  fi
 }
 
 install_speedtest_dependencies() {
@@ -3535,13 +3492,13 @@ install_speedtest_dependencies() {
   if command -v apt-get &>/dev/null; then
     $USE_SUDO apt-get update -qq >/dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive $USE_SUDO apt-get install -y -qq \
-      iproute2 kmod gawk curl ca-certificates >/dev/null 2>&1
+      iproute2 gawk curl ca-certificates >/dev/null 2>&1
   elif command -v dnf &>/dev/null; then
-    $USE_SUDO dnf install -y -q iproute kmod gawk curl ca-certificates >/dev/null 2>&1
+    $USE_SUDO dnf install -y -q iproute gawk curl ca-certificates >/dev/null 2>&1
   elif command -v yum &>/dev/null; then
-    $USE_SUDO yum install -y -q iproute kmod gawk curl ca-certificates >/dev/null 2>&1
+    $USE_SUDO yum install -y -q iproute gawk curl ca-certificates >/dev/null 2>&1
   elif command -v apk &>/dev/null; then
-    $USE_SUDO apk add --no-cache iproute2 kmod awk curl ca-certificates >/dev/null 2>&1
+    $USE_SUDO apk add --no-cache iproute2 awk curl ca-certificates >/dev/null 2>&1
   else
     return 1
   fi
@@ -3613,26 +3570,6 @@ install_speedtest_counter_dependency() {
 
 speedtest_retrans_count() {
   nstat -az 2>/dev/null | awk '$1=="TcpRetransSegs"{print $2; found=1} END{if(!found) print 0}'
-}
-
-speedtest_apply_limit() {
-  local rate="$1"
-  speedtest_cleanup
-  if [ "$rate" = "unlimited" ]; then
-    return 0
-  fi
-
-  modprobe ifb >/dev/null 2>&1 || return 1
-  if ! ip link show "$SPEEDTEST_IFB" >/dev/null 2>&1; then
-    ip link add "$SPEEDTEST_IFB" type ifb >/dev/null 2>&1 || return 1
-    SPEEDTEST_CREATED_IFB=1
-  fi
-  ip link set "$SPEEDTEST_IFB" up >/dev/null 2>&1 || return 1
-  tc qdisc add dev "$SPEEDTEST_IFACE" root tbf rate "${rate}mbit" burst 1mb latency 500ms >/dev/null 2>&1 || return 1
-  tc qdisc add dev "$SPEEDTEST_IFACE" handle ffff: ingress >/dev/null 2>&1 || return 1
-  tc filter add dev "$SPEEDTEST_IFACE" parent ffff: protocol all u32 \
-    match u32 0 0 action mirred egress redirect dev "$SPEEDTEST_IFB" >/dev/null 2>&1 || return 1
-  tc qdisc add dev "$SPEEDTEST_IFB" root tbf rate "${rate}mbit" burst 1mb latency 500ms >/dev/null 2>&1 || return 1
 }
 
 speedtest_result_valid() {
@@ -4482,11 +4419,6 @@ collect_speedtest_results() {
 
   while IFS='|' read -r label group_region rate; do
     [ -n "$label" ] || continue
-    speedtest_apply_limit "$rate" || {
-      echo -e "${RED}[X] 无法应用 ${rate} Mbps 限速${NC}"
-      exit 1
-    }
-    sleep 2
     carrier_values=()
 
     for carrier in "${carriers[@]}"; do
