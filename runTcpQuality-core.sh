@@ -4104,12 +4104,12 @@ speedtest_applecdn_seconds_to_ms() {
 }
 
 speedtest_applecdn_curl_download() {
-  local output_file="$1" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local output_file="$1" ip_flag="$2" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
   timeout=$(speedtest_applecdn_timeout)
   before=$(speedtest_retrans_count)
   set +e
-  meta=$(curl -4 -sS -L \
+  meta=$(curl "$ip_flag" -sS -L \
     --connect-timeout 5 --max-time "$timeout" \
     -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
     -H 'Accept: */*' \
@@ -4148,14 +4148,14 @@ speedtest_applecdn_curl_download() {
 }
 
 speedtest_applecdn_curl_upload() {
-  local output_file="$1" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local output_file="$1" ip_flag="$2" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local speed latency
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
   set +e
   meta=$(
     dd if=/dev/zero bs=1M count="$max_mb" 2>/dev/null | \
-      curl -4 -sS -L \
+      curl "$ip_flag" -sS -L \
         --connect-timeout 5 --max-time "$timeout" \
         -T - \
         -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
@@ -4195,22 +4195,28 @@ speedtest_applecdn_curl_upload() {
 }
 
 speedtest_collect_applecdn() {
-  local workdir result_file download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
+  local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
+  local apple_values=()
   [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 0
-  workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn.XXXXXX")
-  result_file="$workdir/result"
-  IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download")"
-  IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload")"
+  for family_name in "Apple IPv4:-4" "Apple IPv6:-6"; do
+    ip_flag="${family_name##*:}"
+    family_name="${family_name%%:*}"
+    workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn.XXXXXX")
+    result_file="$workdir/result"
+    IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "$ip_flag")"
+    IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "$ip_flag")"
 
-  [ "$download" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "AppleCDN" "download" "$SPEEDTEST_APPLECDN_HOST" "AppleCDN" "$result_file.download"
-  [ "$upload" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "AppleCDN" "upload" "$SPEEDTEST_APPLECDN_HOST" "AppleCDN" "$result_file.upload"
+    [ "$download" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "$family_name" "download" "$SPEEDTEST_APPLECDN_HOST" "$family_name" "$result_file.download"
+    [ "$upload" = "failed" ] && speedtest_record_failure_debug "AppleCDN" "$family_name" "upload" "$SPEEDTEST_APPLECDN_HOST" "$family_name" "$result_file.upload"
 
-  if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
-    SPEEDTEST_ROWS+=("AppleCDN;$(speedtest_format_mbps "$upload")|$download_retrans|$(speedtest_format_mbps "$download")|$SPEEDTEST_APPLECDN_HOST|AppleCDN|$upload_connect|$upload_tls|$download_connect|$download_tls;;")
-  else
-    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|AppleCDN|$upload_connect|$upload_tls|$download_connect|$download_tls;;")
-  fi
-  [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
+    if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
+      apple_values+=("$(speedtest_format_mbps "$upload")|$download_retrans|$(speedtest_format_mbps "$download")|$SPEEDTEST_APPLECDN_HOST|$family_name|$upload_connect|$upload_tls|$download_connect|$download_tls")
+    else
+      apple_values+=("failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|$family_name|$upload_connect|$upload_tls|$download_connect|$download_tls")
+    fi
+    [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
+  done
+  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};${apple_values[1]};")
 }
 
 speedtest_format_mbps() {
@@ -4564,7 +4570,7 @@ speedtest_set_failed_rows() {
     SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
   [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && \
-    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|AppleCDN|-|-|-|-;;")
+    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-;")
 }
 
 speedtest_load_background_state() {
@@ -4653,29 +4659,33 @@ show_speedtest_results() {
     IFS=';' read -r label result1 result2 result3 <<<"$row"
     if [ "$label" = "AppleCDN" ]; then
       speedtest_print_applecdn_header
-      IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result1"
-      printf '  '
-      printf '%b' "$CYAN"; speedtest_pad_left 12 'AppleCDN'; printf '%b' "$NC"
-      printf '  '
-      retrans_color=$(speedtest_retrans_color "$retrans")
-      printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
-      printf '  '
-      download_text=$(speedtest_speed_text "$download")
-      speed_color=$(speedtest_speed_color "$download" "不限")
-      printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
-      printf '  '
-      upload_text=$(speedtest_speed_text "$upload")
-      speed_color=$(speedtest_speed_color "$upload" "不限")
-      printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
-      printf '  '
-      download_tls_text=$(speedtest_latency_text "$download_tls")
-      tls_color=$(speedtest_latency_color "$download_tls")
-      printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
-      printf '  '
-      upload_tls_text=$(speedtest_latency_text "$upload_tls")
-      tls_color=$(speedtest_latency_color "$upload_tls")
-      printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
-      printf '\n\n'
+      for result in "$result1" "$result2"; do
+        [ -n "$result" ] || continue
+        IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
+        printf '  '
+        printf '%b' "$CYAN"; speedtest_pad_left 12 "${city:-AppleCDN}"; printf '%b' "$NC"
+        printf '  '
+        retrans_color=$(speedtest_retrans_color "$retrans")
+        printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+        printf '  '
+        download_text=$(speedtest_speed_text "$download")
+        speed_color=$(speedtest_speed_color "$download" "不限")
+        printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
+        printf '  '
+        upload_text=$(speedtest_speed_text "$upload")
+        speed_color=$(speedtest_speed_color "$upload" "不限")
+        printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
+        printf '  '
+        download_tls_text=$(speedtest_latency_text "$download_tls")
+        tls_color=$(speedtest_latency_color "$download_tls")
+        printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
+        printf '  '
+        upload_tls_text=$(speedtest_latency_text "$upload_tls")
+        tls_color=$(speedtest_latency_color "$upload_tls")
+        printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
+        printf '\n'
+      done
+      printf '\n'
       continue
     fi
     speedtest_print_group_header "$label"
@@ -4720,17 +4730,20 @@ append_speedtest_csv() {
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
     if [ "$label" = "AppleCDN" ]; then
-      IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result1"
-      if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
-        printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
-          "$label" "AppleCDN" "AppleCDN" "FAIL" "$upload" "$retrans" "$download" \
-          "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
-      else
-        printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
-          "$label" "AppleCDN" "AppleCDN" "${server_id:-$SPEEDTEST_APPLECDN_HOST}" \
-          "OK" "$upload" "$retrans" "$download" \
-          "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
-      fi
+      for result in "$result1" "$result2"; do
+        [ -n "$result" ] || continue
+        IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
+        if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
+          printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "FAIL" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        else
+          printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "${server_id:-$SPEEDTEST_APPLECDN_HOST}" \
+            "OK" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        fi
+      done
       continue
     fi
     index=0
