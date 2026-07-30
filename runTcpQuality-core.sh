@@ -1701,7 +1701,7 @@ upload_probe_debug_bundle() {
 }
 
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
+  local csv="$1" report_time="${2:-}" response_file curl_err http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
@@ -1722,6 +1722,7 @@ upload_report() {
   fi
 
   response_file=$(mktemp)
+  curl_err=$(mktemp)
   if [ "$DEBUG_MODE" -eq 1 ] && [ -f "$csv" ]; then
     cp "$csv" "$RESULT_DIR/report_upload.csv" 2>/dev/null || true
   fi
@@ -1734,15 +1735,17 @@ upload_report() {
     -H "X-TcpQuality-Public-IPv6: ${IPV6_PUBLIC:-}" \
     -H "X-TcpQuality-Rank-Finished-At: $rank_finished_at" \
     "${rank_headers[@]}" \
-    --data-binary "@$csv" "$REPORT_API"); then
+    --data-binary "@$csv" "$REPORT_API" 2>"$curl_err"); then
     echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
+      cp "$curl_err" "$RESULT_DIR/report_upload_curl.err" 2>/dev/null || true
       printf '%s\n' "curl_failed" > "$RESULT_DIR/report_upload_http_code.txt"
     fi
-    rm -f "$response_file"
+    rm -f "$response_file" "$curl_err"
     return
   fi
+  rm -f "$curl_err"
   if [ "$DEBUG_MODE" -eq 1 ]; then
     cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
     printf '%s\n' "$http_code" > "$RESULT_DIR/report_upload_http_code.txt"
