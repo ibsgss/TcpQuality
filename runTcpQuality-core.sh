@@ -582,7 +582,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 
 NixOS:
   脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
-  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做三网单线程速度。
+  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做单线程测速。
 
 选项:
   -h, --help        显示帮助信息并退出
@@ -595,12 +595,12 @@ NixOS:
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
   --cernet          仅探测 CERNET IPv4 和 CERNET2 IPv6
-  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和三网单线程速度
+  --all             探测 IPv4/IPv6、CERNET/CERNET2、国际互联和单线程测速
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
-  --speedtest       追加三网单线程速度（默认北京/上海/广东三地三网）
-  --only-speedtest  仅运行三网单线程速度（默认北京/上海/广东三地三网）
+  --speedtest       追加单线程测速（默认北京/上海/广东三地三网）
+  --only-speedtest  仅运行单线程测速（默认北京/上海/广东三地三网）
   --speedtest-staged
                     追加北京三网三段限速测试
   --only-speedtest-staged
@@ -622,7 +622,7 @@ NixOS:
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
-  - tosutil/iproute2/kmod: 三网单线程速度使用
+  - tosutil/iproute2/kmod: 单线程测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -4431,7 +4431,7 @@ collect_speedtest_results() {
   fi
 
   [ "$(uname)" = "Linux" ] || {
-  echo -e "${RED}[X] 三网单线程速度目前仅支持 Linux${NC}"
+  echo -e "${RED}[X] 单线程测速目前仅支持 Linux${NC}"
     exit 1
   }
   require_raw_socket_privilege
@@ -4476,7 +4476,7 @@ collect_speedtest_results() {
     trap 'speedtest_cleanup; exit 130' INT TERM
   fi
 
-  echo -e "${BOLD}${CYAN}三网单线程速度${NC}"
+  echo -e "${BOLD}${CYAN}单线程测速${NC}"
   echo
   speedtest_show_progress 0 "$total"
 
@@ -4661,7 +4661,7 @@ show_speedtest_results() {
   local speed_color retrans_color tls_color
   local carriers=(电信 联通 移动)
   local results=()
-  echo -e "${BOLD}${CYAN}三网单线程速度${NC}"
+  echo -e "${BOLD}${CYAN}单线程测速${NC}"
   echo
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
