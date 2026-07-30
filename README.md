@@ -24,12 +24,9 @@ bash <(curl -fsSL https://tcpquality.ibsgss.uk/run)
 curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 ```
 
-默认入口会在 Linux root 用户下进入临时 Debian rootfs + chroot 后运行检测 core，
-旧命令和参数保持不变。需要直接在宿主环境调试时可加 `--no-rootfs`。
-
 示例报告：
 
-- https://tcpquality.ibsgss.uk/r/BxZlY6c3Qj
+- https://tcpquality.ibsgss.uk/r/hUETeLqqyF
 
 ![](https://tcpquality.ibsgss.uk/r/hUETeLqqyF.png?section=large4)
 
