@@ -4699,11 +4699,19 @@ show_speedtest_results() {
         printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
         printf '  '
         download_tls_text=$(speedtest_latency_text "$download_tls")
-        tls_color=$(speedtest_latency_color "$download_tls")
+        if [ "$download_tls" = "-" ]; then
+          tls_color="$DIM"
+        else
+          tls_color=$(speedtest_latency_color "$download_tls")
+        fi
         printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
         printf '  '
         upload_tls_text=$(speedtest_latency_text "$upload_tls")
-        tls_color=$(speedtest_latency_color "$upload_tls")
+        if [ "$upload_tls" = "-" ]; then
+          tls_color="$DIM"
+        else
+          tls_color=$(speedtest_latency_color "$upload_tls")
+        fi
         printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
         printf '\n'
       done
