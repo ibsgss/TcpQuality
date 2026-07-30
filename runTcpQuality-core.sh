@@ -4103,6 +4103,10 @@ speedtest_applecdn_seconds_to_ms() {
   }'
 }
 
+speedtest_ipv6_available() {
+  ip -6 route get 2620:149:a21:f000::133 >/dev/null 2>&1
+}
+
 speedtest_applecdn_curl_download() {
   local output_file="$1" ip_flag="$2" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
@@ -4201,6 +4205,10 @@ speedtest_collect_applecdn() {
   for family_name in "Apple IPv4:-4" "Apple IPv6:-6"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
+    if [ "$ip_flag" = "-6" ] && ! speedtest_ipv6_available; then
+      apple_values+=("-|-|-|$SPEEDTEST_APPLECDN_HOST|$family_name|-|-|-|-")
+      continue
+    fi
     workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn.XXXXXX")
     result_file="$workdir/result"
     IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "$ip_flag")"
@@ -4665,15 +4673,29 @@ show_speedtest_results() {
         printf '  '
         printf '%b' "$CYAN"; speedtest_pad_left 12 "${city:-AppleCDN}"; printf '%b' "$NC"
         printf '  '
-        retrans_color=$(speedtest_retrans_color "$retrans")
-        printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+        if [ "$retrans" = "-" ]; then
+          printf '%b' "$DIM"; speedtest_pad_left 10 '-'; printf '%b' "$NC"
+        else
+          retrans_color=$(speedtest_retrans_color "$retrans")
+          printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+        fi
         printf '  '
-        download_text=$(speedtest_speed_text "$download")
-        speed_color=$(speedtest_speed_color "$download" "不限")
+        if [ "$download" = "-" ]; then
+          download_text="-"
+          speed_color="$DIM"
+        else
+          download_text=$(speedtest_speed_text "$download")
+          speed_color=$(speedtest_speed_color "$download" "不限")
+        fi
         printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
         printf '  '
-        upload_text=$(speedtest_speed_text "$upload")
-        speed_color=$(speedtest_speed_color "$upload" "不限")
+        if [ "$upload" = "-" ]; then
+          upload_text="-"
+          speed_color="$DIM"
+        else
+          upload_text=$(speedtest_speed_text "$upload")
+          speed_color=$(speedtest_speed_color "$upload" "不限")
+        fi
         printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
         printf '  '
         download_tls_text=$(speedtest_latency_text "$download_tls")
@@ -4733,7 +4755,12 @@ append_speedtest_csv() {
       for result in "$result1" "$result2"; do
         [ -n "$result" ] || continue
         IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
-        if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
+        if [ "$upload" = "-" ] && [ "$download" = "-" ]; then
+          printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "${server_id:-$SPEEDTEST_APPLECDN_HOST}" \
+            "SKIP" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        elif [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
           printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
             "$label" "${city:-AppleCDN}" "${city:-AppleCDN}" "FAIL" "$upload" "$retrans" "$download" \
             "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
