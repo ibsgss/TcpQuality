@@ -4083,13 +4083,13 @@ speedtest_applecdn_max_mb() {
 }
 
 speedtest_applecdn_calc_mbps() {
-  local bytes="$1" seconds="$2"
-  awk -v b="$bytes" -v s="$seconds" 'BEGIN {
-    if (s <= 0 || b <= 0) {
+  local bytes_per_second="$1"
+  awk -v bps="$bytes_per_second" 'BEGIN {
+    if (bps <= 0) {
       printf "failed";
       exit;
     }
-    mbps = b * 8 / s / 1000000;
+    mbps = bps * 8 / 1000000;
     if (mbps < 0.05) printf "failed";
     else printf "%.1f", mbps;
   }'
@@ -4104,7 +4104,7 @@ speedtest_applecdn_seconds_to_ms() {
 }
 
 speedtest_applecdn_curl_download() {
-  local output_file="$1" timeout meta exit_code http_code bytes total connect appconnect starttransfer
+  local output_file="$1" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
   timeout=$(speedtest_applecdn_timeout)
   before=$(speedtest_retrans_count)
@@ -4116,15 +4116,15 @@ speedtest_applecdn_curl_download() {
     -H 'Accept-Language: zh-CN,zh-Hans;q=0.9' \
     -H 'Accept-Encoding: identity' \
     -o /dev/null \
-    -w '%{size_download}|%{time_total}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
+    -w '%{size_download}|%{time_total}|%{speed_download}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
     "$SPEEDTEST_APPLECDN_DOWNLOAD_URL" 2>"${output_file}.err")
   exit_code=$?
   set -e
   after=$(speedtest_retrans_count)
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
-  IFS='|' read -r bytes total _remote_ip connect appconnect starttransfer http_code <<<"$meta"
-  speed=$(speedtest_applecdn_calc_mbps "${bytes:-0}" "${total:-0}")
+  IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
@@ -4136,8 +4136,10 @@ speedtest_applecdn_curl_download() {
     printf 'type=download\n'
     printf 'exit_code=%s\n' "$exit_code"
     printf 'http_code=%s\n' "${http_code:-}"
+    printf 'remote_ip=%s\n' "${remote_ip:-}"
     printf 'bytes=%s\n' "${bytes:-}"
     printf 'time_total=%s\n' "${total:-}"
+    printf 'speed_download=%s\n' "${curl_speed:-}"
     printf 'time_connect=%s\n' "${connect:-}"
     printf 'time_appconnect=%s\n' "${appconnect:-}"
     printf 'time_starttransfer=%s\n' "${starttransfer:-}"
@@ -4146,7 +4148,7 @@ speedtest_applecdn_curl_download() {
 }
 
 speedtest_applecdn_curl_upload() {
-  local output_file="$1" timeout max_mb meta exit_code http_code bytes total connect appconnect starttransfer
+  local output_file="$1" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local speed latency
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
@@ -4163,13 +4165,13 @@ speedtest_applecdn_curl_upload() {
         -H 'Upload-Draft-Interop-Version: 6' \
         -H 'Upload-Complete: ?1' \
         -o /dev/null \
-        -w '%{size_upload}|%{time_total}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
+        -w '%{size_upload}|%{time_total}|%{speed_upload}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{http_code}' \
         "$SPEEDTEST_APPLECDN_UPLOAD_URL" 2>"${output_file}.err"
   )
   exit_code=$?
   set -e
-  IFS='|' read -r bytes total _remote_ip connect appconnect starttransfer http_code <<<"$meta"
-  speed=$(speedtest_applecdn_calc_mbps "${bytes:-0}" "${total:-0}")
+  IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
@@ -4181,8 +4183,10 @@ speedtest_applecdn_curl_upload() {
     printf 'type=upload\n'
     printf 'exit_code=%s\n' "$exit_code"
     printf 'http_code=%s\n' "${http_code:-}"
+    printf 'remote_ip=%s\n' "${remote_ip:-}"
     printf 'bytes=%s\n' "${bytes:-}"
     printf 'time_total=%s\n' "${total:-}"
+    printf 'speed_upload=%s\n' "${curl_speed:-}"
     printf 'time_connect=%s\n' "${connect:-}"
     printf 'time_appconnect=%s\n' "${appconnect:-}"
     printf 'time_starttransfer=%s\n' "${starttransfer:-}"
