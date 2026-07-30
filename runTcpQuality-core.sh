@@ -4109,7 +4109,7 @@ speedtest_applecdn_curl_download() {
   timeout=$(speedtest_applecdn_timeout)
   before=$(speedtest_retrans_count)
   set +e
-  meta=$(curl -sS -L \
+  meta=$(curl -4 -sS -L \
     --connect-timeout 5 --max-time "$timeout" \
     -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
     -H 'Accept: */*' \
@@ -4155,7 +4155,7 @@ speedtest_applecdn_curl_upload() {
   set +e
   meta=$(
     dd if=/dev/zero bs=1M count="$max_mb" 2>/dev/null | \
-      curl -sS -L \
+      curl -4 -sS -L \
         --connect-timeout 5 --max-time "$timeout" \
         -T - \
         -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
