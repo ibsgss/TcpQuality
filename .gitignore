@@ -1,0 +1,19 @@
+# Local contributor and deployment files
+AGENTS.md
+worker/
+
+# Go build artifacts
+/tcpquality
+/tcpquality.exe
+/dist/
+*.test
+*.out
+
+# Local reports and editor metadata
+*.svg
+.DS_Store
+NodeQualityResult.md
+compose.yaml
+server/
+zstatic_nping_*.csv
+cloudflare-dns-node-plan.md
