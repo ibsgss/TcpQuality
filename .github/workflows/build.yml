@@ -31,9 +31,9 @@ jobs:
     name: Vet & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false # no third-party deps, nothing to cache
@@ -60,9 +60,9 @@ jobs:
       matrix:
         goarch: [amd64, arm64, riscv64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
@@ -83,7 +83,7 @@ jobs:
           go build -trimpath -ldflags '-s -w' \
             -o dist/tcpquality-linux-${{ matrix.goarch }} ./cmd/tcpquality
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tcpquality-linux-${{ matrix.goarch }}
           path: dist/tcpquality-linux-${{ matrix.goarch }}

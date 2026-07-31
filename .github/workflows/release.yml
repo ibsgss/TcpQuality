@@ -18,7 +18,7 @@ jobs:
     name: Build & upload release assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Releases are cut from v2; for a published release this is the
           # release tag, which points at the v2 commit being released.
@@ -33,7 +33,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false # no third-party deps, nothing to cache
