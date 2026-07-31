@@ -1,0 +1,62 @@
+name: Release
+
+# Builds release binaries from v2 and attaches them to the GitHub release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and upload assets for'
+        required: true
+
+permissions:
+  contents: write # needed to upload release assets
+
+jobs:
+  release:
+    name: Build & upload release assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Releases are cut from v2; for a published release this is the
+          # release tag, which points at the v2 commit being released.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Verify the ref is on v2
+        run: |
+          git fetch --no-tags origin v2:refs/remotes/origin/v2
+          if ! git merge-base --is-ancestor HEAD origin/v2; then
+            echo "::error::$(git rev-parse HEAD) is not contained in origin/v2"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false # no third-party deps, nothing to cache
+
+      - run: go test ./...
+
+      - name: Build linux binaries
+        env:
+          CGO_ENABLED: '0'
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64 riscv64; do
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags '-s -w' \
+              -o "dist/tcpquality" ./cmd/tcpquality
+            tar -C dist -czf "dist/tcpquality-${TAG}-linux-${arch}.tar.gz" tcpquality
+            mv "dist/tcpquality" "dist/tcpquality-${TAG}-linux-${arch}"
+          done
+          cd dist && sha256sum tcpquality-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/tcpquality-* dist/SHA256SUMS --clobber

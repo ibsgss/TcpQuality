@@ -1,0 +1,91 @@
+name: Build
+
+# Test build for every commit landing on v2 that touches Go code.
+on:
+  push:
+    branches: [v2]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [v2]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+# A newer commit supersedes an in-flight test build for the same ref.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Vet & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false # no third-party deps, nothing to cache
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed for:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+  build:
+    name: Build linux/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64, riscv64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The probing engine is Linux-only (raw sockets); vet the real target too.
+      - name: Vet for target
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -ldflags '-s -w' \
+            -o dist/tcpquality-linux-${{ matrix.goarch }} ./cmd/tcpquality
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tcpquality-linux-${{ matrix.goarch }}
+          path: dist/tcpquality-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 14
