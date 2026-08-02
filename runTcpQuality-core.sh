@@ -1589,6 +1589,8 @@ upload_route_trace_bundles() {
   upload_route_trace_bundle "$report_id" "ipv4" "summary_route4"
   upload_route_trace_bundle "$report_id" "ipv4_large" "summary_large_route4"
   upload_route_trace_bundle "$report_id" "ipv6" "summary_route6"
+  upload_route_trace_bundle "$report_id" "cernet_ipv4" "edu_route4"
+  upload_route_trace_bundle "$report_id" "cernet2_ipv6" "edu_route6"
 }
 
 upload_speedtest_debug_bundle() {
@@ -4040,6 +4042,10 @@ speedtest_applecdn_seconds_to_ms() {
   }'
 }
 
+speedtest_ipv4_available() {
+  ip -4 route get 17.253.144.10 >/dev/null 2>&1
+}
+
 speedtest_ipv6_available() {
   ip -6 route get 2620:149:a21:f000::133 >/dev/null 2>&1
 }
@@ -4142,7 +4148,8 @@ speedtest_collect_applecdn() {
   for family_name in "Apple IPv4:-4" "Apple IPv6:-6"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
-    if [ "$ip_flag" = "-6" ] && ! speedtest_ipv6_available; then
+    if { [ "$ip_flag" = "-4" ] && ! speedtest_ipv4_available; } ||
+      { [ "$ip_flag" = "-6" ] && ! speedtest_ipv6_available; }; then
       apple_values+=("-|-|-|$SPEEDTEST_APPLECDN_HOST|$family_name|-|-|-|-")
       continue
     fi
