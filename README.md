@@ -56,8 +56,8 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 
 <a href="https://www.star-history.com/?repos=ibsgss%2FTcpQuality&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&theme=dark&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=aTqZSr3-c8l1HuN8bzA_lciCQXon6dbuu3ChIePodQ_nSPfa-CY7nA5ZD02gKy6DolAvMRg3WpH9YIR4ZYefEzG3woABafKzCX6iS03E9oIaKrUzxxltLh-HKy9U8KsVbIxN2tzJRB5kC21pxZvEf4VSmDkmwF6ckjUUtoHfGdPEBMs2zU_PkvSDPlGb" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&theme=dark&legend=top-left&sealed_token=Zs4QOC765auILr4Kt8LKyJ9F2B6_v7FVhAE93bGIGF_kDRms7WxmWT4bZxnJkk-Z8hthp7lXnR-hJxW_eYmEvEgzEtm7KnnOsgkO0zjLz9YvcSlnRuOte0TPYsYgJo0Brf12TkFJ0JGH-xejWEnBE0OZmJAP529da8ou3j5ASigsZ6L6PP2ISBIDa1IV" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=Zs4QOC765auILr4Kt8LKyJ9F2B6_v7FVhAE93bGIGF_kDRms7WxmWT4bZxnJkk-Z8hthp7lXnR-hJxW_eYmEvEgzEtm7KnnOsgkO0zjLz9YvcSlnRuOte0TPYsYgJo0Brf12TkFJ0JGH-xejWEnBE0OZmJAP529da8ou3j5ASigsZ6L6PP2ISBIDa1IV" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ibsgss/TcpQuality&type=date&legend=top-left&sealed_token=Zs4QOC765auILr4Kt8LKyJ9F2B6_v7FVhAE93bGIGF_kDRms7WxmWT4bZxnJkk-Z8hthp7lXnR-hJxW_eYmEvEgzEtm7KnnOsgkO0zjLz9YvcSlnRuOte0TPYsYgJo0Brf12TkFJ0JGH-xejWEnBE0OZmJAP529da8ou3j5ASigsZ6L6PP2ISBIDa1IV" />
  </picture>
 </a>
