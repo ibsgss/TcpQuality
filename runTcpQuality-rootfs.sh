@@ -24,6 +24,7 @@ ROOTFS_IBSGSS_BASE="${TCPQUALITY_ROOTFS_IBSGSS_BASE:-https://tcpquality.ibsgss.u
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
+NEXTTRACE_DOWNLOAD_TIMEOUT="${TCPQUALITY_NEXTTRACE_DOWNLOAD_TIMEOUT:-600}"
 DEBUG_MODE=0
 MIN_ROOTFS_FREE_KB=$((700 * 1024))
 
@@ -459,7 +460,9 @@ download_nexttrace_guest() {
   fi
 
   binary="$RUNTIME_DIR/$asset_name"
-  curl -fL --retry 3 --connect-timeout 15 --max-time 300 "$url" -o "$binary" ||
+  curl -fL --retry 3 --retry-all-errors --continue-at - \
+    --connect-timeout 15 --max-time "$NEXTTRACE_DOWNLOAD_TIMEOUT" \
+    "$url" -o "$binary" ||
     return 1
   if [ -n "$digest" ]; then
     verify_sha256 "$digest" "$binary" || return 1
@@ -904,10 +907,24 @@ install_guest_deps() {
 }
 
 prepare_guest_files() {
-  local nexttrace_path
+  local nexttrace_path arg
   mkdir -p "$ROOTFS_DIR/root" "$ROOTFS_DIR/usr/local/bin"
   cp "$TARGET_SCRIPT" "$ROOTFS_DIR/root/runTcpQuality.sh"
   chmod 0755 "$ROOTFS_DIR/root/runTcpQuality.sh"
+
+  for arg in "$@"; do
+    if [ "$arg" = "--only-speedtest" ]; then
+      echo "[i] 单线程测速无需 nexttrace-tiny，已跳过下载"
+      return 0
+    fi
+  done
+
+  if [ -x "$ROOTFS_DIR/usr/local/bin/nexttrace-tiny" ] &&
+     env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb \
+       chroot "$ROOTFS_DIR" /usr/local/bin/nexttrace-tiny -V >/dev/null 2>&1; then
+    echo "[√] 预构建 rootfs 已包含 nexttrace-tiny"
+    return 0
+  fi
 
   if download_nexttrace_guest; then
     return 0
@@ -935,7 +952,7 @@ case "$OUTPUT_DIR/" in
 esac
 mount_guest
 install_guest_deps || exit 1
-prepare_guest_files
+prepare_guest_files "$@"
 echo "[i] 进入临时 ${DISTRO} rootfs；退出后自动清理"
 if [ "$KEEP_ROOTFS" -eq 1 ]; then
   echo "[i] --keep 已启用，rootfs 保留于: $ROOTFS_DIR"
