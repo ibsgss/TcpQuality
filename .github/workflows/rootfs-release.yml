@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Immutable release tag, for example rootfs-v1
+        description: Immutable release tag, for example v1.00001
         required: true
-        default: rootfs-v1
+        default: v1.00001
 
 permissions:
   contents: write
@@ -93,6 +93,10 @@ jobs:
       - name: Generate manifest
         run: |
           set -Eeuo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v1\.[0-9]{5}$ ]]; then
+            echo "release_tag must match v1.00001, v1.00002, ..." >&2
+            exit 1
+          fi
           for arch in amd64 arm64; do
             file="dist/tcpquality-rootfs-${arch}.tar.gz"
             test -s "$file"
@@ -137,3 +141,28 @@ jobs:
             dist/tcpquality-rootfs-arm64.tar.gz \
             --title "TcpQuality rootfs $RELEASE_TAG" \
             --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
+
+      - name: Update v1.latest alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          git tag -f v1.latest "$GITHUB_SHA"
+          git push --force origin refs/tags/v1.latest
+          if gh release view v1.latest >/dev/null 2>&1; then
+            gh release upload v1.latest --clobber \
+              dist/tcpquality-rootfs-amd64.tar.gz \
+              dist/tcpquality-rootfs-arm64.tar.gz
+            gh release upload v1.latest --clobber dist/rootfs-manifest.json
+            gh release edit v1.latest \
+              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+          else
+            gh release create v1.latest \
+              dist/tcpquality-rootfs-amd64.tar.gz \
+              dist/tcpquality-rootfs-arm64.tar.gz \
+              dist/rootfs-manifest.json \
+              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+          fi
