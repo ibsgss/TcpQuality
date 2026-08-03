@@ -9,14 +9,6 @@ on:
       - .github/workflows/rootfs-release.yml
       - runTcpQuality-rootfs.sh
       - runTcpQuality.sh
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/actions/build-rootfs/action.yml
-      - .github/workflows/rootfs-ci.yml
-      - .github/workflows/rootfs-release.yml
-      - runTcpQuality-rootfs.sh
-      - runTcpQuality.sh
   workflow_dispatch:
 
 permissions:
