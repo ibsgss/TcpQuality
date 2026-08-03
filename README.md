@@ -50,7 +50,17 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--debug`：保留临时文件并输出调试信息。
 
 ## 依赖说明
-默认采用 Debian minimal rootfs + chroot，依赖组件会自动安装。
+
+默认采用预装依赖的 Debian `bookworm-slim` rootfs + chroot。rootfs 由 GitHub
+Actions 为 amd64/arm64 构建并发布到 GitHub Releases，同时由 ibsgss 镜像同步：
+
+- 从 GitHub Raw 入口运行时优先 GitHub Release，失败后回退 ibsgss。
+- 从 `tcpquality.ibsgss.uk` 入口运行时优先 ibsgss，失败后回退 GitHub Release。
+- 两个预构建来源都不可用时继续回退 Docker Hub OCI、本机 `debootstrap` 或 Docker。
+- 下载文件必须同时通过 manifest 中的文件大小和 SHA256 校验。
+
+可用 `TCPQUALITY_ROOTFS_SOURCE=github|ibsgss|docker` 强制来源；现有
+`TCPQUALITY_ROOTFS_URL` 和 `TCPQUALITY_ROOTFS_SHA256` 自定义下载方式保持最高优先级。
 
 ## Star History
 

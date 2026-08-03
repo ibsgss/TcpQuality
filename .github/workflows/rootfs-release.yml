@@ -1,0 +1,141 @@
+name: Build rootfs release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag, for example rootfs-v1
+        required: true
+        default: rootfs-v1
+  push:
+    tags:
+      - rootfs-v*
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build preinstalled Debian rootfs
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p build-context rootfs dist
+          cat > build-context/Dockerfile <<'EOF'
+          FROM debian:bookworm-slim
+          ARG TCPQUALITY_ROOTFS_RELEASE=rootfs-unknown
+          RUN export DEBIAN_FRONTEND=noninteractive \
+              && apt-get update -qq \
+              && apt-get install -y -qq --no-install-recommends \
+                bash ca-certificates coreutils curl dnsutils findutils gawk grep \
+                iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar \
+                traceroute tzdata \
+              && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+              && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
+          EOF
+          docker buildx build \
+            --platform "linux/${TARGET_ARCH}" \
+            --build-arg "TCPQUALITY_ROOTFS_RELEASE=${RELEASE_TAG}" \
+            --output type=local,dest=rootfs \
+            build-context
+          tar --numeric-owner --xattrs --acls \
+            -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
+
+      - name: Validate archive
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -Eeuo pipefail
+          archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz"
+          test -s "$archive"
+          tar -tzf "$archive" | grep -qx './etc/os-release'
+          tar -tzf "$archive" | grep -qx './etc/tcpquality-rootfs-release'
+          sha256sum "$archive"
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.arch }}
+          path: dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download rootfs artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rootfs-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate manifest
+        run: |
+          set -Eeuo pipefail
+          for arch in amd64 arm64; do
+            file="dist/tcpquality-rootfs-${arch}.tar.gz"
+            test -s "$file"
+            sha256sum "$file"
+          done
+          amd64_file=tcpquality-rootfs-amd64.tar.gz
+          arm64_file=tcpquality-rootfs-arm64.tar.gz
+          amd64_sha=$(sha256sum "dist/$amd64_file" | awk '{print $1}')
+          arm64_sha=$(sha256sum "dist/$arm64_file" | awk '{print $1}')
+          amd64_size=$(stat -c '%s' "dist/$amd64_file")
+          arm64_size=$(stat -c '%s' "dist/$arm64_file")
+          jq -n \
+            --arg version "$RELEASE_TAG" \
+            --arg amd64_file "$amd64_file" \
+            --arg amd64_sha "$amd64_sha" \
+            --argjson amd64_size "$amd64_size" \
+            --arg arm64_file "$arm64_file" \
+            --arg arm64_sha "$arm64_sha" \
+            --argjson arm64_size "$arm64_size" \
+            '{
+              version: $version,
+              architectures: {
+                amd64: {file: $amd64_file, sha256: $amd64_sha, size: $amd64_size},
+                arm64: {file: $arm64_file, sha256: $arm64_sha, size: $arm64_size}
+              }
+            }' > dist/rootfs-manifest.json
+          cat dist/rootfs-manifest.json
+
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; use a new immutable tag." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            dist/rootfs-manifest.json \
+            dist/tcpquality-rootfs-amd64.tar.gz \
+            dist/tcpquality-rootfs-arm64.tar.gz \
+            --title "TcpQuality rootfs $RELEASE_TAG" \
+            --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
