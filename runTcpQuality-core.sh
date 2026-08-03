@@ -301,6 +301,7 @@ PROGRESS_LAST_STATE=""
 PROGRESS_LAST_TS=0
 PROGRESS_MIN_INTERVAL=1
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
+ROUTE_ASN_API=${TCPQUALITY_ROUTE_ASN_API:-${REPORT_API%/generate}/route/asn?format=tsv}
 RANK_SESSION_API=${TCPQUALITY_RANK_SESSION_API:-${REPORT_API%/generate}/rank/session}
 RANK_SESSION_ID=""
 RANK_SESSION_TOKEN=""
@@ -1260,10 +1261,10 @@ show_education_results() {
   }
   function cell(status, loss, lat, label,   l, v, color) {
     if (label == "") label = title
-    if (status != "OK") return white sprintf("%11s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
+    if (status != "OK") return white sprintf("%14s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
     l = loss + 0
     v = lat + 0
-    return white sprintf("%11s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
+    return white sprintf("%14s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
   }
   {
     status = $1
@@ -1296,7 +1297,7 @@ show_education_combined() {
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     label_w = 10
-    route_w = 11
+    route_w = 18
     latency_w = 6
     loss_w = 6
     edu_cell_w = route_w + 1 + latency_w + 1 + loss_w
@@ -1884,9 +1885,35 @@ build_asn_map() {
       ip = $2
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", asn)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", ip)
-      if (asn ~ /^[0-9]+$/ && ip ~ /^[0-9A-Fa-f:.]+$/) print ip "|" asn
+      owner = $7
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", owner)
+      count = split(asn, values, /[[:space:]]+/)
+      asn = values[count]
+      if (asn ~ /^[0-9]+$/ && ip ~ /^[0-9A-Fa-f:.]+$/) print tolower(ip) "|" asn "|" owner
     }
   ' "$cymru_file" > "$map_file"
+}
+
+append_server_asn_meta() {
+  local ip_file="$1" map_file="$2" response_file
+  [ -s "$ip_file" ] || return 0
+  response_file=$(mktemp)
+  if curl -4 -fsSL --connect-timeout 5 --max-time 20 \
+      -X POST -H 'content-type: text/plain; charset=utf-8' \
+      --data-binary "@$ip_file" "$ROUTE_ASN_API" > "$response_file" 2>/dev/null; then
+    awk -F'\t' '
+      NR == 1 { next }
+      {
+        ip = tolower($1)
+        asn = $2
+        owner = $3
+        sub(/^[Aa][Ss]/, "", asn)
+        gsub(/[|\r\n]+/, " ", owner)
+        if (ip ~ /^[0-9A-Fa-f:.]+$/ && asn ~ /^[0-9]+$/) print ip "|" asn "|" owner
+      }
+    ' "$response_file" >> "$map_file"
+  fi
+  rm -f "$response_file"
 }
 
 route_label_from_ip_trace() {
@@ -2193,6 +2220,116 @@ route_label_from_ip_trace() {
     }
     END { print classify() }
   ' "$asn_map_file" "$trace_ip_file" "$trace_file"
+}
+
+education_route_label_from_ip_trace() {
+  local trace_file="$1" asn_map_file="$2" trace_ip_file="$3" family="$4"
+  local fallback label
+  fallback=$(route_label_from_ip_trace "$trace_file" "$asn_map_file" "$trace_ip_file" "教育网")
+  label=$(awk -F'|' -v family="$family" '
+    function infer_education_asn(ip) {
+      if (ip ~ /^59\.64\./ || ip ~ /^101\.4\./ || ip ~ /^101\.6\./ || ip ~ /^101\.76\./ || ip ~ /^111\.114\./ || ip ~ /^113\.54\./ || ip ~ /^115\.24\./ || ip ~ /^115\.156\./ || ip ~ /^183\.172\./ || ip ~ /^202\.38\.19/ || ip ~ /^202\.112\./ || ip ~ /^202\.113\./ || ip ~ /^202\.114\./ || ip ~ /^202\.115\./ || ip ~ /^202\.116\./ || ip ~ /^202\.117\./ || ip ~ /^202\.118\./ || ip ~ /^202\.119\./ || ip ~ /^202\.120\./ || ip ~ /^202\.194\./ || ip ~ /^202\.196\./ || ip ~ /^202\.197\./ || ip ~ /^202\.198\./ || ip ~ /^202\.200\./ || ip ~ /^202\.201\./ || ip ~ /^202\.202\./ || ip ~ /^202\.207\./ || ip ~ /^210\.2[6-9]\./ || ip ~ /^210\.3[0-9]\./ || ip ~ /^210\.4[0-7]\./ || ip ~ /^219\.22[4-9]\./ || ip ~ /^222\.(1[6-9]|2[0-3])\./ || ip ~ /^222\.19[2-9]\./ || ip ~ /^222\.20[0-7]\./) return "4538"
+      if (ip ~ /^2001:252:/) return "23911"
+      if (ip ~ /^2001:da8:/ || ip ~ /^2001:250:/ || ip ~ /^2402:f000:/) return "23910"
+      return ""
+    }
+    function is_education_asn(asn, owner, lower_owner) {
+      lower_owner = tolower(owner)
+      return asn == "4538" || asn == "23910" || asn == "23911" || asn == "24350" || lower_owner ~ /cernet/
+    }
+    function is_education_hop(asn, owner, ip) {
+      return is_education_asn(asn, owner) || infer_education_asn(ip) != ""
+    }
+    function is_hkix_ip(ip) {
+      return ip ~ /^123\.255\.(8[8-9]|9[0-5])\./ || ip ~ /^2001:7fa:/
+    }
+    function compact_owner(owner,   value, words, count, i, result, candidate) {
+      value = owner
+      sub(/[[:space:]]+-[[:space:]].*$/, "", value)
+      gsub(/,/, "", value)
+      gsub(/[[:space:]]+(Limited|Ltd\.?|Inc\.?|LLC|Corporation|Corp\.?|Company|Co\.?)$/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (length(value) <= 9) return value
+      count = split(value, words, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        candidate = result (result == "" ? "" : " ") words[i]
+        if (length(candidate) > 9) break
+        result = candidate
+      }
+      return result != "" ? result : substr(value, 1, 9)
+    }
+    function is_generic_owner_label(label, lower_label) {
+      lower_label = tolower(label)
+      return lower_label == "global" || lower_label == "network" || lower_label == "networks" || lower_label == "internet" || lower_label == "communications" || lower_label == "telecom"
+    }
+    function transit_label(asn, owner, ip,   lower_owner, label) {
+      if (is_hkix_ip(ip)) return "HKIX"
+      if (asn == "4134") return "163"
+      if (asn == "4837") return "4837"
+      if (asn == "23764") return "CTGGIA"
+      if (asn == "58807") return "CMIN2"
+      if (asn == "10099") return "10099"
+      if (asn == "9929") return "9929"
+      if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
+      lower_owner = tolower(owner)
+      if (lower_owner ~ /chinanet[- ]backbone/) return "163"
+      if (lower_owner ~ /china169[- ]backbone/) return "4837"
+      if (lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
+      if (lower_owner ~ /china telecom global|ctgnet|ctg[- ]/) return "CTGGIA"
+      if (lower_owner ~ /china mobile international|cmi-int/) return "CMI"
+      if (lower_owner ~ /global secure layer/) return "GSL"
+      if (lower_owner ~ /ntt/) return "NTT"
+      if (lower_owner ~ /arelion|twelve99|telia carrier/) return "Arelion"
+      if (lower_owner ~ /cogent/) return "Cogent"
+      if (lower_owner ~ /tata communications/) return "Tata"
+      label = compact_owner(owner)
+      if (is_generic_owner_label(label)) return asn != "" ? "AS" asn : ""
+      return label != "" ? label : (asn != "" ? "AS" asn : "")
+    }
+    FILENAME == ARGV[1] {
+      asn_by_ip[tolower($1)] = $2
+      owner_by_ip[tolower($1)] = $3
+      next
+    }
+    FILENAME == ARGV[2] {
+      ip = tolower($0)
+      if (seen[ip]++) next
+      hop++
+      ips[hop] = ip
+      asns[hop] = asn_by_ip[ip]
+      owners[hop] = owner_by_ip[ip]
+      if (asns[hop] == "") asns[hop] = infer_education_asn(ip)
+      next
+    }
+    END {
+      first_education = 0
+      for (h = 1; h <= hop; h++) {
+        if (is_education_hop(asns[h], owners[h], ips[h])) {
+          first_education = h
+          break
+        }
+      }
+      if (first_education == 0) exit
+      for (h = 1; h < first_education; h++) {
+        if (asns[h] == "10099") {
+          transit = "10099"
+          break
+        }
+      }
+      if (transit != "") {
+        print transit "->" (family == "6" ? "CERNET2" : "CERNET")
+        exit
+      }
+      for (h = first_education - 1; h >= 1; h--) {
+        if (is_education_hop(asns[h], owners[h], ips[h])) continue
+        transit = transit_label(asns[h], owners[h], ips[h])
+        if (transit != "") break
+      }
+      if (transit == "") transit = "Hidden"
+      print transit "->" (family == "6" ? "CERNET2" : "CERNET")
+    }
+  ' "$asn_map_file" "$trace_ip_file")
+  printf '%s' "${label:-$fallback}"
 }
 
 route_trace_one() {
@@ -2543,13 +2680,14 @@ collect_education_route_labels() {
   if [ -s "$ip_file" ]; then
     query_cymru_asn "$ip_file" "$cymru_file"
     build_asn_map "$cymru_file" "$asn_map_file"
+    append_server_asn_meta "$ip_file" "$asn_map_file"
   fi
 
   while IFS='|' read -r status prov isp protocol host value; do
     if [ "$status" = "TRACE" ] && [ -f "${RESULT_DIR}/${prefix}_trace_${value}" ]; then
       trace_ip_file="${RESULT_DIR}/${prefix}_trace_${value}.ips"
       extract_trace_ips "${RESULT_DIR}/${prefix}_trace_${value}" > "$trace_ip_file"
-      label=$(route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$isp")
+      label=$(education_route_label_from_ip_trace "${RESULT_DIR}/${prefix}_trace_${value}" "$asn_map_file" "$trace_ip_file" "$family")
       echo "OK|$prov|$isp|tcp|$host|$label" >> "$out_file"
     elif [ -n "$status" ]; then
       echo "$status|$prov|$isp|tcp|$host|${value:-Hidden}" >> "$out_file"
@@ -2743,7 +2881,10 @@ probe_target() {
     fi
   fi
   for ((i = 1; i <= PACKETS; i++)); do
-    if [ -n "$PACKET_SIZE_OVERRIDE" ]; then
+    if [ "$group" = "cdn4" ] || [ "$group" = "cdn6" ] ||
+       [ "$group" = "cernet" ] || [ "$group" = "cernet2" ]; then
+      packet_size="$header_size"
+    elif [ -n "$PACKET_SIZE_OVERRIDE" ]; then
       packet_size="$PACKET_SIZE_OVERRIDE"
     elif [ "$large_packet_mode" -eq 1 ]; then
       remaining=$((PACKETS - i + 1))
@@ -4825,7 +4966,6 @@ main() {
     test_cdn=0
     normal_cdn_enabled=0
     test_edu=1
-    INTERNATIONAL_ENABLED=0
   elif [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then
     test_edu=1
   fi

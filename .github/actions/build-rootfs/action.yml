@@ -1,0 +1,68 @@
+name: Build TcpQuality rootfs
+description: Build and validate one architecture of the TcpQuality Debian rootfs
+
+inputs:
+  arch:
+    description: Target architecture (amd64 or arm64)
+    required: true
+  release-marker:
+    description: Value written to /etc/tcpquality-rootfs-release
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build rootfs
+      shell: bash
+      env:
+        TARGET_ARCH: ${{ inputs.arch }}
+        RELEASE_MARKER: ${{ inputs.release-marker }}
+      run: |
+        set -Eeuo pipefail
+        rm -rf build-context rootfs dist
+        mkdir -p build-context rootfs dist
+        cat > build-context/Dockerfile <<'EOF'
+        FROM debian:bookworm-slim
+        ARG TCPQUALITY_ROOTFS_RELEASE=rootfs-unknown
+        RUN export DEBIAN_FRONTEND=noninteractive \
+            && apt-get update -qq \
+            && apt-get install -y -qq --no-install-recommends \
+              bash ca-certificates coreutils curl dnsutils findutils gawk grep \
+              iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar \
+              traceroute tzdata \
+            && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+            && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
+        EOF
+        docker buildx build \
+          --platform "linux/${TARGET_ARCH}" \
+          --build-arg "TCPQUALITY_ROOTFS_RELEASE=${RELEASE_MARKER}" \
+          --output type=local,dest=rootfs \
+          build-context
+        tar --numeric-owner --xattrs --acls \
+          -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
+
+    - name: Validate rootfs
+      shell: bash
+      env:
+        TARGET_ARCH: ${{ inputs.arch }}
+        RELEASE_MARKER: ${{ inputs.release-marker }}
+      run: |
+        set -Eeuo pipefail
+        archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz"
+        test -s "$archive"
+        tar -tzf "$archive" > /tmp/rootfs-files.txt
+        grep -qx './etc/os-release' /tmp/rootfs-files.txt
+        grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
+        test "$(cat rootfs/etc/tcpquality-rootfs-release)" = "$RELEASE_MARKER"
+        sudo chroot rootfs /bin/bash -lc '
+          set -Eeuo pipefail
+          for command_name in bash curl dig ip iptables nping ping sed tar traceroute; do
+            command -v "$command_name" >/dev/null
+          done
+          nping --version >/dev/null
+        '
+        (
+          cd dist
+          sha256sum "tcpquality-rootfs-${TARGET_ARCH}.tar.gz" \
+            | tee "tcpquality-rootfs-${TARGET_ARCH}.tar.gz.sha256"
+        )

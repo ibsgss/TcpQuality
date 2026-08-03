@@ -1,0 +1,136 @@
+name: Build rootfs release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag, for example v1.00001
+        required: true
+        default: v1.00001
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and validate rootfs
+        uses: ./.github/actions/build-rootfs
+        with:
+          arch: ${{ matrix.arch }}
+          release-marker: ${{ env.RELEASE_TAG }}
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.arch }}
+          path: dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download rootfs artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rootfs-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate manifest
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v1\.[0-9]{5}$ ]]; then
+            echo "release_tag must match v1.00001, v1.00002, ..." >&2
+            exit 1
+          fi
+          for arch in amd64 arm64; do
+            file="dist/tcpquality-rootfs-${arch}.tar.gz"
+            test -s "$file"
+            sha256sum "$file"
+          done
+          amd64_file=tcpquality-rootfs-amd64.tar.gz
+          arm64_file=tcpquality-rootfs-arm64.tar.gz
+          amd64_sha=$(sha256sum "dist/$amd64_file" | awk '{print $1}')
+          arm64_sha=$(sha256sum "dist/$arm64_file" | awk '{print $1}')
+          amd64_size=$(stat -c '%s' "dist/$amd64_file")
+          arm64_size=$(stat -c '%s' "dist/$arm64_file")
+          jq -n \
+            --arg version "$RELEASE_TAG" \
+            --arg amd64_file "$amd64_file" \
+            --arg amd64_sha "$amd64_sha" \
+            --argjson amd64_size "$amd64_size" \
+            --arg arm64_file "$arm64_file" \
+            --arg arm64_sha "$arm64_sha" \
+            --argjson arm64_size "$arm64_size" \
+            '{
+              version: $version,
+              architectures: {
+                amd64: {file: $amd64_file, sha256: $amd64_sha, size: $amd64_size},
+                arm64: {file: $arm64_file, sha256: $arm64_sha, size: $arm64_size}
+              }
+            }' > dist/rootfs-manifest.json
+          cat dist/rootfs-manifest.json
+
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; use a new immutable tag." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            dist/rootfs-manifest.json \
+            dist/tcpquality-rootfs-amd64.tar.gz \
+            dist/tcpquality-rootfs-arm64.tar.gz \
+            --title "TcpQuality rootfs $RELEASE_TAG" \
+            --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
+
+      - name: Update v1.latest alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          git tag -f v1.latest "$GITHUB_SHA"
+          git push --force origin refs/tags/v1.latest
+          if gh release view v1.latest >/dev/null 2>&1; then
+            gh release upload v1.latest --clobber \
+              dist/tcpquality-rootfs-amd64.tar.gz \
+              dist/tcpquality-rootfs-arm64.tar.gz
+            gh release upload v1.latest --clobber dist/rootfs-manifest.json
+            gh release edit v1.latest \
+              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+          else
+            gh release create v1.latest \
+              dist/tcpquality-rootfs-amd64.tar.gz \
+              dist/tcpquality-rootfs-arm64.tar.gz \
+              dist/rootfs-manifest.json \
+              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+          fi

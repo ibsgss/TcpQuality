@@ -16,6 +16,11 @@ ALLOW_SPEEDTEST=0
 ROOTFS_URL="${TCPQUALITY_ROOTFS_URL:-}"
 ROOTFS_SHA256="${TCPQUALITY_ROOTFS_SHA256:-}"
 DEBIAN_SUITE="${TCPQUALITY_DEBIAN_SUITE:-bookworm}"
+ROOTFS_RELEASE_TAG="${TCPQUALITY_ROOTFS_RELEASE_TAG:-v1.latest}"
+ROOTFS_SOURCE="${TCPQUALITY_ROOTFS_SOURCE:-}"
+ROOTFS_SOURCE_ORDER="${TCPQUALITY_ROOTFS_SOURCE_ORDER:-github ibsgss}"
+ROOTFS_GITHUB_REPOSITORY="${TCPQUALITY_ROOTFS_GITHUB_REPOSITORY:-ibsgss/TcpQuality}"
+ROOTFS_IBSGSS_BASE="${TCPQUALITY_ROOTFS_IBSGSS_BASE:-https://tcpquality.ibsgss.uk/rootfs/releases}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
@@ -34,6 +39,7 @@ usage() {
   --rootfs DIR            使用已有 rootfs，不下载、不删除
   --url URL               使用自定义 rootfs tar(.gz/.xz/.zst)
   --sha256 HEX            校验自定义 rootfs 下载文件
+  环境变量 TCPQUALITY_ROOTFS_SOURCE=github|ibsgss|docker 可强制下载源
   --output DIR            保存 CSV/调试压缩包，默认宿主机 /tmp
   --keep                  保留本次创建的临时 rootfs，便于调试
   --allow-speedtest       允许北京三段限速测速修改宿主 qdisc/ifb（高风险，默认禁止）
@@ -46,6 +52,7 @@ usage() {
 
 注意:
   --rootfs 指定的已有 rootfs 会安装依赖并更新 resolv.conf，不是只读使用。
+  Debian 默认按入口优先选择 GitHub Release 或 ibsgss 镜像，校验失败后自动回退。
 EOF
 }
 
@@ -117,9 +124,6 @@ configure_interactive_args() {
   if [ "$run_route" -eq 0 ]; then
     if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] && [ "$run_speedtest" -eq 0 ]; then
       die "未选择任何测试项目"
-    fi
-    if [ "$run_edu" -eq 1 ] && [ "$run_intl" -eq 1 ]; then
-      die "教育网回程与国际互联单独运行时请分两次执行，或启用三网回程后组合运行"
     fi
   fi
 
@@ -496,6 +500,104 @@ download_extract() {
   rm -f -- "$archive"
 }
 
+rootfs_source_base() {
+  case "$1" in
+    github)
+      printf 'https://github.com/%s/releases/download/%s\n' "$ROOTFS_GITHUB_REPOSITORY" "$ROOTFS_RELEASE_TAG"
+      ;;
+    ibsgss)
+      printf '%s/%s\n' "${ROOTFS_IBSGSS_BASE%/}" "$ROOTFS_RELEASE_TAG"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_rootfs_manifest() {
+  local manifest="$1" arch="$2"
+  awk -v wanted="$arch" '
+    $0 ~ "\\\"" wanted "\\\"[[:space:]]*:" { inside=1; next }
+    inside && /"file"[[:space:]]*:/ {
+      line=$0; sub(/^.*"file"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); file=line
+    }
+    inside && /"sha256"[[:space:]]*:/ {
+      line=$0; sub(/^.*"sha256"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); sha=line
+    }
+    inside && /"size"[[:space:]]*:/ {
+      line=$0; sub(/^.*"size"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9].*$/, "", line); size=line
+    }
+    inside && /^([[:space:]]*)}/ {
+      if (file != "" && sha ~ /^[0-9a-fA-F]{64}$/ && size ~ /^[0-9]+$/) print file "|" tolower(sha) "|" size
+      exit
+    }
+  ' "$manifest"
+}
+
+download_prebuilt_debian_from() {
+  local source="$1" base manifest archive metadata file checksum expected_size actual_size
+  base=$(rootfs_source_base "$source") || return 1
+  manifest="$TEMP_ROOT_PARENT/rootfs-manifest-${source}.json"
+  archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
+  echo "[i] 尝试 ${source} 预构建 rootfs: ${ROOTFS_RELEASE_TAG}"
+  curl -fsSL --retry 2 --connect-timeout 10 --max-time 45 \
+    "$base/rootfs-manifest.json" -o "$manifest" || return 1
+  metadata=$(parse_rootfs_manifest "$manifest" "$DEBIAN_ARCH") || return 1
+  [ -n "$metadata" ] || return 1
+  IFS='|' read -r file checksum expected_size <<< "$metadata"
+  case "$file" in
+    tcpquality-rootfs-*.tar.gz) ;;
+    *) return 1 ;;
+  esac
+  echo "[i] 下载 rootfs: $base/$file"
+  curl -fL --retry 3 --connect-timeout 15 --max-time 600 \
+    "$base/$file" -o "$archive" || return 1
+  actual_size=$(wc -c < "$archive" | tr -d ' ')
+  if [ "$actual_size" != "$expected_size" ]; then
+    echo "[!] ${source} rootfs 大小校验失败: expected=$expected_size actual=$actual_size" >&2
+    rm -f -- "$archive"
+    return 1
+  fi
+  if ! verify_sha256 "$checksum" "$archive"; then
+    echo "[!] ${source} rootfs SHA256 校验失败" >&2
+    rm -f -- "$archive"
+    return 1
+  fi
+  rm -rf -- "$ROOTFS_DIR"
+  mkdir -p "$ROOTFS_DIR"
+  if ! tar -xzf "$archive" -C "$ROOTFS_DIR"; then
+    rm -rf -- "$ROOTFS_DIR"
+    mkdir -p "$ROOTFS_DIR"
+    return 1
+  fi
+  rm -f -- "$archive"
+  [ -r "$ROOTFS_DIR/etc/os-release" ] || return 1
+  echo "[√] 已使用 ${source} 预构建 rootfs"
+}
+
+download_prebuilt_debian() {
+  local source order="$ROOTFS_SOURCE_ORDER"
+  case "$ROOTFS_SOURCE" in
+    "") ;;
+    github|ibsgss) order="$ROOTFS_SOURCE" ;;
+    docker) return 1 ;;
+    *) die "TCPQUALITY_ROOTFS_SOURCE 只能是 github、ibsgss 或 docker" ;;
+  esac
+  case "$DEBIAN_ARCH" in
+    amd64|arm64) ;;
+    *) return 1 ;;
+  esac
+  for source in $order; do
+    case "$source" in
+      github|ibsgss)
+        if download_prebuilt_debian_from "$source"; then
+          return 0
+        fi
+        echo "[!] ${source} 预构建 rootfs 不可用，尝试下一来源" >&2
+        ;;
+    esac
+  done
+  return 1
+}
+
 build_alpine() {
   local metadata index checksum latest url_path
   if [ -n "$ROOTFS_URL" ]; then
@@ -582,6 +684,10 @@ build_debian() {
     download_extract "$ROOTFS_URL" "$archive" "$ROOTFS_SHA256"
     return
   fi
+  if download_prebuilt_debian; then
+    return
+  fi
+  echo "[!] 预构建 rootfs 下载失败，回退官方 Debian OCI" >&2
   if download_debian_oci; then
     return
   fi
@@ -763,6 +869,12 @@ mount_guest() {
 
 install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
+    if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
+       env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
+         'for cmd in bash curl dig gawk ip iptables ping nping sed tar traceroute; do command -v "$cmd" >/dev/null || exit 1; done'; then
+      echo "[√] 预构建 rootfs 依赖已就绪"
+      return 0
+    fi
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
       'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \

@@ -22,6 +22,19 @@ case "$RAW_BASE" in
     ;;
 esac
 RAW_BASE="${RAW_BASE%/}"
+if [ -z "${TCPQUALITY_ROOTFS_SOURCE_ORDER:-}" ]; then
+  case "$RAW_BASE" in
+    *tcpquality.ibsgss.uk*)
+      export TCPQUALITY_ROOTFS_SOURCE_ORDER="ibsgss github"
+      ;;
+    *githubusercontent.com*|*github.com*)
+      export TCPQUALITY_ROOTFS_SOURCE_ORDER="github ibsgss"
+      ;;
+    *)
+      export TCPQUALITY_ROOTFS_SOURCE_ORDER="ibsgss github"
+      ;;
+  esac
+fi
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || printf '.')
 LOCAL_ROOTFS="$SCRIPT_DIR/runTcpQuality-rootfs.sh"
 LOCAL_CORE="$SCRIPT_DIR/runTcpQuality-core.sh"
