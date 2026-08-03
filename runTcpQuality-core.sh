@@ -2881,7 +2881,9 @@ probe_target() {
     fi
   fi
   for ((i = 1; i <= PACKETS; i++)); do
-    if [ -n "$PACKET_SIZE_OVERRIDE" ]; then
+    if [ "$group" = "cernet" ] || [ "$group" = "cernet2" ]; then
+      packet_size="$header_size"
+    elif [ -n "$PACKET_SIZE_OVERRIDE" ]; then
       packet_size="$PACKET_SIZE_OVERRIDE"
     elif [ "$large_packet_mode" -eq 1 ]; then
       remaining=$((PACKETS - i + 1))
