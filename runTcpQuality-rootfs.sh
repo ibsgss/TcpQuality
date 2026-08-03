@@ -526,7 +526,7 @@ parse_rootfs_manifest() {
       line=$0; sub(/^.*"size"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9].*$/, "", line); size=line
     }
     inside && /^([[:space:]]*)}/ {
-      if (file != "" && sha ~ /^[0-9a-fA-F]{64}$/ && size ~ /^[0-9]+$/) print file "|" tolower(sha) "|" size
+      if (file != "" && length(sha) == 64 && sha !~ /[^0-9a-fA-F]/ && size ~ /^[0-9]+$/) print file "|" tolower(sha) "|" size
       exit
     }
   ' "$manifest"
