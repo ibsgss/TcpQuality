@@ -2258,16 +2258,32 @@ education_route_label_from_ip_trace() {
       }
       return result != "" ? result : substr(value, 1, 9)
     }
+    function is_generic_owner_label(label, lower_label) {
+      lower_label = tolower(label)
+      return lower_label == "global" || lower_label == "network" || lower_label == "networks" || lower_label == "internet" || lower_label == "communications" || lower_label == "telecom"
+    }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
+      if (asn == "4134") return "163"
+      if (asn == "4837") return "4837"
+      if (asn == "23764") return "CTGGIA"
+      if (asn == "58807") return "CMIN2"
+      if (asn == "10099") return "10099"
+      if (asn == "9929") return "9929"
+      if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
       lower_owner = tolower(owner)
+      if (lower_owner ~ /chinanet[- ]backbone/) return "163"
+      if (lower_owner ~ /china169[- ]backbone/) return "4837"
+      if (lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
       if (lower_owner ~ /china telecom global|ctgnet|ctg[- ]/) return "CTGGIA"
       if (lower_owner ~ /china mobile international|cmi-int/) return "CMI"
+      if (lower_owner ~ /global secure layer/) return "GSL"
       if (lower_owner ~ /ntt/) return "NTT"
       if (lower_owner ~ /arelion|twelve99|telia carrier/) return "Arelion"
       if (lower_owner ~ /cogent/) return "Cogent"
       if (lower_owner ~ /tata communications/) return "Tata"
       label = compact_owner(owner)
+      if (is_generic_owner_label(label)) return asn != "" ? "AS" asn : ""
       return label != "" ? label : (asn != "" ? "AS" asn : "")
     }
     FILENAME == ARGV[1] {
