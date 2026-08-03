@@ -68,8 +68,9 @@ jobs:
           set -Eeuo pipefail
           archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz"
           test -s "$archive"
-          tar -tzf "$archive" | grep -qx './etc/os-release'
-          tar -tzf "$archive" | grep -qx './etc/tcpquality-rootfs-release'
+          tar -tzf "$archive" > /tmp/rootfs-files.txt
+          grep -qx './etc/os-release' /tmp/rootfs-files.txt
+          grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
           sha256sum "$archive"
 
       - name: Upload architecture artifact
