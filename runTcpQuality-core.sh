@@ -2310,6 +2310,16 @@ education_route_label_from_ip_trace() {
         }
       }
       if (first_education == 0) exit
+      for (h = 1; h < first_education; h++) {
+        if (asns[h] == "10099") {
+          transit = "10099"
+          break
+        }
+      }
+      if (transit != "") {
+        print transit "->" (family == "6" ? "CERNET2" : "CERNET")
+        exit
+      }
       for (h = first_education - 1; h >= 1; h--) {
         if (is_education_hop(asns[h], owners[h], ips[h])) continue
         transit = transit_label(asns[h], owners[h], ips[h])
