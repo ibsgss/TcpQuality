@@ -2881,7 +2881,8 @@ probe_target() {
     fi
   fi
   for ((i = 1; i <= PACKETS; i++)); do
-    if [ "$group" = "cernet" ] || [ "$group" = "cernet2" ]; then
+    if [ "$group" = "cdn4" ] || [ "$group" = "cdn6" ] ||
+       [ "$group" = "cernet" ] || [ "$group" = "cernet2" ]; then
       packet_size="$header_size"
     elif [ -n "$PACKET_SIZE_OVERRIDE" ]; then
       packet_size="$PACKET_SIZE_OVERRIDE"
