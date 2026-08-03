@@ -49,22 +49,6 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
-## 依赖说明
-
-默认采用预装依赖的 Debian `bookworm-slim` rootfs + chroot。rootfs 由 GitHub
-Actions 为 amd64/arm64 构建并发布到 GitHub Releases，同时由 ibsgss 镜像同步：
-
-- `v1.00001`、`v1.00002` 等五位版本号是不可变历史版本。
-- `v1.latest` 始终同步最新版本，脚本默认使用该稳定地址，无需随发布修改。
-
-- 从 GitHub Raw 入口运行时优先 GitHub Release，失败后回退 ibsgss。
-- 从 `tcpquality.ibsgss.uk` 入口运行时优先 ibsgss，失败后回退 GitHub Release。
-- 两个预构建来源都不可用时继续回退 Docker Hub OCI、本机 `debootstrap` 或 Docker。
-- 下载文件必须同时通过 manifest 中的文件大小和 SHA256 校验。
-
-可用 `TCPQUALITY_ROOTFS_SOURCE=github|ibsgss|docker` 强制来源；现有
-`TCPQUALITY_ROOTFS_URL` 和 `TCPQUALITY_ROOTFS_SHA256` 自定义下载方式保持最高优先级。
-
 ## Star History
 
 <a href="https://www.star-history.com/?repos=ibsgss%2FTcpQuality&type=date&legend=top-left">
