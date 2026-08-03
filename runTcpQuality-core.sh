@@ -4825,7 +4825,6 @@ main() {
     test_cdn=0
     normal_cdn_enabled=0
     test_edu=1
-    INTERNATIONAL_ENABLED=0
   elif [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ]; then
     test_edu=1
   fi

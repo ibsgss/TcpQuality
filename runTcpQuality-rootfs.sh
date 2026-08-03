@@ -118,9 +118,6 @@ configure_interactive_args() {
     if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] && [ "$run_speedtest" -eq 0 ]; then
       die "未选择任何测试项目"
     fi
-    if [ "$run_edu" -eq 1 ] && [ "$run_intl" -eq 1 ]; then
-      die "教育网回程与国际互联单独运行时请分两次执行，或启用三网回程后组合运行"
-    fi
   fi
 
   INTERACTIVE_INCLUDE_DEFAULT_ROUTE="$run_route"
