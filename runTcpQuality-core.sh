@@ -1297,7 +1297,7 @@ show_education_combined() {
   awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     label_w = 10
-    route_w = 14
+    route_w = 18
     latency_w = 6
     loss_w = 6
     edu_cell_w = route_w + 1 + latency_w + 1 + loss_w
@@ -2249,14 +2249,14 @@ education_route_label_from_ip_trace() {
       gsub(/,/, "", value)
       gsub(/[[:space:]]+(Limited|Ltd\.?|Inc\.?|LLC|Corporation|Corp\.?|Company|Co\.?)$/, "", value)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      if (length(value) <= 12) return value
+      if (length(value) <= 9) return value
       count = split(value, words, /[[:space:]]+/)
       for (i = 1; i <= count; i++) {
         candidate = result (result == "" ? "" : " ") words[i]
-        if (length(candidate) > 12) break
+        if (length(candidate) > 9) break
         result = candidate
       }
-      return result != "" ? result : substr(value, 1, 12)
+      return result != "" ? result : substr(value, 1, 9)
     }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
