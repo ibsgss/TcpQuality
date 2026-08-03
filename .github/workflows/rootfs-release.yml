@@ -51,6 +51,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
       - name: Download rootfs artifacts
         uses: actions/download-artifact@v4
         with:
@@ -107,7 +110,7 @@ jobs:
             dist/rootfs-manifest.json \
             dist/tcpquality-rootfs-amd64.tar.gz \
             dist/tcpquality-rootfs-arm64.tar.gz \
-            --title "TcpQuality rootfs $RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
             --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
 
       - name: Update v1.latest alias
@@ -124,13 +127,13 @@ jobs:
               dist/tcpquality-rootfs-arm64.tar.gz
             gh release upload v1.latest --clobber dist/rootfs-manifest.json
             gh release edit v1.latest \
-              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --title "v1.latest" \
               --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
           else
             gh release create v1.latest \
               dist/tcpquality-rootfs-amd64.tar.gz \
               dist/tcpquality-rootfs-arm64.tar.gz \
               dist/rootfs-manifest.json \
-              --title "TcpQuality rootfs latest ($RELEASE_TAG)" \
+              --title "v1.latest" \
               --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
           fi
