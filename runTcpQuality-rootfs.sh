@@ -515,7 +515,7 @@ rootfs_source_base() {
 parse_rootfs_manifest() {
   local manifest="$1" arch="$2"
   awk -v wanted="$arch" '
-    $0 ~ "\\\"" wanted "\\\"[[:space:]]*:" { inside=1; next }
+    $0 ~ ("\"" wanted "\"[[:space:]]*:") { inside=1; next }
     inside && /"file"[[:space:]]*:/ {
       line=$0; sub(/^.*"file"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); file=line
     }
