@@ -7,15 +7,12 @@ on:
         description: Immutable release tag, for example rootfs-v1
         required: true
         default: rootfs-v1
-  push:
-    tags:
-      - rootfs-v*
 
 permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
 
 jobs:
   build:
