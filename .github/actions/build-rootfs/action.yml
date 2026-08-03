@@ -17,6 +17,7 @@ runs:
       env:
         TARGET_ARCH: ${{ inputs.arch }}
         RELEASE_MARKER: ${{ inputs.release-marker }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -Eeuo pipefail
         rm -rf build-context rootfs dist
@@ -38,6 +39,24 @@ runs:
           --build-arg "TCPQUALITY_ROOTFS_RELEASE=${RELEASE_MARKER}" \
           --output type=local,dest=rootfs \
           build-context
+        nexttrace_asset="nexttrace-tiny_linux_${TARGET_ARCH}"
+        nexttrace_api="https://api.github.com/repos/nxtrace/NTrace-core/releases/latest"
+        nexttrace_json=$(curl -fsSL --retry 3 \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "$nexttrace_api")
+        nexttrace_tag=$(jq -er '.tag_name' <<<"$nexttrace_json")
+        nexttrace_url=$(jq -er --arg name "$nexttrace_asset" \
+          '.assets[] | select(.name == $name) | .browser_download_url' <<<"$nexttrace_json")
+        nexttrace_digest=$(jq -er --arg name "$nexttrace_asset" \
+          '.assets[] | select(.name == $name) | .digest' <<<"$nexttrace_json")
+        [[ "$nexttrace_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+        curl -fL --retry 3 --retry-all-errors \
+          --connect-timeout 15 --max-time 600 \
+          "$nexttrace_url" -o "$nexttrace_asset"
+        printf '%s  %s\n' "${nexttrace_digest#sha256:}" "$nexttrace_asset" | sha256sum -c -
+        install -m 0755 "$nexttrace_asset" rootfs/usr/local/bin/nexttrace-tiny
+        printf '%s\n' "$nexttrace_tag" > rootfs/etc/tcpquality-nexttrace-release
         tar --numeric-owner --xattrs --acls \
           -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
 
@@ -53,6 +72,8 @@ runs:
         tar -tzf "$archive" > /tmp/rootfs-files.txt
         grep -qx './etc/os-release' /tmp/rootfs-files.txt
         grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
+        grep -qx './etc/tcpquality-nexttrace-release' /tmp/rootfs-files.txt
+        grep -qx './usr/local/bin/nexttrace-tiny' /tmp/rootfs-files.txt
         test "$(cat rootfs/etc/tcpquality-rootfs-release)" = "$RELEASE_MARKER"
         sudo chroot rootfs /bin/bash -lc '
           set -Eeuo pipefail
@@ -60,6 +81,7 @@ runs:
             command -v "$command_name" >/dev/null
           done
           nping --version >/dev/null
+          nexttrace-tiny -V >/dev/null
         '
         (
           cd dist
