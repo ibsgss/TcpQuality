@@ -1,0 +1,66 @@
+name: Test rootfs artifacts
+
+on:
+  push:
+    branches: [v1beta]
+    paths:
+      - .github/actions/build-rootfs/action.yml
+      - .github/workflows/rootfs-ci.yml
+      - .github/workflows/rootfs-release.yml
+      - runTcpQuality-rootfs.sh
+      - runTcpQuality.sh
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/actions/build-rootfs/action.yml
+      - .github/workflows/rootfs-ci.yml
+      - .github/workflows/rootfs-release.yml
+      - runTcpQuality-rootfs.sh
+      - runTcpQuality.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rootfs-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: Validate shell scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Validate Bash syntax
+        run: bash -n runTcpQuality.sh runTcpQuality-rootfs.sh
+
+  build:
+    name: Build test artifact (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and validate rootfs
+        uses: ./.github/actions/build-rootfs
+        with:
+          arch: ${{ matrix.arch }}
+          release-marker: ci-${{ github.sha }}
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.arch }}
+          path: |
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7

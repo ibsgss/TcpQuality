@@ -32,43 +32,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build preinstalled Debian rootfs
-        env:
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          set -Eeuo pipefail
-          mkdir -p build-context rootfs dist
-          cat > build-context/Dockerfile <<'EOF'
-          FROM debian:bookworm-slim
-          ARG TCPQUALITY_ROOTFS_RELEASE=rootfs-unknown
-          RUN export DEBIAN_FRONTEND=noninteractive \
-              && apt-get update -qq \
-              && apt-get install -y -qq --no-install-recommends \
-                bash ca-certificates coreutils curl dnsutils findutils gawk grep \
-                iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar \
-                traceroute tzdata \
-              && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-              && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
-          EOF
-          docker buildx build \
-            --platform "linux/${TARGET_ARCH}" \
-            --build-arg "TCPQUALITY_ROOTFS_RELEASE=${RELEASE_TAG}" \
-            --output type=local,dest=rootfs \
-            build-context
-          tar --numeric-owner --xattrs --acls \
-            -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
-
-      - name: Validate archive
-        env:
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          set -Eeuo pipefail
-          archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz"
-          test -s "$archive"
-          tar -tzf "$archive" > /tmp/rootfs-files.txt
-          grep -qx './etc/os-release' /tmp/rootfs-files.txt
-          grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
-          sha256sum "$archive"
+      - name: Build and validate rootfs
+        uses: ./.github/actions/build-rootfs
+        with:
+          arch: ${{ matrix.arch }}
+          release-marker: ${{ env.RELEASE_TAG }}
 
       - name: Upload architecture artifact
         uses: actions/upload-artifact@v4
