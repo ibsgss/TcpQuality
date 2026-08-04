@@ -2345,7 +2345,14 @@ education_route_label_from_ip_trace() {
         if (is_hkix_ip(ips[h]) && first_hkix == 0) first_hkix = h
         candidate = transit_label(asns[h], owners[h], ips[h])
         if (is_international_label(candidate)) {
-          international = candidate
+          if (candidate == "CMIN2") {
+            seen_cmin2 = 1
+            international = candidate
+          } else if (candidate == "CMI" && seen_cmin2) {
+            international = "CMIN2->CMI"
+          } else {
+            international = candidate
+          }
           last_international = h
         }
       }
@@ -2371,7 +2378,7 @@ education_route_label_from_ip_trace() {
             break
           }
         }
-        print (first_domestic != "" ? international "->" first_domestic : international)
+        print (first_domestic != "" && international !~ /->/ ? international "->" first_domestic : international)
         exit
       }
       for (h = first_education - 1; h >= 1; h--) {
