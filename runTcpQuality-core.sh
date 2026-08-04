@@ -1241,6 +1241,11 @@ show_large_packet_results() {
 show_education_results() {
   local title="$1" file="$2"
   awk -F'|' -v title="$title" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    route_w = 14
+    latency_w = 6
+    loss_w = 6
+  }
   function compact_loss(v) {
     return int(v + 0.5)
   }
@@ -1261,10 +1266,10 @@ show_education_results() {
   }
   function cell(status, loss, lat, label,   l, v, color) {
     if (label == "") label = title
-    if (status != "OK") return white sprintf("%14s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
+    if (status != "OK") return white sprintf("%" route_w "s", label) nc " " red sprintf("%" latency_w "s", "failed") nc " " red sprintf("%" loss_w "s", "failed") nc
     l = loss + 0
     v = lat + 0
-    return white sprintf("%14s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
+    return white sprintf("%" route_w "s", label) nc " " latency_color(v, l) sprintf("%" latency_w "s", latency_text(v, l)) nc " " loss_color(l) sprintf("%" loss_w "s", compact_loss(loss) "%") nc
   }
   {
     status = $1
@@ -2233,6 +2238,21 @@ education_route_label_from_ip_trace() {
       if (ip ~ /^2001:da8:/ || ip ~ /^2001:250:/ || ip ~ /^2402:f000:/) return "23910"
       return ""
     }
+    function infer_route_asn(ip,   asn) {
+      asn = infer_education_asn(ip)
+      if (asn != "") return asn
+      if (ip ~ /^59\.43\./) return "4809"
+      if (ip ~ /^203\.22\.182\./ || ip ~ /^203\.22\.(178|179)\./ || ip ~ /^203\.128\.224\./ || ip ~ /^69\.194\./ || ip ~ /^2400:9380:/) return "23764"
+      if (ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./ || ip ~ /^240e:/) return "4134"
+      if (ip ~ /^219\.158\./ || (ip ~ /^2408:/ && ip !~ /^2408:8120:/)) return "4837"
+      if (ip ~ /^223\.120\./ || ip ~ /^223\.119\./) return "58453"
+      if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./ || ip ~ /^2409:8080:/) return "9808"
+      if (ip ~ /^2402:4f00:f000:/) return "58807"
+      if (ip ~ /^2401:3cc0:/) return "7578"
+      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./ || ip ~ /^2401:8a00:/) return "10099"
+      if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./ || ip ~ /^2408:8120:/) return "9929"
+      return ""
+    }
     function is_education_asn(asn, owner, lower_owner) {
       lower_owner = tolower(owner)
       return asn == "4538" || asn == "23910" || asn == "23911" || asn == "24350" || lower_owner ~ /cernet/
@@ -2242,6 +2262,9 @@ education_route_label_from_ip_trace() {
     }
     function is_hkix_ip(ip) {
       return ip ~ /^123\.255\.(8[8-9]|9[0-5])\./ || ip ~ /^2001:7fa:/
+    }
+    function is_he_exchange_ip(ip) {
+      return ip == "2001:504:13::210:122"
     }
     function is_ctggia_ip(ip) {
       return ip ~ /^59\.43\./
@@ -2271,6 +2294,7 @@ education_route_label_from_ip_trace() {
     }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
+      if (is_he_exchange_ip(ip)) return "HE"
       if (is_ctggia_hop(asn, owner, ip)) return "CTGGIA"
       if (asn == "4134") return "163"
       if (asn == "4837") return "4837"
@@ -2278,6 +2302,7 @@ education_route_label_from_ip_trace() {
       if (asn == "10099") return "10099"
       if (asn == "9929") return "9929"
       if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
+      if (asn == "7578" || asn == "137409") return "GSL"
       lower_owner = tolower(owner)
       if (lower_owner ~ /chinanet[- ]backbone/) return "163"
       if (lower_owner ~ /china169[- ]backbone/) return "4837"
@@ -2295,9 +2320,9 @@ education_route_label_from_ip_trace() {
     }
     function domestic_label(asn, owner, ip,   lower_owner) {
       lower_owner = tolower(owner)
-      if (asn == "4134" || lower_owner ~ /chinanet[- ]backbone/) return "163"
-      if (asn == "4837" || lower_owner ~ /china169[- ]backbone/) return "4837"
-      if (asn == "9929" || lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
+      if (asn == "4134" || ip ~ /^202\.97\./ || ip ~ /^202\.96\./ || ip ~ /^219\.141\./ || ip ~ /^219\.142\./ || ip ~ /^106\.37\./ || ip ~ /^240e:/ || lower_owner ~ /chinanet[- ]backbone/) return "163"
+      if (asn == "9929" || ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./ || ip ~ /^2408:8120:/ || lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
+      if (asn == "4837" || ip ~ /^219\.158\./ || (ip ~ /^2408:/ && ip !~ /^2408:8120:/) || lower_owner ~ /china169[- ]backbone/) return "4837"
       return ""
     }
     function is_international_label(label) {
@@ -2315,7 +2340,7 @@ education_route_label_from_ip_trace() {
       ips[hop] = ip
       asns[hop] = asn_by_ip[ip]
       owners[hop] = owner_by_ip[ip]
-      if (asns[hop] == "") asns[hop] = infer_education_asn(ip)
+      if (asns[hop] == "") asns[hop] = infer_route_asn(ip)
       next
     }
     END {
@@ -2328,9 +2353,20 @@ education_route_label_from_ip_trace() {
       }
       if (first_education == 0) exit
       for (h = 1; h < first_education; h++) {
-        if (asns[h] == "10099") last_10099 = h
         if (is_hkix_ip(ips[h]) && first_hkix == 0) first_hkix = h
-        if (is_ctggia_hop(asns[h], owners[h], ips[h])) last_ctggia = h
+        candidate = transit_label(asns[h], owners[h], ips[h])
+        if (is_international_label(candidate)) {
+          if (first_international == "") first_international = candidate
+          if (candidate == "CMIN2") {
+            seen_cmin2 = 1
+            international = candidate
+          } else if (candidate == "CMI" && seen_cmin2) {
+            international = "CMIN2->CMI"
+          } else {
+            international = candidate
+          }
+          last_international = h
+        }
       }
       if (first_hkix > 0) {
         for (h = first_hkix - 1; h >= 1; h--) {
@@ -2346,14 +2382,23 @@ education_route_label_from_ip_trace() {
         print (upstream != "" ? upstream "->HKIX" : "HKIX")
         exit
       }
-      if (last_10099 > 0 || last_ctggia > 0) {
-        transit = last_10099 > 0 ? "10099" : "CTGGIA"
-        start_hop = last_10099 > 0 ? last_10099 : last_ctggia
-        for (h = start_hop + 1; h < first_education; h++) {
+      if (last_international > 0) {
+        for (h = last_international + 1; h < first_education; h++) {
           domestic = domestic_label(asns[h], owners[h], ips[h])
-          if (domestic != "") last_domestic = domestic
+          if (domestic != "") {
+            first_domestic = domestic
+            break
+          }
         }
-        print (last_domestic != "" ? transit "->" last_domestic : transit)
+        if (first_domestic != "") {
+          print (international !~ /->/ ? international "->" first_domestic : international)
+        } else if (international ~ /->/) {
+          print international
+        } else if (first_international != "" && first_international != international) {
+          print first_international "->" international
+        } else {
+          print international
+        }
         exit
       }
       for (h = first_education - 1; h >= 1; h--) {
