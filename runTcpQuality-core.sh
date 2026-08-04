@@ -2243,6 +2243,9 @@ education_route_label_from_ip_trace() {
     function is_hkix_ip(ip) {
       return ip ~ /^123\.255\.(8[8-9]|9[0-5])\./ || ip ~ /^2001:7fa:/
     }
+    function is_ctggia_ip(ip) {
+      return ip ~ /^59\.43\./
+    }
     function compact_owner(owner,   value, words, count, i, result, candidate) {
       value = owner
       sub(/[[:space:]]+-[[:space:]].*$/, "", value)
@@ -2264,6 +2267,7 @@ education_route_label_from_ip_trace() {
     }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
+      if (is_ctggia_ip(ip)) return "CTGGIA"
       if (asn == "4134") return "163"
       if (asn == "4837") return "4837"
       if (asn == "23764") return "CTGGIA"
@@ -2315,7 +2319,9 @@ education_route_label_from_ip_trace() {
           transit = "10099"
           break
         }
+        if (is_hkix_ip(ips[h])) has_hkix = 1
       }
+      if (transit == "" && has_hkix) transit = "HKIX"
       if (transit != "") {
         print transit "->" (family == "6" ? "CERNET2" : "CERNET")
         exit
