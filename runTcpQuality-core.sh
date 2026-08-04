@@ -1241,6 +1241,11 @@ show_large_packet_results() {
 show_education_results() {
   local title="$1" file="$2"
   awk -F'|' -v title="$title" -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    route_w = 14
+    latency_w = 6
+    loss_w = 6
+  }
   function compact_loss(v) {
     return int(v + 0.5)
   }
@@ -1261,10 +1266,10 @@ show_education_results() {
   }
   function cell(status, loss, lat, label,   l, v, color) {
     if (label == "") label = title
-    if (status != "OK") return white sprintf("%14s", label) nc " " red sprintf("%6s", "failed") nc " " red sprintf("%6s", "failed") nc
+    if (status != "OK") return white sprintf("%" route_w "s", label) nc " " red sprintf("%" latency_w "s", "failed") nc " " red sprintf("%" loss_w "s", "failed") nc
     l = loss + 0
     v = lat + 0
-    return white sprintf("%14s", label) nc " " latency_color(v, l) latency_text(v, l) nc " " loss_color(l) sprintf("%6s", compact_loss(loss) "%") nc
+    return white sprintf("%" route_w "s", label) nc " " latency_color(v, l) sprintf("%" latency_w "s", latency_text(v, l)) nc " " loss_color(l) sprintf("%" loss_w "s", compact_loss(loss) "%") nc
   }
   {
     status = $1
