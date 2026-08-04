@@ -2248,6 +2248,7 @@ education_route_label_from_ip_trace() {
       if (ip ~ /^223\.120\./ || ip ~ /^223\.119\./) return "58453"
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./ || ip ~ /^2409:8080:/) return "9808"
       if (ip ~ /^2402:4f00:f000:/) return "58807"
+      if (ip ~ /^2401:3cc0:/) return "7578"
       if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./ || ip ~ /^2401:8a00:/) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./ || ip ~ /^2408:8120:/) return "9929"
       return ""
@@ -2261,6 +2262,9 @@ education_route_label_from_ip_trace() {
     }
     function is_hkix_ip(ip) {
       return ip ~ /^123\.255\.(8[8-9]|9[0-5])\./ || ip ~ /^2001:7fa:/
+    }
+    function is_he_exchange_ip(ip) {
+      return ip == "2001:504:13::210:122"
     }
     function is_ctggia_ip(ip) {
       return ip ~ /^59\.43\./
@@ -2290,6 +2294,7 @@ education_route_label_from_ip_trace() {
     }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
+      if (is_he_exchange_ip(ip)) return "HE"
       if (is_ctggia_hop(asn, owner, ip)) return "CTGGIA"
       if (asn == "4134") return "163"
       if (asn == "4837") return "4837"
@@ -2297,6 +2302,7 @@ education_route_label_from_ip_trace() {
       if (asn == "10099") return "10099"
       if (asn == "9929") return "9929"
       if (asn == "58453" || asn == "9808" || asn ~ /^5604[0-8]$/) return "CMI"
+      if (asn == "7578" || asn == "137409") return "GSL"
       lower_owner = tolower(owner)
       if (lower_owner ~ /chinanet[- ]backbone/) return "163"
       if (lower_owner ~ /china169[- ]backbone/) return "4837"
@@ -2350,6 +2356,7 @@ education_route_label_from_ip_trace() {
         if (is_hkix_ip(ips[h]) && first_hkix == 0) first_hkix = h
         candidate = transit_label(asns[h], owners[h], ips[h])
         if (is_international_label(candidate)) {
+          if (first_international == "") first_international = candidate
           if (candidate == "CMIN2") {
             seen_cmin2 = 1
             international = candidate
@@ -2383,7 +2390,15 @@ education_route_label_from_ip_trace() {
             break
           }
         }
-        print (first_domestic != "" && international !~ /->/ ? international "->" first_domestic : international)
+        if (first_domestic != "") {
+          print (international !~ /->/ ? international "->" first_domestic : international)
+        } else if (international ~ /->/) {
+          print international
+        } else if (first_international != "" && first_international != international) {
+          print first_international "->" international
+        } else {
+          print international
+        }
         exit
       }
       for (h = first_education - 1; h >= 1; h--) {
