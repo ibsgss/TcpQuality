@@ -2246,6 +2246,10 @@ education_route_label_from_ip_trace() {
     function is_ctggia_ip(ip) {
       return ip ~ /^59\.43\./
     }
+    function is_ctggia_hop(asn, owner, ip, lower_owner) {
+      lower_owner = tolower(owner)
+      return asn == "23764" || is_ctggia_ip(ip) || lower_owner ~ /china telecom global|ctgnet|ctg[- ]/
+    }
     function compact_owner(owner,   value, words, count, i, result, candidate) {
       value = owner
       sub(/[[:space:]]+-[[:space:]].*$/, "", value)
@@ -2267,10 +2271,9 @@ education_route_label_from_ip_trace() {
     }
     function transit_label(asn, owner, ip,   lower_owner, label) {
       if (is_hkix_ip(ip)) return "HKIX"
-      if (is_ctggia_ip(ip)) return "CTGGIA"
+      if (is_ctggia_hop(asn, owner, ip)) return "CTGGIA"
       if (asn == "4134") return "163"
       if (asn == "4837") return "4837"
-      if (asn == "23764") return "CTGGIA"
       if (asn == "58807") return "CMIN2"
       if (asn == "10099") return "10099"
       if (asn == "9929") return "9929"
@@ -2279,7 +2282,6 @@ education_route_label_from_ip_trace() {
       if (lower_owner ~ /chinanet[- ]backbone/) return "163"
       if (lower_owner ~ /china169[- ]backbone/) return "4837"
       if (lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
-      if (lower_owner ~ /china telecom global|ctgnet|ctg[- ]/) return "CTGGIA"
       if (lower_owner ~ /china mobile international|cmi-int/) return "CMI"
       if (lower_owner ~ /global secure layer/) return "GSL"
       if (lower_owner ~ /ntt/) return "NTT"
@@ -2320,8 +2322,10 @@ education_route_label_from_ip_trace() {
           break
         }
         if (is_hkix_ip(ips[h])) has_hkix = 1
+        if (is_ctggia_hop(asns[h], owners[h], ips[h])) has_ctggia = 1
       }
       if (transit == "" && has_hkix) transit = "HKIX"
+      if (transit == "" && has_ctggia) transit = "CTGGIA"
       if (transit != "") {
         print transit "->" (family == "6" ? "CERNET2" : "CERNET")
         exit
