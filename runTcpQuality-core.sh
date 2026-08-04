@@ -2284,6 +2284,7 @@ education_route_label_from_ip_trace() {
       if (lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
       if (lower_owner ~ /china mobile international|cmi-int/) return "CMI"
       if (lower_owner ~ /global secure layer/) return "GSL"
+      if (asn == "6939" || lower_owner ~ /hurricane electric/) return "HE"
       if (lower_owner ~ /ntt/) return "NTT"
       if (lower_owner ~ /arelion|twelve99|telia carrier/) return "Arelion"
       if (lower_owner ~ /cogent/) return "Cogent"
@@ -2291,6 +2292,16 @@ education_route_label_from_ip_trace() {
       label = compact_owner(owner)
       if (is_generic_owner_label(label)) return asn != "" ? "AS" asn : ""
       return label != "" ? label : (asn != "" ? "AS" asn : "")
+    }
+    function domestic_label(asn, owner, ip,   lower_owner) {
+      lower_owner = tolower(owner)
+      if (asn == "4134" || lower_owner ~ /chinanet[- ]backbone/) return "163"
+      if (asn == "4837" || lower_owner ~ /china169[- ]backbone/) return "4837"
+      if (asn == "9929" || lower_owner ~ /china unicom industrial internet|cuii/) return "9929"
+      return ""
+    }
+    function is_international_label(label) {
+      return label == "CTGGIA" || label == "10099" || label == "CMI" || label == "CMIN2" || label == "HE" || label == "GSL" || label == "NTT" || label == "Arelion" || label == "Cogent" || label == "Tata"
     }
     FILENAME == ARGV[1] {
       asn_by_ip[tolower($1)] = $2
@@ -2317,17 +2328,32 @@ education_route_label_from_ip_trace() {
       }
       if (first_education == 0) exit
       for (h = 1; h < first_education; h++) {
-        if (asns[h] == "10099") {
-          transit = "10099"
-          break
-        }
-        if (is_hkix_ip(ips[h])) has_hkix = 1
-        if (is_ctggia_hop(asns[h], owners[h], ips[h])) has_ctggia = 1
+        if (asns[h] == "10099") last_10099 = h
+        if (is_hkix_ip(ips[h]) && first_hkix == 0) first_hkix = h
+        if (is_ctggia_hop(asns[h], owners[h], ips[h])) last_ctggia = h
       }
-      if (transit == "" && has_hkix) transit = "HKIX"
-      if (transit == "" && has_ctggia) transit = "CTGGIA"
-      if (transit != "") {
-        print transit "->" (family == "6" ? "CERNET2" : "CERNET")
+      if (first_hkix > 0) {
+        for (h = first_hkix - 1; h >= 1; h--) {
+          candidate = transit_label(asns[h], owners[h], ips[h])
+          if (candidate == "" || candidate == "HKIX" || candidate == "163" || candidate == "4837" || candidate == "9929") continue
+          if (is_international_label(candidate)) {
+            upstream = candidate
+            break
+          }
+          if (fallback_upstream == "") fallback_upstream = candidate
+        }
+        if (upstream == "") upstream = fallback_upstream
+        print (upstream != "" ? upstream "->HKIX" : "HKIX")
+        exit
+      }
+      if (last_10099 > 0 || last_ctggia > 0) {
+        transit = last_10099 > 0 ? "10099" : "CTGGIA"
+        start_hop = last_10099 > 0 ? last_10099 : last_ctggia
+        for (h = start_hop + 1; h < first_education; h++) {
+          domestic = domestic_label(asns[h], owners[h], ips[h])
+          if (domestic != "") last_domestic = domestic
+        }
+        print (last_domestic != "" ? transit "->" last_domestic : transit)
         exit
       }
       for (h = first_education - 1; h >= 1; h--) {
@@ -2336,7 +2362,7 @@ education_route_label_from_ip_trace() {
         if (transit != "") break
       }
       if (transit == "") transit = "Hidden"
-      print transit "->" (family == "6" ? "CERNET2" : "CERNET")
+      print transit
     }
   ' "$asn_map_file" "$trace_ip_file")
   printf '%s' "${label:-$fallback}"
