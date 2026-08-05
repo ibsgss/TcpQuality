@@ -1826,7 +1826,7 @@ route_needs_10099_hidden_tcp_retry() {
       return 1
     }
     function is_10099(ip) {
-      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^162\.245\.124\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.(66|75)\./
     }
     function is_4837(ip) {
       return ip ~ /^219\.158\./
@@ -1937,7 +1937,7 @@ route_label_from_ip_trace() {
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./) return "9808"
       if (ip ~ /^2402:4f00:f000:/) return "58807"
       if (ip ~ /^2409:8080:/) return "9808"
-      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./) return "10099"
+      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^162\.245\.124\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.(66|75)\./) return "10099"
       if (ip ~ /^2401:8a00:/) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./) return "9929"
       if (ip ~ /^59\.64\./ || ip ~ /^101\.4\./ || ip ~ /^101\.76\./ || ip ~ /^111\.114\./ || ip ~ /^113\.54\./ || ip ~ /^115\.24\./ || ip ~ /^115\.156\./ || ip ~ /^183\.172\./ || ip ~ /^202\.38\.19/ || ip ~ /^202\.112\./ || ip ~ /^202\.113\./ || ip ~ /^202\.114\./ || ip ~ /^202\.115\./ || ip ~ /^202\.116\./ || ip ~ /^202\.117\./ || ip ~ /^202\.118\./ || ip ~ /^202\.119\./ || ip ~ /^202\.120\./ || ip ~ /^202\.194\./ || ip ~ /^202\.196\./ || ip ~ /^202\.197\./ || ip ~ /^202\.198\./ || ip ~ /^202\.200\./ || ip ~ /^202\.201\./ || ip ~ /^202\.202\./ || ip ~ /^202\.207\./ || ip ~ /^210\.2[6-9]\./ || ip ~ /^210\.3[0-9]\./ || ip ~ /^210\.4[0-7]\./ || ip ~ /^219\.22[4-9]\./ || ip ~ /^222\.(1[6-9]|2[0-3])\./ || ip ~ /^222\.19[2-9]\./ || ip ~ /^222\.20[0-7]\./) return "4538"
@@ -1997,10 +1997,14 @@ route_label_from_ip_trace() {
       return ip ~ /^218\.30\./ || ip ~ /^145\.14\./ || ip ~ /^5\.154\./
     }
     function is_oversea_10099_ip(ip) {
-      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.3[2-9]\./ || ip ~ /^202\.77\.23\./ || ip ~ /^2401:8a00:/
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.3[2-9]\./ || ip ~ /^162\.245\.124\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.(66|75)\./ || ip ~ /^2401:8a00:/
     }
     function is_10099_entry_ip(ip) {
-      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./ || ip ~ /^2401:8a00:/
+      return ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^162\.245\.124\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.(66|75)\./ || ip ~ /^2401:8a00:/
+    }
+    function is_10099_hop(asn, ip) {
+      # ASN 查询结果是权威判断；前缀只在 ASN 缺失时作为兜底。
+      return asn == "10099" || (asn == "" && is_10099_entry_ip(ip))
     }
     function is_oversea_cn2_ip(ip) {
       return ip ~ /^2605:9d80:/
@@ -2034,7 +2038,7 @@ route_label_from_ip_trace() {
     }
     function unicom_route_combo_label(   h, first_unicom, domestic, mobile_transit) {
       for (h = 1; h <= max_hop; h++) {
-        if (asns[h] == "10099" && is_10099_entry_ip(ips[h])) {
+        if (is_10099_hop(asns[h], ips[h])) {
           first_unicom = h
           domestic = unicom_domestic_label_from_hop(h)
           if (domestic != "") return "10099->" domestic
@@ -2060,7 +2064,7 @@ route_label_from_ip_trace() {
     }
     function has_10099_entry_to_unicom(   h) {
       for (h = 1; h <= max_hop; h++) {
-        if (asns[h] == "10099" && is_10099_entry_ip(ips[h]) && has_unicom_downstream(h)) return 1
+        if (is_10099_hop(asns[h], ips[h]) && has_unicom_downstream(h)) return 1
       }
       return 0
     }
@@ -2077,17 +2081,18 @@ route_label_from_ip_trace() {
         if (ips[h] !~ /^59\.43\.245\./) continue
         for (n = h + 1; n <= max_hop; n++) {
           if (ips[n] ~ /^59\.43\./) continue
-          return is_163_ip(ips[n]) || (target_isp == "电信" && (is_telecom_access_asn(asns[n]) || is_telecom_access_ip(ips[n])))
+          return asns[n] == "4134" || asns[n] == "4847" || is_163_ip(ips[n]) || (target_isp == "电信" && (is_telecom_access_asn(asns[n]) || is_telecom_access_ip(ips[n])))
         }
       }
       return 0
     }
     function is_mainland_backbone_hop(asn, ip) {
-      if (asn == "10099") return is_10099_entry_ip(ip)
+      if (is_10099_hop(asn, ip)) return 1
       if (asn == "9929" || asn == "4837" || asn == "4808") return 1
       if (asn == "4809") return !is_oversea_cn2_ip(ip)
-      if (asn == "4134") return is_163_ip(ip) || (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip)))
-      if (asn == "4847") return 1
+      if (asn == "4134" || asn == "4847") return 1
+      if (is_163_ip(ip)) return 1
+      if (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip))) return 1
       if (asn == "23764" || is_ctgnet_ip(ip)) return !is_ctgnet_transit_ip(ip)
       if (asn == "58807" || asn == "58453" || asn == "9808") return 1
       if (asn ~ /^5604[0-8]$/) return 1
@@ -2098,11 +2103,10 @@ route_label_from_ip_trace() {
       return 0
     }
     function label_from_mainland_hop(hop, asn, ip,   h) {
-      if (asn == "10099") return "10099"
+      if (is_10099_hop(asn, ip)) return "10099"
       if (asn == "9929") return "9929"
       if (asn == "4837" || asn == "4808") return "4837"
-      if (asn == "4134" && is_163_ip(ip)) return "163"
-      if (asn == "4847" || is_163_ip(ip)) return "163"
+      if (asn == "4134" || asn == "4847" || is_163_ip(ip)) return "163"
       if (target_isp == "电信" && (is_telecom_access_asn(asn) || is_telecom_access_ip(ip))) return "163"
       if (asn == "23764" || is_ctgnet_ip(ip)) return ""
       if (asn == "4809") {
@@ -2249,7 +2253,7 @@ education_route_label_from_ip_trace() {
       if (ip ~ /^221\.183\./ || ip ~ /^111\.24\./ || ip ~ /^111\.13\./ || ip ~ /^2409:8080:/) return "9808"
       if (ip ~ /^2402:4f00:f000:/) return "58807"
       if (ip ~ /^2401:3cc0:/) return "7578"
-      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.75\./ || ip ~ /^2401:8a00:/) return "10099"
+      if (ip ~ /^103\.214\./ || ip ~ /^103\.228\.68\./ || ip ~ /^103\.239\.176\./ || ip ~ /^118\.26\.151\./ || ip ~ /^162\.219\.(3[2-9]|85)\./ || ip ~ /^162\.245\.124\./ || ip ~ /^202\.77\.23\./ || ip ~ /^203\.160\.(66|75)\./ || ip ~ /^2401:8a00:/) return "10099"
       if (ip ~ /^210\.14\./ || ip ~ /^210\.51\./ || ip ~ /^210\.78\./ || ip ~ /^218\.105\./ || ip ~ /^2408:8120:/) return "9929"
       return ""
     }
