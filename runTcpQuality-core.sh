@@ -1072,7 +1072,7 @@ show_provider_summary() {
   function cell(status, loss, lat, label,   l, v, latency, loss_text) {
     if (label == "") label = "Hidden"
     if (status != "OK") {
-      return format_summary_cell(label, "failed", "failed", red, red)
+      return format_summary_cell("failed", "failed", "failed", red, red)
     }
     l = loss + 0
     v = lat + 0
@@ -1183,7 +1183,7 @@ show_large_packet_results() {
   function cell(status, loss, lat, label,   l, v, latency, loss_text) {
     if (label == "") label = "Hidden"
     if (status == "SKIP") return format_summary_cell(label, "-", "-", red, red)
-    if (status != "OK") return format_summary_cell(label, "failed", "failed", red, red)
+    if (status != "OK") return format_summary_cell("failed", "failed", "failed", red, red)
     l = loss + 0
     v = lat + 0
     latency = latency_text(v, l)
@@ -1266,7 +1266,7 @@ show_education_results() {
   }
   function cell(status, loss, lat, label,   l, v, color) {
     if (label == "") label = title
-    if (status != "OK") return white sprintf("%" route_w "s", label) nc " " red sprintf("%" latency_w "s", "failed") nc " " red sprintf("%" loss_w "s", "failed") nc
+    if (status != "OK") return white sprintf("%" route_w "s", "failed") nc " " red sprintf("%" latency_w "s", "failed") nc " " red sprintf("%" loss_w "s", "failed") nc
     l = loss + 0
     v = lat + 0
     return white sprintf("%" route_w "s", label) nc " " latency_color(v, l) sprintf("%" latency_w "s", latency_text(v, l)) nc " " loss_color(l) sprintf("%" loss_w "s", compact_loss(loss) "%") nc
@@ -1349,7 +1349,7 @@ show_education_combined() {
   }
   function cell(status, loss, lat, label, fallback,   l, v, latency, loss_text) {
     if (label == "") label = fallback
-    if (status != "OK") return format_edu_cell(label, "failed", "failed", red, red)
+    if (status != "OK") return format_edu_cell("failed", "failed", "failed", red, red)
     l = loss + 0
     v = lat + 0
     latency = latency_text(v, l)
@@ -2512,7 +2512,7 @@ show_route_results() {
       proto = toupper($4)
       label = $6
       if (status == "LIMIT") label = "LIMIT"
-      if (status == "FAIL") label = label == "" ? "FAIL" : label
+      if (status == "FAIL") label = "failed"
       if (!(proto in proto_seen)) {
         proto_seen[proto] = 1
         proto_order[++pn] = proto
@@ -5249,6 +5249,7 @@ main() {
         if [ -f "$f" ]; then
           IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
           route_label=$(awk -F'|' -v p="$prov" -v i="$isp" '$2 == p && $3 == i { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$route_file")
+          if [ "$status" != "OK" ] && [ "$status" != "SKIP" ]; then route_label="failed"; fi
           echo "三网,IPv${family},$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
           echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_file"
         fi
@@ -5265,6 +5266,7 @@ main() {
         route_label="Hidden"
       fi
       route_label=${route_label:-Hidden}
+      if [ "$status" != "OK" ] && [ "$status" != "SKIP" ]; then route_label="failed"; fi
       echo "IPv4大包,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
       echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat" >> "$sorted_large_v4"
     done < <(find "$RESULT_DIR" -maxdepth 1 -type f -name 'large4_[0-9]*' | awk -F_ '{ print $NF "|" $0 }' | sort -t'|' -k1,1n | cut -d'|' -f2-)
@@ -5276,6 +5278,7 @@ main() {
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
         route_label=$(awk -F'|' -v p="$prov" '$2 == p { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$edu_route_labels_v4")
         route_label=${route_label:-Hidden}
+        if [ "$status" != "OK" ] && [ "$status" != "SKIP" ]; then route_label="failed"; fi
         echo "CERNET,IPv4,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
         echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat|$route_label" >> "$sorted_cernet"
       fi
@@ -5288,6 +5291,7 @@ main() {
         IFS='|' read -r status prov isp host ip snd rcv loss lat < "$f"
         route_label=$(awk -F'|' -v p="$prov" '$2 == p { if ($1 == "OK") print $6; else print "Hidden"; exit }' "$edu_route_labels_v6")
         route_label=${route_label:-Hidden}
+        if [ "$status" != "OK" ] && [ "$status" != "SKIP" ]; then route_label="failed"; fi
         echo "CERNET2,IPv6,$prov,$isp,$host,$ip,$status,$snd,$rcv,$loss,$lat,$route_label" >> "$CSV"
         echo "$status|$prov|$isp|$host|$ip|$snd|$rcv|$loss|$lat|$route_label" >> "$sorted_cernet2"
       fi
