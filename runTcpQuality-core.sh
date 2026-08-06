@@ -3491,6 +3491,7 @@ SPEEDTEST_APPLECDN_USER_AGENT="${SPEEDTEST_APPLECDN_USER_AGENT:-networkQuality/1
 SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
+SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api64.ipify.org}"
 SPEEDTEST_TOS_REMOTE_LOADED=0
 SPEEDTEST_TOS_CT_CITY="北京"
 SPEEDTEST_TOS_CU_CITY="北京"
@@ -4273,7 +4274,16 @@ speedtest_ipv4_available() {
 }
 
 speedtest_ipv6_available() {
-  ip -6 route get 2620:149:a21:f000::133 >/dev/null 2>&1
+  local response
+  response=$(curl -6 -fsS --connect-timeout 5 --max-time 8 \
+    "$SPEEDTEST_IPV6_PROBE_URL" 2>/dev/null | \
+    awk 'NR == 1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+  if is_valid_ipv6 "$response"; then
+    IPV6_PUBLIC="$response"
+    IPV6_WORK=1
+    return 0
+  fi
+  return 1
 }
 
 speedtest_applecdn_curl_download() {
@@ -5027,7 +5037,7 @@ main() {
   detect_ip_stack
 
   local ipv4_enabled=0 ipv6_enabled=0 test_cdn=1 normal_cdn_enabled=1 test_edu=0 want_ipv4=1 want_ipv6=1
-  local large_packet_enabled=0 large_packet_probe_enabled=0 large_node_count=0
+  local large_packet_enabled=0 large_packet_route_enabled=0 large_packet_probe_enabled=0 large_node_count=0
   if [ "$TEST_ALL" -eq 1 ]; then
     want_ipv4=1
     want_ipv6=1
@@ -5076,11 +5086,12 @@ main() {
     large_node_count="$cdn4_node_count"
     if ! check_nexttrace; then
       large_packet_enabled=0
+      large_packet_route_enabled=0
       large_packet_probe_enabled=0
-    elif large_packet_precheck; then
-      large_packet_probe_enabled=1
     else
-      large_packet_probe_enabled=0
+      # IPv4 大包的 nexttrace 属于回程识别；大包 nping 预检延后到路由阶段之后。
+      large_packet_route_enabled=1
+      large_packet_probe_enabled=1
     fi
   fi
 
@@ -5090,8 +5101,7 @@ main() {
   if [ "$ipv4_enabled" -eq 1 ] && [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet_node_count)); fi
   if [ "$want_ipv6" -eq 1 ] && ipv6_available; then
     ipv6_enabled=1
-    ipv6_nping_precheck
-    export IPV6_NPING_FORCE_L2
+    # IPv6 的 nping 预检会产生探测流量，延后到所有回程识别完成后执行。
     if [ "$normal_cdn_enabled" -eq 1 ]; then TOTAL=$((TOTAL + cdn6_node_count)); fi
     if [ "$test_edu" -eq 1 ]; then TOTAL=$((TOTAL + cernet2_node_count)); fi
     echo -e "${GREEN}[√] 检测到可用 IPv6${NC}"
@@ -5134,7 +5144,7 @@ main() {
   edu_route_labels_v4=$(mktemp)
   edu_route_labels_v6=$(mktemp)
 
-  # 三个阶段严格串行，避免路由与测速流量影响延迟重传结果。
+  # 回程识别先执行；完成后再做延迟/丢包、国际互联和测速，避免前置探测流量影响路由响应。
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
@@ -5142,14 +5152,30 @@ main() {
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
   fi
-  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_probe_enabled" -eq 1 ]; then
-    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$large_packet_probe_enabled"
+  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_route_enabled" -eq 1 ]; then
+    set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$large_packet_route_enabled"
   fi
   echo -e "  ${DIM}正在检测，请稍候...${NC}"
   MULTI_PROGRESS_MODE=1
 
   local idx=0
   show_progress
+
+  # 第一阶段：只做回程路由识别。所有 nping 延迟/丢包探测都在此阶段结束后执行。
+  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_route_enabled" -eq 1 ]; then
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_route_enabled"
+    wait_route_background
+  fi
+
+  # 路由识别结束后，才进行会影响网络响应的预检和延迟/丢包测试。
+  if [ "$ipv6_enabled" -eq 1 ]; then
+    ipv6_nping_precheck
+    export IPV6_NPING_FORCE_L2
+  fi
+  if [ "$large_packet_probe_enabled" -eq 1 ] && ! large_packet_precheck; then
+    large_packet_probe_enabled=0
+  fi
+
   if [ "$normal_cdn_enabled" -eq 1 ]; then
     for family in "${families[@]}"; do
       while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
@@ -5217,11 +5243,7 @@ main() {
       i=$((i + 1))
       write_large_skip_result "$prov" "$isp" "$host" "$fixed_ip" "$i"
     done < <(print_cdn_entries 4)
-  fi
-
-  if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_probe_enabled" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_probe_enabled"
-    wait_route_background
+    show_progress
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     run_international_tests
