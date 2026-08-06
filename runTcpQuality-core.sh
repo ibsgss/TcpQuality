@@ -3491,6 +3491,7 @@ SPEEDTEST_APPLECDN_USER_AGENT="${SPEEDTEST_APPLECDN_USER_AGENT:-networkQuality/1
 SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
+SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api64.ipify.org}"
 SPEEDTEST_TOS_REMOTE_LOADED=0
 SPEEDTEST_TOS_CT_CITY="北京"
 SPEEDTEST_TOS_CU_CITY="北京"
@@ -4273,7 +4274,16 @@ speedtest_ipv4_available() {
 }
 
 speedtest_ipv6_available() {
-  ip -6 route get 2620:149:a21:f000::133 >/dev/null 2>&1
+  local response
+  response=$(curl -6 -fsS --connect-timeout 5 --max-time 8 \
+    "$SPEEDTEST_IPV6_PROBE_URL" 2>/dev/null | \
+    awk 'NR == 1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+  if is_valid_ipv6 "$response"; then
+    IPV6_PUBLIC="$response"
+    IPV6_WORK=1
+    return 0
+  fi
+  return 1
 }
 
 speedtest_applecdn_curl_download() {
