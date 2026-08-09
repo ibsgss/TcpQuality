@@ -289,6 +289,11 @@ INTERNATIONAL_ONLY=0
 INTL_REQUESTED=0
 INTERNATIONAL_PROGRESS_TOTAL=0
 INTERNATIONAL_PACKETS=15
+INTERNATIONAL_HTTP_TIMEOUT=8
+INTERNATIONAL_MAX_IPS="${TCPQUALITY_INTERNATIONAL_MAX_IPS:-2}"
+if ! [[ "$INTERNATIONAL_MAX_IPS" =~ ^[1-9][0-9]*$ ]]; then
+  INTERNATIONAL_MAX_IPS=2
+fi
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -329,7 +334,11 @@ cleanup_result_dir() {
 trap cleanup_result_dir EXIT
 
 # ===================== 国际互联目标 =====================
-# 常用网站使用更接近日常访问/API 的入口；CDN 使用常见静态资源或边缘入口。
+# 网站格式：名称|域名|可选 HTTP 路径。
+# CDN 格式：名称|提供商|域名|可选静态资源路径。
+#
+# 这里优先使用可长期访问的静态资源入口；官网和临时 Demo 不作为 CDN 基准。
+# 路径非空时，TCP 探测成功后会额外做一次 HTTP HEAD；使用 --debug 时会保存状态/边缘信息。
 INTERNATIONAL_SITE_TARGETS=(
   'Adobe Assets|assets.adobe.com'
   'Amazon|www.amazon.com'
@@ -365,20 +374,14 @@ INTERNATIONAL_SITE_TARGETS=(
 )
 
 INTERNATIONAL_CDN_TARGETS=(
-  'Akamai Edge|www.akamai.com'
-  'AWS Static|d1.awsstatic.com'
-  'CacheFly|cachefly.cachefly.net'
-  'CDN77 Demo|1906714720.rsc.cdn77.org'
-  'Cloudflare CDNJS|cdnjs.cloudflare.com'
-  'Fastly Demo|http-me.fastly.dev'
-  'Google Fonts Static|fonts.gstatic.com'
-  'Google Hosted Libraries|ajax.googleapis.com'
-  'jsDelivr|cdn.jsdelivr.net'
-  'Microsoft Ajax CDN|ajax.aspnetcdn.com'
-  'QUANTIL Edge|www.quantil.com'
-  'Tencent EdgeOne|edgeone.ai'
-  'UNPKG|unpkg.com'
-  'Vercel Edge|vercel.com'
+  'Akamai Edge|Akamai|www.akamai.com|'
+  'AWS CloudFront|CloudFront|d1.awsstatic.com|'
+  'CacheFly|CacheFly|cachefly.cachefly.net|'
+  'Cloudflare CDNJS|Cloudflare|cdnjs.cloudflare.com|/ajax/libs/jquery/3.7.1/jquery.min.js'
+  'Fastly Test|Fastly|http-me.fastly.dev|'
+  'Google Hosted Libraries|Google|ajax.googleapis.com|/ajax/libs/jquery/3.7.1/jquery.min.js'
+  'jsDelivr Multi-CDN|jsDelivr|cdn.jsdelivr.net|/npm/jquery@3.7.1/dist/jquery.min.js'
+  'UNPKG Cloudflare|UNPKG|unpkg.com|/jquery@3.7.1/dist/jquery.min.js'
 )
 
 # ===================== 省份筛选 =====================
@@ -606,6 +609,11 @@ NixOS:
   --province CODE   仅检测指定省份，可重复；也支持简写参数如 -bj、-sh、-gd
                      注意: 山西使用 -sx，陕西使用 -sn
   --debug           保留临时文件并输出调试信息，便于排查线路识别问题
+
+国际互联：
+  CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
+  设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
+  --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
 示例:
   bash <(curl -sL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh) -c 100
@@ -874,7 +882,8 @@ count_route_progress() {
 }
 
 count_international_progress() {
-  find "$RESULT_DIR" -maxdepth 1 -type f -name 'internet_[0-9]*' 2>/dev/null | wc -l | tr -d ' '
+  find "$RESULT_DIR" -maxdepth 1 -type f -name 'internet_[0-9]*' \
+    ! -name '*.ips' ! -name '*.http' 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_selected_cdn_nodes() {
@@ -1654,7 +1663,9 @@ upload_probe_debug_bundle() {
         -o -name 'speedtest_debug_upload*.txt' \
         -o -name 'speedtest.log' \
         -o -name 'speedtest.progress' \
-        -o -name 'speedtest.state' \) \
+        -o -name 'speedtest.state' \
+        -o -name 'internet_*.ips' \
+        -o -name 'internet_*.http' \) \
       -exec basename {} \;
     find "$RESULT_DIR" -maxdepth 2 -type f -path '*/speedtest.*/*' \
       | sed "s#^$RESULT_DIR/##"
@@ -3212,33 +3223,47 @@ international_task_count() {
   printf '%s' "$((${#INTERNATIONAL_SITE_TARGETS[@]} + ${#INTERNATIONAL_CDN_TARGETS[@]}))"
 }
 
-resolve_first_public_ipv4() {
-  local domain="$1" ip
+emit_public_ipv4s() {
+  local answers="$1" ip found=0
+  while read -r ip; do
+    [ -n "$ip" ] || continue
+    if is_public_ipv4 "$ip"; then
+      printf '%s\n' "$ip"
+      found=1
+    fi
+  done <<< "$answers"
+  [ "$found" -eq 1 ]
+}
+
+resolve_public_ipv4s() {
+  local domain="$1" answers=""
   if command -v getent >/dev/null 2>&1; then
-    while read -r ip _; do
-      if is_public_ipv4 "$ip"; then
-        printf '%s' "$ip"
-        return 0
-      fi
-    done < <(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1, $2}' | awk '!seen[$1]++')
+    answers=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | awk '!seen[$1]++' || true)
+    if [ -n "$answers" ] && emit_public_ipv4s "$answers"; then
+      return 0
+    fi
+    answers=""
   fi
   if command -v dig >/dev/null 2>&1; then
-    while read -r ip; do
-      if is_public_ipv4 "$ip"; then
-        printf '%s' "$ip"
-        return 0
-      fi
-    done < <(dig +time=3 +tries=1 +short A "$domain" 2>/dev/null)
+    answers=$(dig +time=3 +tries=1 +short A "$domain" 2>/dev/null | awk '!seen[$1]++' || true)
+    if [ -n "$answers" ] && emit_public_ipv4s "$answers"; then
+      return 0
+    fi
+    answers=""
   fi
   if command -v host >/dev/null 2>&1; then
-    while read -r ip; do
-      if is_public_ipv4 "$ip"; then
-        printf '%s' "$ip"
-        return 0
-      fi
-    done < <(host -t A "$domain" 2>/dev/null | awk '/has address/ {print $NF}')
+    answers=$(host -t A "$domain" 2>/dev/null | awk '/has address/ {print $NF}' | awk '!seen[$1]++' || true)
+    if [ -n "$answers" ] && emit_public_ipv4s "$answers"; then
+      return 0
+    fi
   fi
   return 1
+}
+
+resolve_first_public_ipv4() {
+  local ip
+  ip=$(resolve_public_ipv4s "$1" | head -1)
+  [ -n "$ip" ] && printf '%s' "$ip"
 }
 
 resolve_first_public_ipv6() {
@@ -3270,54 +3295,148 @@ resolve_first_public_ipv6() {
   return 1
 }
 
+international_http_probe() {
+  local domain="$1" ip="$2" path="${3:-}" headers http_status edge cache
+  [ -n "$path" ] || { printf -- '-|-|-\n'; return 0; }
+  [[ "$path" == /* ]] || path="/$path"
+  headers=$(curl -4 -sS -I -L \
+    --connect-timeout 3 --max-time "$INTERNATIONAL_HTTP_TIMEOUT" \
+    --resolve "${domain}:443:${ip}" \
+    -A 'TcpQuality/1.0' \
+    "https://${domain}${path}" 2>/dev/null | tr -d '\r' || true)
+  if [ -z "$headers" ]; then
+    printf -- '-|-|-\n'
+    return 0
+  fi
+
+  http_status=$(printf '%s\n' "$headers" | awk '
+    toupper($1) ~ /^HTTP\/[0-9.]+$/ { code = $2 }
+    END { print code }
+  ')
+  [ -n "$http_status" ] || http_status="-"
+  edge=$(printf '%s\n' "$headers" | awk '
+    {
+      key = tolower($1); sub(/:$/, "", key)
+      if (key == "cf-ray") { value = $2; sub(/.*-/, "", value); print "CF:" value; exit }
+      if (key == "x-amz-cf-pop") { print "CloudFront:" $2; exit }
+      if (key == "x-served-by") { print "Fastly"; exit }
+    }
+  ')
+  [ -n "$edge" ] || edge="-"
+  cache=$(printf '%s\n' "$headers" | awk '
+    {
+      key = tolower($1); sub(/:$/, "", key)
+      if (key == "cf-cache-status" || key == "x-cache-status" || key == "x-cache") {
+        print $2; exit
+      }
+    }
+  ')
+  [ -n "$cache" ] || cache="-"
+  printf '%s|%s|%s\n' "$http_status" "$edge" "$cache"
+}
+
 international_test_one() {
-  local idx="$1" category="$2" name="$3" domain="$4" ip result status _prov _isp _host _ip sent rcv loss lat
-  local outfile="${RESULT_DIR}/internet_${idx}"
+  local idx="$1" category="$2" name="$3" provider="$4" domain="$5" path="${6:-}"
+  local outfile="${RESULT_DIR}/internet_${idx}" result status _prov _isp _host _ip sent rcv loss lat
   local PACKETS="$INTERNATIONAL_PACKETS"
-  ip=$(resolve_first_public_ipv4 "$domain" || true)
-  if [ -z "$ip" ]; then
+  local -a candidates=()
+  local ip i selected_ip="" selected_success=0 candidate_count=0 limit=0
+  local total_sent=0 total_rcv=0 rtt_sum="0" aggregate_loss aggregate_rtt
+  local http_status="-" edge="-" cache="-"
+
+  while read -r ip; do
+    [ -n "$ip" ] && candidates+=("$ip")
+  done < <(resolve_public_ipv4s "$domain" || true)
+  candidate_count=${#candidates[@]}
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    printf '%s\n' "${candidates[@]}" > "${outfile}.ips"
+  fi
+
+  if [ "$candidate_count" -eq 0 ]; then
     printf 'FAIL|%s|%s|%s||0|0|100.00|-1\n' "$category" "$name" "$domain" > "$outfile"
     return
   fi
-  result=$(probe_target "internet" 4 "$name" "$category" "$domain" "$ip" 443 "$idx" main)
-  IFS='|' read -r status _prov _isp _host _ip sent rcv loss lat <<< "$result"
-  if [ "$status" = "OK" ] && [ "${rcv:-0}" -gt 0 ] 2>/dev/null; then
-    printf 'OK|%s|%s|%s|%s|%s|%s|%s|%s\n' "$category" "$name" "$domain" "$ip" "$sent" "$rcv" "$loss" "$lat" > "$outfile"
+
+  limit="$INTERNATIONAL_MAX_IPS"
+  [ "$limit" -gt "$candidate_count" ] && limit="$candidate_count"
+  for ((i = 0; i < limit; i++)); do
+    ip="${candidates[$i]}"
+    result=$(probe_target "internet" 4 "$name" "$category" "$domain" "$ip" 443 "$idx" "${provider}-${i}")
+    IFS='|' read -r status _prov _isp _host _ip sent rcv loss lat <<< "$result"
+    if [[ "$sent" =~ ^[0-9]+$ ]]; then
+      total_sent=$((total_sent + sent))
+    fi
+    if [[ "$rcv" =~ ^[0-9]+$ ]]; then
+      total_rcv=$((total_rcv + rcv))
+    fi
+    if [[ "$rcv" =~ ^[0-9]+$ ]] && [ "$rcv" -gt 0 ] && [[ "$lat" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      rtt_sum=$(awk -v a="$rtt_sum" -v b="$lat" -v n="$rcv" 'BEGIN { printf "%.6f", a + b * n }')
+      if [ "$selected_success" -eq 0 ]; then
+        selected_ip="$ip"
+        selected_success=1
+      fi
+    elif [ -z "$selected_ip" ]; then
+      selected_ip="$ip"
+    fi
+  done
+
+  aggregate_loss=$(awk -v sent="$total_sent" -v rcv="$total_rcv" 'BEGIN {
+    if (sent == 0) print "100.00";
+    else printf "%.2f", (sent - rcv) * 100 / sent;
+  }')
+  if [ "$total_rcv" -gt 0 ]; then
+    aggregate_rtt=$(awk -v sum="$rtt_sum" -v rcv="$total_rcv" 'BEGIN { printf "%.3f", sum / rcv }')
   else
-    printf 'FAIL|%s|%s|%s|%s|%s|%s|%s|-1\n' "$category" "$name" "$domain" "$ip" "${sent:-0}" "${rcv:-0}" "${loss:-100.00}" > "$outfile"
+    aggregate_rtt=0
   fi
+
+  if [ "$selected_success" -eq 1 ] && [ -n "$path" ]; then
+    IFS='|' read -r http_status edge cache <<< "$(international_http_probe "$domain" "$selected_ip" "$path")"
+  fi
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    printf 'provider=%s\ndomain=%s\npath=%s\nip=%s\nhttp_status=%s\nedge=%s\ncache=%s\n' \
+      "$provider" "$domain" "${path:-/}" "$selected_ip" "$http_status" "$edge" "$cache" \
+      > "${outfile}.http"
+  fi
+  if [ "$total_rcv" -eq 0 ]; then
+    printf 'FAIL|%s|%s|%s|%s|%s|0|%s|-1\n' \
+      "$category" "$name" "$domain" "$selected_ip" "$total_sent" "$aggregate_loss" \
+      > "$outfile"
+    return
+  fi
+  printf 'OK|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$category" "$name" "$domain" "$selected_ip" "$total_sent" "$total_rcv" "$aggregate_loss" "$aggregate_rtt" \
+    > "$outfile"
 }
 
 run_international_tests() {
-  local idx=0 launched=0 done entry name domain category running total
+  local idx=0 launched=0 done entry name provider domain path category running total
   total=$(international_task_count)
   INTERNATIONAL_PROGRESS_TOTAL="$total"
   [ "$total" -gt 0 ] || return 0
 
   category="网站"
   for entry in "${INTERNATIONAL_SITE_TARGETS[@]}"; do
-    name=${entry%%|*}
-    domain=${entry#*|}
+    IFS='|' read -r name domain path <<< "$entry"
     idx=$((idx + 1))
     while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
       show_progress
       sleep 0.2
     done
-    international_test_one "$idx" "$category" "$name" "$domain" &
+    international_test_one "$idx" "$category" "$name" "Website" "$domain" "${path:-}" &
     launched=$((launched + 1))
     show_progress
   done
 
   category="CDN"
   for entry in "${INTERNATIONAL_CDN_TARGETS[@]}"; do
-      name=${entry%%|*}
-      domain=${entry#*|}
+      IFS='|' read -r name provider domain path <<< "$entry"
       idx=$((idx + 1))
       while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
-      international_test_one "$idx" "$category" "$name" "$domain" &
+      international_test_one "$idx" "$category" "$name" "$provider" "$domain" "${path:-}" &
       launched=$((launched + 1))
       show_progress
   done
