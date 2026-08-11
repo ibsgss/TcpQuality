@@ -31,9 +31,12 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 
 - https://tcpquality.ibsgss.uk/r/hUETeLqqyF
 
-![](https://tcpquality.ibsgss.uk/r/hUETeLqqyF.png?section=large4)
-
-![](https://tcpquality.ibsgss.uk/r/q1ECAn_b5D.png?section=speedtest)
+<table>
+  <tr>
+    <td><img src="https://tcpquality.ibsgss.uk/r/hUETeLqqyF.png?section=large4" alt="IPv4大包回程" width="100%"></td>
+    <td><img src="https://tcpquality.ibsgss.uk/r/q1ECAn_b5D.png?section=speedtest" alt="单线程测速" width="100%"></td>
+  </tr>
+</table>
 
 ## 支持参数
 
