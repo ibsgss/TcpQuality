@@ -3769,6 +3769,8 @@ append_international_latency_csv() {
 show_international_latency_results() {
   local first_file="${RESULT_DIR}/international_latency_4_upload_1"
   [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_6_upload_1"
+  [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_4_download_1"
+  [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_6_download_1"
   [ -f "$first_file" ] || return 0
   local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]} i family direction f
   local -a latency_families=()
@@ -3786,7 +3788,11 @@ show_international_latency_results() {
   BEGIN {
     region_w = 8
     label_w = 18
-    value_w = 9
+    latency_w = 9
+    retrans_w = 8
+    metric_gap = 2
+    group_w = latency_w + metric_gap + retrans_w + metric_gap + latency_w + metric_gap + retrans_w
+    prefix_w = region_w + metric_gap + label_w + metric_gap
   }
 '"$(awk_table_helpers)"'
   function value(status, latency) {
@@ -3806,46 +3812,63 @@ show_international_latency_results() {
     return green
   }
   function colored_latency(value_text) {
-    return latency_color(value_text) pad_left(value_text, value_w) nc
+    return latency_color(value_text) pad_left(value_text, latency_w) nc
+  }
+  function metric_header(text, width) {
+    return spaces(width - 8) text
+  }
+  function metric_latency(key, slot, direction, family) {
+    return values[key, slot, direction, family] == "" ? "-" : values[key, slot, direction, family]
+  }
+  function metric_retransmissions(key, slot, direction, family) {
+    return retransmissions[key, slot, direction, family] == "" ? "-" : retransmissions[key, slot, direction, family]
   }
   function print_header() {
     printf "  %s%s  %s  %s  %s%s\n", cyan, \
       pad_right("区域", region_w), \
       pad_right("节点", label_w), \
-      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
+      center("IPv4", group_w), center("IPv6", group_w), nc
+    printf "  %s%s", cyan, spaces(prefix_w)
+    printf "%s  %s  %s  %s  ", \
+      metric_header("上传延迟", latency_w), \
+      metric_header("上传重传", retrans_w), \
+      metric_header("下载延迟", latency_w), \
+      metric_header("下载重传", retrans_w)
+    printf "%s  %s  %s  %s%s\n", \
+      metric_header("上传延迟", latency_w), \
+      metric_header("上传重传", retrans_w), \
+      metric_header("下载延迟", latency_w), \
+      metric_header("下载重传", retrans_w), nc
   }
   function print_color_legend() {
     printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
   }
-  function print_latency_table(direction, title, r, s, key) {
-    printf "  %s%s%s\n", bold, cyan, title, nc
+  function print_combined_table(r, s, key, region_text, label_text, upload4, upload6, download4, download6) {
+    printf "  %s%s%s\n", bold, cyan, "国际节点双向测试（iPerf3 TCP）", nc
     print_header()
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
       for (s = 1; s <= slot_count[key]; s++) {
-        printf "  %s  %s  %s  %s\n", \
-          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
-          pad_right(labels[key, s], label_w), \
-          colored_latency(values[key, s, direction, 4] == "" ? "-" : values[key, s, direction, 4]), \
-          colored_latency(values[key, s, direction, 6] == "" ? "-" : values[key, s, direction, 6])
+        region_text = s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w)
+        label_text = pad_right(labels[key, s], label_w)
+        upload4 = metric_latency(key, s, "upload", 4)
+        upload6 = metric_latency(key, s, "upload", 6)
+        download4 = metric_latency(key, s, "download", 4)
+        download6 = metric_latency(key, s, "download", 6)
+        printf "  %s  %s  ", region_text, label_text
+        printf "%s  %s  %s  %s  ", \
+          colored_latency(upload4), \
+          pad_left(metric_retransmissions(key, s, "upload", 4), retrans_w), \
+          colored_latency(download4), \
+          pad_left(metric_retransmissions(key, s, "download", 4), retrans_w)
+        printf "%s  %s  %s  %s\n", \
+          colored_latency(upload6), \
+          pad_left(metric_retransmissions(key, s, "upload", 6), retrans_w), \
+          colored_latency(download6), \
+          pad_left(metric_retransmissions(key, s, "download", 6), retrans_w)
       }
     }
     print_color_legend()
-  }
-  function print_retransmission_table(direction, title, r, s, key) {
-    printf "  %s%s%s\n", bold, cyan, title, nc
-    print_header()
-    for (r = 1; r <= row_count; r++) {
-      key = row_order[r]
-      for (s = 1; s <= slot_count[key]; s++) {
-        printf "  %s  %s  %s  %s\n", \
-          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
-          pad_right(labels[key, s], label_w), \
-          pad_left(retransmissions[key, s, direction, 4] == "" ? "-" : retransmissions[key, s, direction, 4], value_w), \
-          pad_left(retransmissions[key, s, direction, 6] == "" ? "-" : retransmissions[key, s, direction, 6], value_w)
-      }
-    }
-    printf "\n"
   }
   {
     status = $1
@@ -3871,10 +3894,7 @@ show_international_latency_results() {
     retransmissions[row_key, s, direction, family] = retransmission_value(status, $10)
   }
   END {
-    print_latency_table("download", "国际节点下载延迟（iPerf3 TCP RTT -R）")
-    print_retransmission_table("download", "国际节点下载重传次数（iPerf3 -R）")
-    print_latency_table("upload", "国际节点上传延迟（iPerf3 TCP RTT）")
-    print_retransmission_table("upload", "国际节点上传重传次数（iPerf3）")
+    print_combined_table()
   }'
 }
 
