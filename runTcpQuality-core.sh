@@ -411,7 +411,7 @@ INTERNATIONAL_IPERF_TARGETS=(
   'europe|欧洲|德国-法兰克福|speedtest.fra1.de.leaseweb.net|5201'
   'europe|欧洲|英国-伦敦|speedtest.lon1.uk.leaseweb.net|5201'
   'europe|欧洲|荷兰-阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
-  'oceania|大洋洲|悉尼|speedtest.syd12.au.leaseweb.net|5201'
+  'oceania|大洋洲|澳大利亚-悉尼|speedtest.syd12.au.leaseweb.net|5201'
 )
 
 # ===================== 省份筛选 =====================
@@ -1016,6 +1016,7 @@ awk_table_helpers() {
     if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "悉尼" || text == "香港" || text == "日本") return 4
     if (text == "大洋洲") return 6
     if (text == "新加坡") return 6
+    if (text == "澳大利亚-悉尼") return 13
     if (text == "加拿大-蒙特利尔" || text == "巴西-里约热内卢" || text == "荷兰-阿姆斯特丹") return 15
     if (text == "德国-法兰克福") return 13
     if (text == "英国-伦敦") return 9
@@ -3788,11 +3789,9 @@ show_international_latency_results() {
   BEGIN {
     region_w = 8
     label_w = 18
+    family_w = 6
     latency_w = 9
     retrans_w = 8
-    metric_gap = 2
-    group_w = latency_w + metric_gap + retrans_w + metric_gap + latency_w + metric_gap + retrans_w
-    prefix_w = region_w + metric_gap + label_w + metric_gap
   }
 '"$(awk_table_helpers)"'
   function value(status, latency) {
@@ -3823,49 +3822,48 @@ show_international_latency_results() {
   function metric_retransmissions(key, slot, direction, family) {
     return retransmissions[key, slot, direction, family] == "" ? "-" : retransmissions[key, slot, direction, family]
   }
+  function family_header(text, width) {
+    return center(text, width)
+  }
+  function print_family_row(key, slot, family, show_name, region_text, label_text, family_text) {
+    region_text = show_name && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w)
+    label_text = show_name ? pad_right(labels[key, slot], label_w) : pad_right("", label_w)
+    family_text = family == 4 ? "IPv4" : "IPv6"
+    printf "  %s  %s  %s  ", region_text, label_text, pad_right(family_text, family_w)
+    printf "%s  %s  %s  %s\n", \
+      colored_latency(metric_latency(key, slot, "download", family)), \
+      pad_left(metric_retransmissions(key, slot, "download", family), retrans_w), \
+      colored_latency(metric_latency(key, slot, "upload", family)), \
+      pad_left(metric_retransmissions(key, slot, "upload", family), retrans_w)
+  }
   function print_header() {
-    printf "  %s%s  %s  %s  %s%s\n", cyan, \
+    printf "  %s%s  %s  %s  ", cyan, \
       pad_right("区域", region_w), \
       pad_right("节点", label_w), \
-      center("IPv4", group_w), center("IPv6", group_w), nc
-    printf "  %s%s", cyan, spaces(prefix_w)
-    printf "%s  %s  %s  %s  ", \
-      metric_header("上传延迟", latency_w), \
-      metric_header("上传重传", retrans_w), \
-      metric_header("下载延迟", latency_w), \
-      metric_header("下载重传", retrans_w)
+      family_header("协议", family_w)
     printf "%s  %s  %s  %s%s\n", \
-      metric_header("上传延迟", latency_w), \
-      metric_header("上传重传", retrans_w), \
       metric_header("下载延迟", latency_w), \
-      metric_header("下载重传", retrans_w), nc
+      metric_header("下载重传", retrans_w), \
+      metric_header("上传延迟", latency_w), \
+      metric_header("上传重传", retrans_w), nc
   }
   function print_color_legend() {
     printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
   }
-  function print_combined_table(r, s, key, region_text, label_text, upload4, upload6, download4, download6) {
+  function print_combined_table(r, s, key, show_name) {
     printf "  %s%s%s\n", bold, cyan, "国际节点双向测试（iPerf3 TCP）", nc
     print_header()
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
       for (s = 1; s <= slot_count[key]; s++) {
-        region_text = s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w)
-        label_text = pad_right(labels[key, s], label_w)
-        upload4 = metric_latency(key, s, "upload", 4)
-        upload6 = metric_latency(key, s, "upload", 6)
-        download4 = metric_latency(key, s, "download", 4)
-        download6 = metric_latency(key, s, "download", 6)
-        printf "  %s  %s  ", region_text, label_text
-        printf "%s  %s  %s  %s  ", \
-          colored_latency(upload4), \
-          pad_left(metric_retransmissions(key, s, "upload", 4), retrans_w), \
-          colored_latency(download4), \
-          pad_left(metric_retransmissions(key, s, "download", 4), retrans_w)
-        printf "%s  %s  %s  %s\n", \
-          colored_latency(upload6), \
-          pad_left(metric_retransmissions(key, s, "upload", 6), retrans_w), \
-          colored_latency(download6), \
-          pad_left(metric_retransmissions(key, s, "download", 6), retrans_w)
+        show_name = 1
+        if (family_seen[key, s, 4] == 1) {
+          print_family_row(key, s, 4, show_name)
+          show_name = 0
+        }
+        if (family_success[key, s, 6] == 1) {
+          print_family_row(key, s, 6, show_name)
+        }
       }
     }
     print_color_legend()
@@ -3892,6 +3890,8 @@ show_international_latency_results() {
     s = slot[row_key, label]
     values[row_key, s, direction, family] = value(status, $9)
     retransmissions[row_key, s, direction, family] = retransmission_value(status, $10)
+    family_seen[row_key, s, family] = 1
+    if (status == "OK" && $9 ~ /^[0-9]+([.][0-9]+)?$/) family_success[row_key, s, family] = 1
   }
   END {
     print_combined_table()
