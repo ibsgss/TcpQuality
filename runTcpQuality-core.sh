@@ -3844,10 +3844,10 @@ show_international_latency_results() {
       colored_latency(metric_latency(key, slot, "upload", family)), \
       colored_retransmission(metric_retransmissions(key, slot, "upload", family))
   }
-  function print_header() {
+  function print_header(family) {
     printf "  %s%s  %s  ", cyan, \
       pad_right("区域", region_w), \
-      pad_right("节点", label_w)
+      pad_right(family == 4 ? "节点-IPv4" : "节点-IPv6", label_w)
     printf "%s  %s  %s  %s%s\n", \
       metric_header("下载延迟", latency_w), \
       metric_header("下载重传", retrans_w), \
@@ -3867,8 +3867,7 @@ show_international_latency_results() {
       }
     }
     if (has_rows == 0) return 0
-    printf "  %s%s%s%s\n", bold, cyan, family == 4 ? "IPv4" : "IPv6", nc
-    print_header()
+    print_header(family)
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
       group_shown = 0
