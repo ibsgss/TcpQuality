@@ -301,7 +301,7 @@ INTERNATIONAL_MAX_IPS="${TCPQUALITY_INTERNATIONAL_MAX_IPS:-2}"
 if ! [[ "$INTERNATIONAL_MAX_IPS" =~ ^[1-9][0-9]*$ ]]; then
   INTERNATIONAL_MAX_IPS=2
 fi
-INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-1}"
+INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-5}"
 INTERNATIONAL_IPERF_RATE="${TCPQUALITY_INTERNATIONAL_IPERF_RATE:-1M}"
 INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS="${TCPQUALITY_INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS:-5000}"
 SPEEDTEST_STATE_FILE=""
@@ -642,6 +642,7 @@ NixOS:
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
   国际节点延迟使用 iPerf3 TCP RTT；每行最多三个节点，先列三个节点的 IPv4，再列对应的 IPv6。
+  国际节点 iPerf3 默认限速 1M、测试 5 秒；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -3827,7 +3828,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
