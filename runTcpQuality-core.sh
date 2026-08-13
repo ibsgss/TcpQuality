@@ -918,7 +918,7 @@ count_international_progress() {
   find "$RESULT_DIR" -maxdepth 1 -type f \( \
     -name 'internet_[0-9]*' \
     -o -name 'international_latency_[46]_[a-z]*_[0-9]*' \
-  \) 2>/dev/null | wc -l | tr -d ' '
+  \) ! -name '*.debug' ! -name '*.http' 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_selected_cdn_nodes() {
