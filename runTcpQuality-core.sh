@@ -3848,7 +3848,7 @@ show_international_latency_results() {
       metric_header("上传重传", retrans_w), nc
   }
   function print_color_legend() {
-    printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
+    printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 较高%s\n\n", dim, green, dim, yellow, dim, red, nc
   }
   function print_combined_table(r, s, key, show_name) {
     printf "  %s%s%s\n", bold, cyan, "国际节点双向测试（iPerf3 TCP）", nc
@@ -3972,7 +3972,7 @@ show_international_results() {
         split(sites[i], a, SUBSEP)
         row(a[1], a[2], a[3], a[4], a[5], a[6])
       }
-      printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
+      printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 较高%s\n\n", dim, green, dim, yellow, dim, red, nc
     }
     if (cn > 0) {
       header("常用 CDN 国际互联")
