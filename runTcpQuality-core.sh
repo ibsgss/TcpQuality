@@ -3789,7 +3789,6 @@ show_international_latency_results() {
   BEGIN {
     region_w = 8
     label_w = 18
-    family_w = 6
     latency_w = 9
     retrans_w = 8
   }
@@ -3822,14 +3821,10 @@ show_international_latency_results() {
   function metric_retransmissions(key, slot, direction, family) {
     return retransmissions[key, slot, direction, family] == "" ? "-" : retransmissions[key, slot, direction, family]
   }
-  function family_header(text, width) {
-    return center(text, width)
-  }
-  function print_family_row(key, slot, family, show_name, region_text, label_text, family_text) {
-    region_text = show_name && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w)
-    label_text = show_name ? pad_right(labels[key, slot], label_w) : pad_right("", label_w)
-    family_text = family == 4 ? "IPv4" : "IPv6"
-    printf "  %s  %s  %s  ", region_text, label_text, pad_right(family_text, family_w)
+  function print_family_row(key, slot, family, show_region, region_text, label_text) {
+    region_text = show_region && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w)
+    label_text = pad_right(labels[key, slot], label_w)
+    printf "  %s  %s  ", region_text, label_text
     printf "%s  %s  %s  %s\n", \
       colored_latency(metric_latency(key, slot, "download", family)), \
       pad_left(metric_retransmissions(key, slot, "download", family), retrans_w), \
@@ -3837,10 +3832,9 @@ show_international_latency_results() {
       pad_left(metric_retransmissions(key, slot, "upload", family), retrans_w)
   }
   function print_header() {
-    printf "  %s%s  %s  %s  ", cyan, \
+    printf "  %s%s  %s  ", cyan, \
       pad_right("区域", region_w), \
-      pad_right("节点", label_w), \
-      family_header("协议", family_w)
+      pad_right("节点", label_w)
     printf "%s  %s  %s  %s%s\n", \
       metric_header("下载延迟", latency_w), \
       metric_header("下载重传", retrans_w), \
@@ -3848,24 +3842,36 @@ show_international_latency_results() {
       metric_header("上传重传", retrans_w), nc
   }
   function print_color_legend() {
-    printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 较高%s\n\n", dim, green, dim, yellow, dim, red, nc
+    printf "  %s测试消耗流量<100MB，颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 较高%s\n\n", dim, green, dim, yellow, dim, red, nc
   }
-  function print_combined_table(r, s, key, show_name) {
-    printf "  %s%s%s\n", bold, cyan, "国际节点双向测试（iPerf3 TCP）", nc
-    print_header()
+  function print_family_table(family, require_success, r, s, key, has_rows, group_shown, eligible) {
+    has_rows = 0
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
       for (s = 1; s <= slot_count[key]; s++) {
-        show_name = 1
-        if (family_seen[key, s, 4] == 1) {
-          print_family_row(key, s, 4, show_name)
-          show_name = 0
-        }
-        if (family_success[key, s, 6] == 1) {
-          print_family_row(key, s, 6, show_name)
-        }
+        eligible = require_success ? family_success[key, s, family] == 1 : family_seen[key, s, family] == 1
+        if (eligible) has_rows = 1
       }
     }
+    if (has_rows == 0) return 0
+    printf "  %s%s%s%s\n", bold, cyan, family == 4 ? "IPv4" : "IPv6", nc
+    print_header()
+    for (r = 1; r <= row_count; r++) {
+      key = row_order[r]
+      group_shown = 0
+      for (s = 1; s <= slot_count[key]; s++) {
+        eligible = require_success ? family_success[key, s, family] == 1 : family_seen[key, s, family] == 1
+        if (!eligible) continue
+        print_family_row(key, s, family, group_shown == 0)
+        group_shown = 1
+      }
+    }
+    return 1
+  }
+  function print_combined_table() {
+    printf "  %s%s%s%s\n", bold, cyan, "国际节点TCP互联测试", nc
+    if (print_family_table(4, 0)) printf "\n"
+    print_family_table(6, 1)
     print_color_legend()
   }
   {
