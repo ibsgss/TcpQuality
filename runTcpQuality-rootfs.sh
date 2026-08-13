@@ -874,7 +874,7 @@ install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
     if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
        env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed tar traceroute; do command -v "$cmd" >/dev/null || exit 1; done'; then
+         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute; do command -v "$cmd" >/dev/null || exit 1; done'; then
       echo "[√] 预构建 rootfs 依赖已就绪"
       return 0
     fi

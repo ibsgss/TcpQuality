@@ -237,6 +237,7 @@ check_traceroute() {
 check_iperf3() {
   check_command iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3
   check_command jq jq jq jq jq jq jq jq
+  check_command ss ss iproute2 iproute2 iproute2 iproute2 iproute2 iproute2
 }
 
 check_nexttrace() {
@@ -641,7 +642,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
-  国际节点延迟使用 iPerf3 TCP RTT；每行最多三个节点，先列三个节点的 IPv4，再列对应的 IPv6。
+  国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
   国际节点 iPerf3 默认限速 1M、测试 5 秒；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
@@ -655,7 +656,7 @@ NixOS:
 依赖:
   - nping: 随 nmap 安装
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
-  - iperf3/jq: 国际节点 iPerf3 TCP RTT 与 JSON 结果解析
+  - iperf3/jq/ss: 国际节点 iPerf3 TCP RTT、双向重传与反向 TCP_INFO RTT 解析
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
   - tosutil/iproute2: 单线程测速使用
@@ -663,10 +664,10 @@ NixOS:
 
 安装提示:
   - NixOS:          无需安装，脚本自动进入临时 nix shell
-  - Debian/Ubuntu: apt-get install -y curl nmap iperf3 jq traceroute
-  - RHEL/Fedora:   dnf install -y curl nmap iperf3 jq traceroute
-  - Alpine Linux:  apk add curl nmap-nping iperf3 jq traceroute
-  - Arch Linux:    pacman -S curl nmap iperf3 jq traceroute
+  - Debian/Ubuntu: apt-get install -y curl nmap iperf3 iproute2 jq traceroute
+  - RHEL/Fedora:   dnf install -y curl nmap iperf3 iproute jq traceroute
+  - Alpine Linux:  apk add curl nmap-nping iperf3 iproute2 jq traceroute
+  - Arch Linux:    pacman -S curl nmap iperf3 iproute2 jq traceroute
   - macOS:         brew install curl nmap iperf3 jq traceroute
 
 说明:
@@ -916,7 +917,7 @@ count_route_progress() {
 count_international_progress() {
   find "$RESULT_DIR" -maxdepth 1 -type f \( \
     -name 'internet_[0-9]*' \
-    -o -name 'international_latency_[46]_[0-9]*' \
+    -o -name 'international_latency_[46]_[a-z]*_[0-9]*' \
   \) 2>/dev/null | wc -l | tr -d ' '
 }
 
@@ -3284,12 +3285,51 @@ international_latency_family_count() {
   fi
 }
 
+international_latency_direction_count() {
+  printf '2'
+}
+
 international_latency_task_count() {
-  printf '%s' "$((${#INTERNATIONAL_IPERF_TARGETS[@]} * $(international_latency_family_count)))"
+  printf '%s' "$((${#INTERNATIONAL_IPERF_TARGETS[@]} * $(international_latency_family_count) * $(international_latency_direction_count)))"
 }
 
 international_total_task_count() {
   printf '%s' "$(($(international_task_count) + $(international_latency_task_count)))"
+}
+
+tcp_info_rtt_ms() {
+  local ip="$1" port="$2"
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -tinp 2>/dev/null | awk -v ip="$ip" -v port="$port" '
+    function is_remote(line) {
+      return index(line, ip ":" port) || index(line, "[" ip "]:" port)
+    }
+    is_remote($0) {
+      matched = 1
+      next
+    }
+    matched && $0 ~ /^[[:space:]]/ && $0 ~ /rtt:/ {
+      start = index($0, " rtt:")
+      if (start == 0) next
+      value = substr($0, start + 5)
+      sub(/\/.*$/, "", value)
+      if (value ~ /^[0-9]+([.][0-9]+)?$/) {
+        last = value
+        if ($0 ~ /bytes_received:[1-9][0-9][0-9]+/) {
+          print value
+          found = 1
+          exit
+        }
+      }
+      next
+    }
+    matched && $0 !~ /^[[:space:]]/ {
+      matched = 0
+    }
+    END {
+      if (!found && last != "") print last
+    }
+  '
 }
 
 emit_public_ipv4s() {
@@ -3479,13 +3519,19 @@ international_test_one() {
 }
 
 international_latency_test_one() {
-  local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}" v6_base_port="${8:-}"
-  local fallback_host="${9:-}" fallback_base_port="${10:-}"
-  local outfile="${RESULT_DIR}/international_latency_${family}_${idx}"
-  local ip="" port="" json err_file rtt_us latency="-" status="FAIL"
-  local first_port last_port error_reason="" error_lower="" retryable
+  local idx="$1" family="$2" direction="$3" row_key="$4" region="$5" label="$6" host="$7" base_port="${8:-5201}" v6_base_port="${9:-}"
+  local fallback_host="${10:-}" fallback_base_port="${11:-}"
+  local outfile="${RESULT_DIR}/international_latency_${family}_${direction}_${idx}"
+  local ip="" port="" json err_file rtt_us tcp_rtt_ms latency="-" retransmits="-" candidate_retransmits="" status="FAIL"
+  local first_port last_port error_reason="" error_lower="" retryable iperf_pid
+  local -a iperf_direction_args=()
 
   [[ "$base_port" =~ ^[0-9]+$ ]] || base_port=5201
+  if [ "$direction" = "download" ]; then
+    iperf_direction_args=(-R)
+  else
+    direction="upload"
+  fi
 
   if [ "$family" = "4" ]; then
     if is_public_ipv4 "$host"; then
@@ -3498,10 +3544,10 @@ international_latency_test_one() {
   fi
   if [ -z "$ip" ]; then
     if [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
-      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+      international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
       return
     fi
-    printf 'SKIP|%s|%s|%s|%s|%s||-\n' "$family" "$row_key" "$region" "$label" "$host" > "$outfile"
+    printf 'SKIP|%s|%s|%s|%s|%s|%s||-|-\n' "$family" "$direction" "$row_key" "$region" "$label" "$host" > "$outfile"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       printf 'status=SKIP\nreason=no-public-%s\n' "${family}" > "${outfile}.debug"
     fi
@@ -3527,16 +3573,39 @@ international_latency_test_one() {
   for ((port = first_port; port <= last_port; port++)); do
     json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
     err_file="${json}.err"
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 15 iperf3 "-${family}" -c "$ip" -p "$port" \
-        -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
-        -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
-        > "$json" 2> "$err_file" || true
+    tcp_rtt_ms=""
+    candidate_retransmits=""
+    if [ "${direction}" = "download" ] && command -v ss >/dev/null 2>&1; then
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 15 iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+          -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+          -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+          > "$json" 2> "$err_file" &
+      else
+        iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+          -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+          -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+          > "$json" 2> "$err_file" &
+      fi
+      iperf_pid=$!
+      while kill -0 "${iperf_pid}" 2>/dev/null; do
+        tcp_rtt_ms=$(tcp_info_rtt_ms "$ip" "$port" || true)
+        [[ "${tcp_rtt_ms}" =~ ^[0-9]+([.][0-9]+)?$ ]] || tcp_rtt_ms=""
+        sleep 0.2
+      done
+      wait "${iperf_pid}" || true
     else
-      iperf3 "-${family}" -c "$ip" -p "$port" \
-        -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
-        -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
-        > "$json" 2> "$err_file" || true
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 15 iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+          -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+          -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+          > "$json" 2> "$err_file" || true
+      else
+        iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+          -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+          -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+          > "$json" 2> "$err_file" || true
+      fi
     fi
 
     rtt_us=$(jq -r '
@@ -3545,16 +3614,33 @@ international_latency_test_one() {
       // .intervals[-1].streams[0].rtt
       // empty
     ' "$json" 2>/dev/null || true)
+    candidate_retransmits=$(jq -r '
+      .end.streams[0].sender.retransmits
+      // .end.sum_sent.retransmits
+      // .end.streams[0].receiver.retransmits
+      // empty
+    ' "$json" 2>/dev/null || true)
     error_reason=$(jq -r '.error // empty' "$json" 2>/dev/null || true)
     if [ -z "$error_reason" ] && [ -s "$err_file" ]; then
       error_reason=$(tr '\n' ' ' < "$err_file" | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-240)
     fi
-    if jq -e '(.error? // "") == "" and (((.start.connected // []) | length) > 0)' "$json" >/dev/null 2>&1 \
-       && [[ "$rtt_us" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      latency=$(awk -v us="$rtt_us" 'BEGIN { printf "%.3f", us / 1000 }')
-      status="OK"
-      rm -f -- "$json" "$err_file"
-      break
+    if jq -e '(.error? // "") == "" and (((.start.connected // []) | length) > 0)' "$json" >/dev/null 2>&1; then
+      if [[ "$direction" = "download" && "$tcp_rtt_ms" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        latency=$(awk -v ms="$tcp_rtt_ms" 'BEGIN { printf "%.3f", ms }')
+      elif [[ "$rtt_us" =~ ^[0-9]+([.][0-9]+)?$ ]] && [ "$(awk -v us="$rtt_us" 'BEGIN { print (us > 0) ? 1 : 0 }')" -eq 1 ]; then
+        latency=$(awk -v us="$rtt_us" 'BEGIN { printf "%.3f", us / 1000 }')
+      else
+        latency="-"
+      fi
+      if [[ "$latency" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        if [[ "$candidate_retransmits" =~ ^[0-9]+$ ]]; then
+          retransmits="$candidate_retransmits"
+        fi
+        status="OK"
+        rm -f -- "$json" "$err_file"
+        break
+      fi
+      error_reason="${error_reason:-no-rtt}"
     fi
     error_lower=$(printf '%s' "$error_reason" | tr '[:upper:]' '[:lower:]')
     retryable=0
@@ -3565,21 +3651,21 @@ international_latency_test_one() {
     [ "$retryable" -eq 1 ] || break
   done
   if [ "$status" != "OK" ] && [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
-    international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+    international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
     return
   fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    printf 'status=%s\nfamily=IPv%s\nhost=%s\nip=%s\nports=%s-%s\nreason=%s\n' \
-      "$status" "$family" "$host" "$ip" "$first_port" "$last_port" "${error_reason:--}" \
+    printf 'status=%s\nfamily=IPv%s\ndirection=%s\nhost=%s\nip=%s\nports=%s-%s\nrtt_tcp_info_ms=%s\nretransmits=%s\nreason=%s\n' \
+      "$status" "$family" "$direction" "$host" "$ip" "$first_port" "$last_port" "${tcp_rtt_ms:--}" "$retransmits" "${error_reason:--}" \
       > "${outfile}.debug"
   fi
-  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
-    "$status" "$family" "$row_key" "$region" "$label" "$host" "$ip" "$latency" > "$outfile"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$status" "$family" "$direction" "$row_key" "$region" "$label" "$host" "$ip" "$latency" "$retransmits" > "$outfile"
 }
 
 run_international_tests() {
-  local idx=0 launched=0 entry name provider domain path category total
-  local row_key region label host port v6_port fallback_host fallback_port family
+  local idx=0 launched=0 entry name provider domain path category total latency_expected=0
+  local row_key region label host port v6_port fallback_host fallback_port family direction
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
   total=$(international_total_task_count)
@@ -3587,19 +3673,26 @@ run_international_tests() {
   [ "$total" -gt 0 ] || return 0
   check_iperf3
 
-  # 先做 iPerf3 延迟，报告中的 IPv4/IPv6 两列来自同一组节点。
-  for family in "${latency_families[@]}"; do
-    idx=0
-    for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
-      IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port <<< "$entry"
-      idx=$((idx + 1))
-      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+  # 每个节点分别执行上传和下载；每个方向内再分别测试 IPv4/IPv6。
+  for direction in upload download; do
+    for family in "${latency_families[@]}"; do
+      idx=0
+      for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
+        IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port <<< "$entry"
+        idx=$((idx + 1))
+        while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+          show_progress
+          sleep 0.2
+        done
+        international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" "$fallback_host" "$fallback_port" &
+        launched=$((launched + 1))
+        show_progress
+      done
+      latency_expected=$((latency_expected + ${#INTERNATIONAL_IPERF_TARGETS[@]}))
+      while [ "$(count_international_progress)" -lt "$latency_expected" ]; do
         show_progress
         sleep 0.2
       done
-      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" "$fallback_host" "$fallback_port" &
-      launched=$((launched + 1))
-      show_progress
     done
   done
 
@@ -3652,8 +3745,8 @@ append_international_csv() {
 }
 
 append_international_latency_csv() {
-  local csv="$1" entry row_key region label host port v6_port fallback_host fallback_port family f i
-  local status result_family result_row_key result_region result_label result_host ip lat loss
+  local csv="$1" entry row_key region label host port v6_port fallback_host fallback_port family direction f i
+  local status result_family result_direction result_row_key result_region result_label result_host ip lat retrans loss
   local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]}
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
@@ -3661,31 +3754,35 @@ append_international_latency_csv() {
   for ((i = 1; i <= target_count; i++)); do
     entry="${INTERNATIONAL_IPERF_TARGETS[i - 1]}"
     IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port <<< "$entry"
-    for family in "${latency_families[@]}"; do
-      f="${RESULT_DIR}/international_latency_${family}_${i}"
-      [ -f "$f" ] || continue
-      IFS='|' read -r status result_family result_row_key result_region result_label result_host ip lat < "$f"
-      if [ "$status" = "OK" ]; then loss="0.00"; else loss="100.00"; fi
-      echo "国际互联,IPv${family},${result_label},延迟,${result_host},${ip},${status},0,0,${loss},${lat},iPerf3,${result_region},${result_row_key}" >> "$csv"
+    for direction in upload download; do
+      for family in "${latency_families[@]}"; do
+        f="${RESULT_DIR}/international_latency_${family}_${direction}_${i}"
+        [ -f "$f" ] || continue
+        IFS='|' read -r status result_family result_direction result_row_key result_region result_label result_host ip lat retrans < "$f"
+        if [ "$status" = "OK" ]; then loss="0.00"; else loss="100.00"; fi
+        echo "国际互联,IPv${family},${result_label},延迟,${result_host},${ip},${status},0,0,${loss},${lat},iPerf3,${result_region},${result_row_key},,,${retrans:--},${result_direction:-${direction}}" >> "$csv"
+      done
     done
   done
 }
 
 show_international_latency_results() {
-  local first_file="${RESULT_DIR}/international_latency_4_1"
-  [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_6_1"
+  local first_file="${RESULT_DIR}/international_latency_4_upload_1"
+  [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_6_upload_1"
   [ -f "$first_file" ] || return 0
-  local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]} i family f
+  local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]} i family direction f
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
   {
     for ((i = 1; i <= target_count; i++)); do
-      for family in "${latency_families[@]}"; do
-        f="${RESULT_DIR}/international_latency_${family}_${i}"
-        [ -f "$f" ] && cat "$f"
+      for direction in upload download; do
+        for family in "${latency_families[@]}"; do
+          f="${RESULT_DIR}/international_latency_${family}_${direction}_${i}"
+          [ -f "$f" ] && cat "$f"
+        done
       done
     done
-  } | awk -F'|' -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  } | awk -F'|' -v green="$GREEN" -v yellow="$YELLOW" -v red="$RED" -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     region_w = 8
     label_w = 18
@@ -3696,12 +3793,67 @@ show_international_latency_results() {
     if (status != "OK" || latency !~ /^[0-9]+([.][0-9]+)?$/) return "-"
     return sprintf("%dms", latency + 0)
   }
+  function retransmission_value(status, retransmits) {
+    if (status != "OK" || retransmits !~ /^[0-9]+$/) return "-"
+    return sprintf("%d", retransmits + 0)
+  }
+  function latency_color(value_text, numeric) {
+    if (value_text == "-" || value_text == "") return red
+    numeric = value_text
+    sub(/ms$/, "", numeric)
+    if (numeric + 0 > 200) return red
+    if (numeric + 0 > 100) return yellow
+    return green
+  }
+  function colored_latency(value_text) {
+    return latency_color(value_text) pad_left(value_text, value_w) nc
+  }
+  function print_header() {
+    printf "  %s%s  %s  %s  %s%s\n", cyan, \
+      pad_right("区域", region_w), \
+      pad_right("节点", label_w), \
+      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
+  }
+  function print_color_legend() {
+    printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
+  }
+  function print_latency_table(direction, title, r, s, key) {
+    printf "  %s%s%s\n", bold, cyan, title, nc
+    print_header()
+    for (r = 1; r <= row_count; r++) {
+      key = row_order[r]
+      for (s = 1; s <= slot_count[key]; s++) {
+        printf "  %s  %s  %s  %s\n", \
+          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
+          pad_right(labels[key, s], label_w), \
+          colored_latency(values[key, s, direction, 4] == "" ? "-" : values[key, s, direction, 4]), \
+          colored_latency(values[key, s, direction, 6] == "" ? "-" : values[key, s, direction, 6])
+      }
+    }
+    print_color_legend()
+  }
+  function print_retransmission_table(direction, title, r, s, key) {
+    printf "  %s%s%s\n", bold, cyan, title, nc
+    print_header()
+    for (r = 1; r <= row_count; r++) {
+      key = row_order[r]
+      for (s = 1; s <= slot_count[key]; s++) {
+        printf "  %s  %s  %s  %s\n", \
+          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
+          pad_right(labels[key, s], label_w), \
+          pad_left(retransmissions[key, s, direction, 4] == "" ? "-" : retransmissions[key, s, direction, 4], value_w), \
+          pad_left(retransmissions[key, s, direction, 6] == "" ? "-" : retransmissions[key, s, direction, 6], value_w)
+      }
+    }
+    printf "\n"
+  }
   {
     status = $1
     family = $2
-    row_key = $3
-    region = $4
-    label = $5
+    direction = ($3 == "download" || $3 == "upload") ? $3 : "upload"
+    row_key = $4
+    region = $5
+    label = $6
     target_key = row_key SUBSEP label
     if (!(row_key in row_seen)) {
       row_order[++row_count] = row_key
@@ -3715,24 +3867,14 @@ show_international_latency_results() {
       labels[row_key, slot_count[row_key]] = label
     }
     s = slot[row_key, label]
-    values[row_key, s, family] = value(status, $8)
+    values[row_key, s, direction, family] = value(status, $9)
+    retransmissions[row_key, s, direction, family] = retransmission_value(status, $10)
   }
   END {
-    printf "  %s%s国际节点延迟（iPerf3 TCP RTT）%s\n", bold, cyan, nc
-    printf "  %s%s  %s  %s  %s%s\n", cyan, \
-      pad_right("区域", region_w), \
-      pad_right("节点", label_w), \
-      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
-    for (r = 1; r <= row_count; r++) {
-      key = row_order[r]
-      for (s = 1; s <= slot_count[key]; s++) {
-        printf "  %s  %s  %s  %s\n", \
-          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
-          pad_right(labels[key, s], label_w), \
-          pad_left(values[key, s, 4] == "" ? "-" : values[key, s, 4], value_w), \
-          pad_left(values[key, s, 6] == "" ? "-" : values[key, s, 6], value_w)
-      }
-    }
+    print_latency_table("download", "国际节点下载延迟（iPerf3 TCP RTT -R）")
+    print_retransmission_table("download", "国际节点下载重传次数（iPerf3 -R）")
+    print_latency_table("upload", "国际节点上传延迟（iPerf3 TCP RTT）")
+    print_retransmission_table("upload", "国际节点上传重传次数（iPerf3）")
   }'
 }
 
@@ -3762,8 +3904,8 @@ show_international_results() {
       if (v > 2) return yellow
       return green
     }
-    if (v > 150) return red
-    if (v > 50) return yellow
+    if (v > 200) return red
+    if (v > 100) return yellow
     return green
   }
   function loss_color(loss, ok) {
@@ -3810,7 +3952,7 @@ show_international_results() {
         split(sites[i], a, SUBSEP)
         row(a[1], a[2], a[3], a[4], a[5], a[6])
       }
-      printf "  %s颜色: %s0-50ms 正常%s  %s50-150ms 一般%s  %s>150ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
+      printf "  %s颜色: %s0-100ms 正常%s  %s101-200ms 一般%s  %s>200ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
     }
     if (cn > 0) {
       header("常用 CDN 国际互联")
@@ -3828,7 +3970,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
@@ -3839,7 +3981,7 @@ run_international_mode() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$csv"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms,iPerf3重传次数,iPerf3方向" >> "$csv"
   append_international_csv "$csv"
   append_international_latency_csv "$csv"
   clear
@@ -5381,7 +5523,7 @@ run_speedtest_mode() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$csv"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$csv"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms,iPerf3重传次数,iPerf3方向" >> "$csv"
   append_speedtest_csv "$csv"
   clear
   print_header
@@ -5657,7 +5799,7 @@ main() {
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   local CSV="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
   printf '\xEF\xBB\xBF' > "$CSV"
-  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$CSV"
+  echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms,iPerf3重传次数,iPerf3方向" >> "$CSV"
 
   if [ "$normal_cdn_enabled" -eq 1 ]; then
     for family in "${families[@]}"; do
