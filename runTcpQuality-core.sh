@@ -54,6 +54,8 @@ bootstrap_nixos_environment() {
     nixpkgs#iputils
     nixpkgs#ncurses
     nixpkgs#nmap
+    nixpkgs#iperf3
+    nixpkgs#jq
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
@@ -232,6 +234,11 @@ check_traceroute() {
   check_command traceroute traceroute traceroute traceroute traceroute traceroute traceroute traceroute
 }
 
+check_iperf3() {
+  check_command iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3
+  check_command jq jq jq jq jq jq jq jq
+}
+
 check_nexttrace() {
   if command -v nexttrace-tiny &>/dev/null; then
     return 0
@@ -294,6 +301,9 @@ INTERNATIONAL_MAX_IPS="${TCPQUALITY_INTERNATIONAL_MAX_IPS:-2}"
 if ! [[ "$INTERNATIONAL_MAX_IPS" =~ ^[1-9][0-9]*$ ]]; then
   INTERNATIONAL_MAX_IPS=2
 fi
+INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-1}"
+INTERNATIONAL_IPERF_RATE="${TCPQUALITY_INTERNATIONAL_IPERF_RATE:-1M}"
+INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS="${TCPQUALITY_INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS:-5000}"
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -382,6 +392,22 @@ INTERNATIONAL_CDN_TARGETS=(
   'Google Hosted Libraries|Google|ajax.googleapis.com|/ajax/libs/jquery/3.7.1/jquery.min.js'
   'jsDelivr Multi-CDN|jsDelivr|cdn.jsdelivr.net|/npm/jquery@3.7.1/dist/jquery.min.js'
   'UNPKG Cloudflare|UNPKG|unpkg.com|/jquery@3.7.1/dist/jquery.min.js'
+)
+
+# Leaseweb speedtest 节点支持 iPerf3 TCP，端口范围为 5201-5210。
+# row_key 用于区分两行“美洲”，报告页面会按 row_key 分组并分别展示 IPv4/IPv6。
+INTERNATIONAL_IPERF_TARGETS=(
+  'asia|亚洲|香港|speedtest.hkg12.hk.leaseweb.net|5201'
+  'asia|亚洲|日本|speedtest.tyo11.jp.leaseweb.net|5201'
+  'asia|亚洲|新加坡|speedtest.sin1.sg.leaseweb.net|5201'
+  'americas-us|美洲|洛杉矶（美西）|speedtest.lax12.us.leaseweb.net|5201'
+  'americas-us|美洲|达拉斯（美中）|speedtest.dal13.us.leaseweb.net|5201'
+  'americas-us|美洲|芝加哥（美东）|speedtest.chi11.us.leaseweb.net|5201'
+  'americas-latam|美洲|加拿大|speedtest.mtl2.ca.leaseweb.net|5201'
+  'americas-latam|美洲|巴西|138.199.4.1|5201'
+  'europe|欧洲|法兰克福|speedtest.fra1.de.leaseweb.net|5201'
+  'europe|欧洲|伦敦|speedtest.lon1.uk.leaseweb.net|5201'
+  'europe|欧洲|阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
 )
 
 # ===================== 省份筛选 =====================
@@ -612,6 +638,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
+  Leaseweb 国际节点延迟使用 iPerf3 TCP RTT，报告按亚洲、美洲、欧洲分组展示 IPv4/IPv6 两列。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -624,6 +651,7 @@ NixOS:
 依赖:
   - nping: 随 nmap 安装
   - curl: 用于检测公网 IPv4/IPv6 与上传报告
+  - iperf3/jq: 国际节点 iPerf3 TCP RTT 与 JSON 结果解析
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
   - tosutil/iproute2: 单线程测速使用
@@ -631,11 +659,11 @@ NixOS:
 
 安装提示:
   - NixOS:          无需安装，脚本自动进入临时 nix shell
-  - Debian/Ubuntu: apt-get install -y curl nmap traceroute
-  - RHEL/Fedora:   dnf install -y curl nmap traceroute
-  - Alpine Linux:  apk add curl nmap-nping traceroute
-  - Arch Linux:    pacman -S curl nmap traceroute
-  - macOS:         brew install curl nmap traceroute
+  - Debian/Ubuntu: apt-get install -y curl nmap iperf3 jq traceroute
+  - RHEL/Fedora:   dnf install -y curl nmap iperf3 jq traceroute
+  - Alpine Linux:  apk add curl nmap-nping iperf3 jq traceroute
+  - Arch Linux:    pacman -S curl nmap iperf3 jq traceroute
+  - macOS:         brew install curl nmap iperf3 jq traceroute
 
 说明:
   发送裸 TCP SYN 包通常需要 root 权限；请切换到 root 用户后运行。
@@ -882,8 +910,10 @@ count_route_progress() {
 }
 
 count_international_progress() {
-  find "$RESULT_DIR" -maxdepth 1 -type f -name 'internet_[0-9]*' \
-    ! -name '*.ips' ! -name '*.http' 2>/dev/null | wc -l | tr -d ' '
+  find "$RESULT_DIR" -maxdepth 1 -type f \( \
+    -name 'internet_[0-9]*' \
+    -o -name 'international_latency_[46]_[0-9]*' \
+  \) 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_selected_cdn_nodes() {
@@ -3223,6 +3253,34 @@ international_task_count() {
   printf '%s' "$((${#INTERNATIONAL_SITE_TARGETS[@]} + ${#INTERNATIONAL_CDN_TARGETS[@]}))"
 }
 
+international_latency_families() {
+  if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
+    printf '4\n'
+  elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
+    printf '6\n'
+  else
+    printf '4\n6\n'
+  fi
+}
+
+international_latency_family_count() {
+  if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
+    printf '1'
+  elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
+    printf '1'
+  else
+    printf '2'
+  fi
+}
+
+international_latency_task_count() {
+  printf '%s' "$((${#INTERNATIONAL_IPERF_TARGETS[@]} * $(international_latency_family_count)))"
+}
+
+international_total_task_count() {
+  printf '%s' "$(($(international_task_count) + $(international_latency_task_count)))"
+}
+
 emit_public_ipv4s() {
   local answers="$1" ip found=0
   while read -r ip; do
@@ -3409,11 +3467,87 @@ international_test_one() {
     > "$outfile"
 }
 
+international_latency_test_one() {
+  local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}"
+  local outfile="${RESULT_DIR}/international_latency_${family}_${idx}"
+  local ip="" port="$base_port" json err_file rtt_us latency status="FAIL"
+
+  if [ "$family" = "4" ]; then
+    if is_public_ipv4 "$host"; then
+      ip="$host"
+    else
+      ip=$(resolve_first_public_ipv4 "$host" || true)
+    fi
+  else
+    ip=$(resolve_first_public_ipv6 "$host" || true)
+  fi
+  if [ -z "$ip" ]; then
+    printf 'SKIP|%s|%s|%s|%s|%s||-\n' "$family" "$row_key" "$region" "$label" "$host" > "$outfile"
+    return
+  fi
+
+  # 每个 Leaseweb 端口只允许一个连接；IPv6 使用相邻端口，避免同一目标的
+  # IPv4/IPv6 并行测试互相占用 5201。
+  if [ "$family" = "6" ]; then
+    port=$((base_port + 1))
+  fi
+  json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
+  err_file="${json}.err"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 15 iperf3 "-${family}" -c "$ip" -p "$port" \
+      -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+      -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+      > "$json" 2> "$err_file" || true
+  else
+    iperf3 "-${family}" -c "$ip" -p "$port" \
+      -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+      -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+      > "$json" 2> "$err_file" || true
+  fi
+
+  rtt_us=$(jq -r '
+    .end.streams[0].sender.mean_rtt
+    // .end.streams[0].receiver.mean_rtt
+    // .intervals[-1].streams[0].rtt
+    // empty
+  ' "$json" 2>/dev/null || true)
+  if jq -e '(.error? // "") == "" and (((.start.connected // []) | length) > 0)' "$json" >/dev/null 2>&1 \
+     && [[ "$rtt_us" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    latency=$(awk -v us="$rtt_us" 'BEGIN { printf "%.3f", us / 1000 }')
+    status="OK"
+  else
+    latency="-"
+  fi
+  rm -f -- "$json" "$err_file"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$status" "$family" "$row_key" "$region" "$label" "$host" "$ip" "$latency" > "$outfile"
+}
+
 run_international_tests() {
-  local idx=0 launched=0 done entry name provider domain path category running total
-  total=$(international_task_count)
+  local idx=0 launched=0 entry name provider domain path category total
+  local row_key region label host port family
+  local -a latency_families=()
+  mapfile -t latency_families < <(international_latency_families)
+  total=$(international_total_task_count)
   INTERNATIONAL_PROGRESS_TOTAL="$total"
   [ "$total" -gt 0 ] || return 0
+  check_iperf3
+
+  # 先做 iPerf3 延迟，报告中的 IPv4/IPv6 两列来自同一组节点。
+  for family in "${latency_families[@]}"; do
+    idx=0
+    for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
+      IFS='|' read -r row_key region label host port <<< "$entry"
+      idx=$((idx + 1))
+      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+        show_progress
+        sleep 0.2
+      done
+      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" &
+      launched=$((launched + 1))
+      show_progress
+    done
+  done
 
   category="网站"
   for entry in "${INTERNATIONAL_SITE_TARGETS[@]}"; do
@@ -3460,7 +3594,94 @@ append_international_csv() {
   done
 }
 
+append_international_latency_csv() {
+  local csv="$1" entry row_key region label host port family f i
+  local status result_family result_row_key result_region result_label result_host ip lat loss
+  local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]}
+  local -a latency_families=()
+  mapfile -t latency_families < <(international_latency_families)
+
+  for ((i = 1; i <= target_count; i++)); do
+    entry="${INTERNATIONAL_IPERF_TARGETS[i - 1]}"
+    IFS='|' read -r row_key region label host port <<< "$entry"
+    for family in "${latency_families[@]}"; do
+      f="${RESULT_DIR}/international_latency_${family}_${i}"
+      [ -f "$f" ] || continue
+      IFS='|' read -r status result_family result_row_key result_region result_label result_host ip lat < "$f"
+      if [ "$status" = "OK" ]; then loss="0.00"; else loss="100.00"; fi
+      echo "国际互联,IPv${family},${result_label},延迟,${result_host},${ip},${status},0,0,${loss},${lat},iPerf3,${result_region},${result_row_key}" >> "$csv"
+    done
+  done
+}
+
+show_international_latency_results() {
+  local first_file="${RESULT_DIR}/international_latency_4_1"
+  [ -f "$first_file" ] || first_file="${RESULT_DIR}/international_latency_6_1"
+  [ -f "$first_file" ] || return 0
+  local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]} i family f
+  local -a latency_families=()
+  mapfile -t latency_families < <(international_latency_families)
+  {
+    for ((i = 1; i <= target_count; i++)); do
+      for family in "${latency_families[@]}"; do
+        f="${RESULT_DIR}/international_latency_${family}_${i}"
+        [ -f "$f" ] && cat "$f"
+      done
+    done
+  } | awk -F'|' -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
+  BEGIN {
+    region_w = 8
+    label_w = 18
+    value_w = 9
+  }
+'"$(awk_table_helpers)"'
+  function value(status, latency) {
+    if (status != "OK" || latency !~ /^[0-9]+([.][0-9]+)?$/) return "-"
+    return sprintf("%dms", latency + 0)
+  }
+  {
+    status = $1
+    family = $2
+    row_key = $3
+    region = $4
+    label = $5
+    target_key = row_key SUBSEP label
+    if (!(row_key in row_seen)) {
+      row_order[++row_count] = row_key
+      row_seen[row_key] = 1
+      row_region[row_key] = region
+    }
+    if (!(target_key in target_seen)) {
+      target_seen[target_key] = 1
+      slot_count[row_key]++
+      slot[row_key, label] = slot_count[row_key]
+      labels[row_key, slot_count[row_key]] = label
+    }
+    s = slot[row_key, label]
+    values[row_key, s, family] = value(status, $8)
+  }
+  END {
+    printf "  %s%s国际节点延迟（iPerf3 TCP RTT）%s\n", bold, cyan, nc
+    printf "  %s%s  %s  %s  %s%s\n", cyan, \
+      pad_right("区域", region_w), \
+      pad_right("节点", label_w), \
+      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
+    for (r = 1; r <= row_count; r++) {
+      key = row_order[r]
+      for (s = 1; s <= slot_count[key]; s++) {
+        printf "  %s  %s  %s  %s\n", \
+          s == 1 ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
+          pad_right(labels[key, s], label_w), \
+          pad_left(values[key, s, 4] == "" ? "-" : values[key, s, 4], value_w), \
+          pad_left(values[key, s, 6] == "" ? "-" : values[key, s, 6], value_w)
+      }
+    }
+    printf "  %sIPv4/IPv6 为 iPerf3 TCP RTT；- 表示该协议不可用或节点未响应。%s\n\n", dim, nc
+  }'
+}
+
 show_international_results() {
+  show_international_latency_results
   local file_list=("$RESULT_DIR"/internet_[0-9]*) total i f
   [ -f "${file_list[0]}" ] || return 0
   total=$(international_task_count)
@@ -3551,7 +3772,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联目标: $(international_task_count)  每目标发包: $INTERNATIONAL_PACKETS  并行: $PARALLEL  端口: 443/tcp${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 5201-5202/tcp${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
@@ -3564,6 +3785,7 @@ run_international_mode() {
   printf '\xEF\xBB\xBF' > "$csv"
   echo "网络,IP版本,省份,运营商,域名,IP,状态,发送,收到,丢包率(%),平均延迟ms,线路,回程连接耗时ms,回程TLS握手耗时ms,去程连接耗时ms,去程TLS握手耗时ms" >> "$csv"
   append_international_csv "$csv"
+  append_international_latency_csv "$csv"
   clear
   print_header
   echo -e "  ${DIM}报告时间：${report_time}${NC}"
@@ -5239,7 +5461,7 @@ main() {
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     [ "$COUNT_EXPLICIT" -eq 1 ] && INTERNATIONAL_PACKETS="$PACKETS"
-    INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
+    INTERNATIONAL_PROGRESS_TOTAL=$(international_total_task_count)
   fi
   local family entry prov isp host fixed_ip port backup_host backup_ip backup_port
   local -a families=()
@@ -5269,7 +5491,7 @@ main() {
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
-    INTERNATIONAL_PROGRESS_TOTAL=$(international_task_count)
+    INTERNATIONAL_PROGRESS_TOTAL=$(international_total_task_count)
   fi
   if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_route_enabled" -eq 1 ]; then
     set_route_progress_total "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$large_packet_route_enabled"
@@ -5440,6 +5662,7 @@ main() {
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     append_international_csv "$CSV"
+    append_international_latency_csv "$CSV"
   fi
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     append_speedtest_csv "$CSV"
