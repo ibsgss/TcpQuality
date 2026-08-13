@@ -3602,6 +3602,9 @@ run_international_tests() {
   done
 
   category="网站"
+  # iPerf3 延迟结果使用独立的文件名前缀；网站/CDN 结果必须从 internet_1
+  # 连续编号，否则追加的节点任务会导致后半段 CDN 被展示和上传逻辑跳过。
+  idx=0
   for entry in "${INTERNATIONAL_SITE_TARGETS[@]}"; do
     IFS='|' read -r name domain path <<< "$entry"
     idx=$((idx + 1))
@@ -3683,9 +3686,8 @@ show_international_latency_results() {
   } | awk -F'|' -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     region_w = 8
-    cell_w = 16
+    label_w = 18
     value_w = 9
-    block_w = cell_w * 3 + 6
   }
 '"$(awk_table_helpers)"'
   function value(status, latency) {
@@ -3713,38 +3715,21 @@ show_international_latency_results() {
     s = slot[row_key, label]
     values[row_key, s, family] = value(status, $8)
   }
-  function label_cells(key,    family, s, text, label) {
-    text = ""
-    for (family = 4; family <= 6; family += 2) {
-      for (s = 1; s <= 3; s++) {
-        label = labels[key, s]
-        if (label == "") label = "-"
-        text = text pad_right(label, cell_w) "  "
-      }
-    }
-    return text
-  }
-  function value_cells(key,    family, s, text, value_text) {
-    text = ""
-    for (family = 4; family <= 6; family += 2) {
-      for (s = 1; s <= 3; s++) {
-        value_text = values[key, s, family]
-        if (value_text == "") value_text = "-"
-        text = text pad_right(pad_left(value_text, value_w), cell_w) "  "
-      }
-    }
-    return text
-  }
   END {
     printf "  %s%s国际节点延迟（iPerf3 TCP RTT）%s\n", bold, cyan, nc
-    printf "  %s%s  %s  %s%s\n", cyan, \
+    printf "  %s%s  %s  %s  %s%s\n", cyan, \
       pad_right("区域", region_w), \
-      center_display("IPv4", block_w, display_width("IPv4")), \
-      center_display("IPv6", block_w, display_width("IPv6")), nc
+      pad_right("节点", label_w), \
+      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
-      printf "  %s  %s\n", pad_right("", region_w), label_cells(key)
-      printf "  %s  %s\n", pad_right(row_region[key], region_w), value_cells(key)
+      for (s = 1; s <= slot_count[key]; s++) {
+        printf "  %s  %s  %s  %s\n", \
+          s == 1 ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
+          pad_right(labels[key, s], label_w), \
+          pad_left(values[key, s, 4] == "" ? "-" : values[key, s, 4], value_w), \
+          pad_left(values[key, s, 6] == "" ? "-" : values[key, s, 6], value_w)
+      }
     }
     printf "  %sIPv4/IPv6 为 iPerf3 TCP RTT；- 表示该协议不可用或节点未响应。%s\n\n", dim, nc
   }'
