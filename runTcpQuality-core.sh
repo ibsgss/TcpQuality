@@ -396,7 +396,7 @@ INTERNATIONAL_CDN_TARGETS=(
 
 # Leaseweb speedtest 节点支持 iPerf3 TCP，端口范围为 5201-5210。
 # row_key 用于区分两行“美洲”，报告页面会按 row_key 分组并分别展示 IPv4/IPv6。
-# 目标格式：row_key|区域|节点|主机|IPv4 起始端口|可选 IPv6 起始端口。
+# 目标格式：row_key|区域|节点|主机|IPv4 起始端口|可选 IPv6 起始端口|可选 IPv4 备用主机|可选 IPv4 备用起始端口。
 INTERNATIONAL_IPERF_TARGETS=(
   'asia|亚洲|香港|speedtest.hkg12.hk.leaseweb.net|5201'
   'asia|亚洲|日本|speedtest.tyo11.jp.leaseweb.net|5201'
@@ -405,7 +405,8 @@ INTERNATIONAL_IPERF_TARGETS=(
   'americas-us|美洲|达拉斯（美中）|speedtest.dal13.us.leaseweb.net|5201'
   'americas-us|美洲|芝加哥（美东）|speedtest.chi11.us.leaseweb.net|5201'
   'americas-latam|美洲|加拿大|speedtest.mtl2.ca.leaseweb.net|5201'
-  'americas-latam|美洲|巴西|speedtest.sao1.edgoo.net|9209|9208'
+  # 巴西：Edgoo 圣保罗优先；Leaseweb MIA-11 仅作为 IPv4 备用，IPv6 不设置备用。
+  'americas-latam|美洲|巴西|speedtest.sao1.edgoo.net|9209|9208|speedtest.mia11.us.leaseweb.net|5201'
   'europe|欧洲|法兰克福|speedtest.fra1.de.leaseweb.net|5201'
   'europe|欧洲|伦敦|speedtest.lon1.uk.leaseweb.net|5201'
   'europe|欧洲|阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
@@ -3477,6 +3478,7 @@ international_test_one() {
 
 international_latency_test_one() {
   local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}" v6_base_port="${8:-}"
+  local fallback_host="${9:-}" fallback_base_port="${10:-}"
   local outfile="${RESULT_DIR}/international_latency_${family}_${idx}"
   local ip="" port="" json err_file rtt_us latency="-" status="FAIL"
   local first_port last_port error_reason="" error_lower="" retryable
@@ -3493,6 +3495,10 @@ international_latency_test_one() {
     ip=$(resolve_first_public_ipv6 "$host" || true)
   fi
   if [ -z "$ip" ]; then
+    if [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
+      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+      return
+    fi
     printf 'SKIP|%s|%s|%s|%s|%s||-\n' "$family" "$row_key" "$region" "$label" "$host" > "$outfile"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       printf 'status=SKIP\nreason=no-public-%s\n' "${family}" > "${outfile}.debug"
@@ -3556,6 +3562,10 @@ international_latency_test_one() {
     rm -f -- "$json" "$err_file"
     [ "$retryable" -eq 1 ] || break
   done
+  if [ "$status" != "OK" ] && [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
+    international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+    return
+  fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
     printf 'status=%s\nfamily=IPv%s\nhost=%s\nip=%s\nports=%s-%s\nreason=%s\n' \
       "$status" "$family" "$host" "$ip" "$first_port" "$last_port" "${error_reason:--}" \
@@ -3567,7 +3577,7 @@ international_latency_test_one() {
 
 run_international_tests() {
   local idx=0 launched=0 entry name provider domain path category total
-  local row_key region label host port v6_port family
+  local row_key region label host port v6_port fallback_host fallback_port family
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
   total=$(international_total_task_count)
@@ -3579,13 +3589,13 @@ run_international_tests() {
   for family in "${latency_families[@]}"; do
     idx=0
     for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
-      IFS='|' read -r row_key region label host port v6_port <<< "$entry"
+      IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port <<< "$entry"
       idx=$((idx + 1))
       while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
-      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" &
+      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" "$fallback_host" "$fallback_port" &
       launched=$((launched + 1))
       show_progress
     done
@@ -3637,7 +3647,7 @@ append_international_csv() {
 }
 
 append_international_latency_csv() {
-  local csv="$1" entry row_key region label host port v6_port family f i
+  local csv="$1" entry row_key region label host port v6_port fallback_host fallback_port family f i
   local status result_family result_row_key result_region result_label result_host ip lat loss
   local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]}
   local -a latency_families=()
@@ -3645,7 +3655,7 @@ append_international_latency_csv() {
 
   for ((i = 1; i <= target_count; i++)); do
     entry="${INTERNATIONAL_IPERF_TARGETS[i - 1]}"
-    IFS='|' read -r row_key region label host port v6_port <<< "$entry"
+    IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port <<< "$entry"
     for family in "${latency_families[@]}"; do
       f="${RESULT_DIR}/international_latency_${family}_${i}"
       [ -f "$f" ] || continue
