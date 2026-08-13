@@ -1007,7 +1007,12 @@ awk_table_helpers() {
     if (text == "三网概览") return 8
     if (text == "教育网概览") return 10
     if (text == "黑龙江" || text == "内蒙古") return 6
-    if (text == "服务" || text == "域名" || text == "可达" || text == "延迟") return 4
+    if (text == "区域" || text == "节点" || text == "服务" || text == "域名" || text == "可达" || text == "延迟") return 4
+    if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "香港" || text == "日本" || text == "巴西" || text == "伦敦") return 4
+    if (text == "新加坡" || text == "加拿大") return 6
+    if (text == "法兰克福") return 8
+    if (text == "阿姆斯特丹") return 10
+    if (text == "洛杉矶（美西）" || text == "达拉斯（美中）" || text == "芝加哥（美东）") return 14
     if (text == "丢包率") return 6
     if (text == "重传") return 4
     if (text == "✓" || text == "x") return 1
@@ -3470,7 +3475,8 @@ international_test_one() {
 international_latency_test_one() {
   local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}"
   local outfile="${RESULT_DIR}/international_latency_${family}_${idx}"
-  local ip="" port="$base_port" json err_file rtt_us latency status="FAIL"
+  local ip="" port="" json err_file rtt_us latency="-" status="FAIL"
+  local first_port last_port error_reason="" error_lower="" retryable
 
   if [ "$family" = "4" ]; then
     if is_public_ipv4 "$host"; then
@@ -3483,42 +3489,66 @@ international_latency_test_one() {
   fi
   if [ -z "$ip" ]; then
     printf 'SKIP|%s|%s|%s|%s|%s||-\n' "$family" "$row_key" "$region" "$label" "$host" > "$outfile"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+      printf 'status=SKIP\nreason=no-public-%s\n' "${family}" > "${outfile}.debug"
+    fi
     return
   fi
 
-  # 每个 Leaseweb 端口只允许一个连接；IPv6 使用相邻端口，避免同一目标的
-  # IPv4/IPv6 并行测试互相占用 5201。
-  if [ "$family" = "6" ]; then
-    port=$((base_port + 1))
-  fi
-  json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
-  err_file="${json}.err"
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 15 iperf3 "-${family}" -c "$ip" -p "$port" \
-      -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
-      -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
-      > "$json" 2> "$err_file" || true
+  # Leaseweb 每个端口只允许一个连接。IPv4/IPv6 使用互不重叠的端口池，
+  # 同时在遇到 busy/reset/refused 时尝试同一节点的其他 iPerf3 端口。
+  if [ "$family" = "4" ]; then
+    first_port="$base_port"
+    last_port=$((base_port + 4))
   else
-    iperf3 "-${family}" -c "$ip" -p "$port" \
-      -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
-      -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
-      > "$json" 2> "$err_file" || true
+    first_port=$((base_port + 5))
+    last_port=$((base_port + 9))
   fi
+  for ((port = first_port; port <= last_port; port++)); do
+    json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
+    err_file="${json}.err"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 15 iperf3 "-${family}" -c "$ip" -p "$port" \
+        -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+        -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+        > "$json" 2> "$err_file" || true
+    else
+      iperf3 "-${family}" -c "$ip" -p "$port" \
+        -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
+        -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
+        > "$json" 2> "$err_file" || true
+    fi
 
-  rtt_us=$(jq -r '
-    .end.streams[0].sender.mean_rtt
-    // .end.streams[0].receiver.mean_rtt
-    // .intervals[-1].streams[0].rtt
-    // empty
-  ' "$json" 2>/dev/null || true)
-  if jq -e '(.error? // "") == "" and (((.start.connected // []) | length) > 0)' "$json" >/dev/null 2>&1 \
-     && [[ "$rtt_us" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    latency=$(awk -v us="$rtt_us" 'BEGIN { printf "%.3f", us / 1000 }')
-    status="OK"
-  else
-    latency="-"
+    rtt_us=$(jq -r '
+      .end.streams[0].sender.mean_rtt
+      // .end.streams[0].receiver.mean_rtt
+      // .intervals[-1].streams[0].rtt
+      // empty
+    ' "$json" 2>/dev/null || true)
+    error_reason=$(jq -r '.error // empty' "$json" 2>/dev/null || true)
+    if [ -z "$error_reason" ] && [ -s "$err_file" ]; then
+      error_reason=$(tr '\n' ' ' < "$err_file" | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-240)
+    fi
+    if jq -e '(.error? // "") == "" and (((.start.connected // []) | length) > 0)' "$json" >/dev/null 2>&1 \
+       && [[ "$rtt_us" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      latency=$(awk -v us="$rtt_us" 'BEGIN { printf "%.3f", us / 1000 }')
+      status="OK"
+      rm -f -- "$json" "$err_file"
+      break
+    fi
+    error_lower=$(printf '%s' "$error_reason" | tr '[:upper:]' '[:lower:]')
+    retryable=0
+    case "$error_lower" in
+      *busy*|*reset*|*closed*|*refused*|*control*) retryable=1 ;;
+    esac
+    rm -f -- "$json" "$err_file"
+    [ "$retryable" -eq 1 ] || break
+  done
+  if [ "$DEBUG_MODE" -eq 1 ]; then
+    printf 'status=%s\nfamily=IPv%s\nhost=%s\nip=%s\nports=%s-%s\nreason=%s\n' \
+      "$status" "$family" "$host" "$ip" "$first_port" "$last_port" "${error_reason:--}" \
+      > "${outfile}.debug"
   fi
-  rm -f -- "$json" "$err_file"
   printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$status" "$family" "$row_key" "$region" "$label" "$host" "$ip" "$latency" > "$outfile"
 }
@@ -3772,7 +3802,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 5201-5202/tcp${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 IPv4 5201-5205/IPv6 5206-5210${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
