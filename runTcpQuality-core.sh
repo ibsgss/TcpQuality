@@ -396,6 +396,7 @@ INTERNATIONAL_CDN_TARGETS=(
 
 # Leaseweb speedtest 节点支持 iPerf3 TCP，端口范围为 5201-5210。
 # row_key 用于区分两行“美洲”，报告页面会按 row_key 分组并分别展示 IPv4/IPv6。
+# 目标格式：row_key|区域|节点|主机|IPv4 起始端口|可选 IPv6 起始端口。
 INTERNATIONAL_IPERF_TARGETS=(
   'asia|亚洲|香港|speedtest.hkg12.hk.leaseweb.net|5201'
   'asia|亚洲|日本|speedtest.tyo11.jp.leaseweb.net|5201'
@@ -404,10 +405,11 @@ INTERNATIONAL_IPERF_TARGETS=(
   'americas-us|美洲|达拉斯（美中）|speedtest.dal13.us.leaseweb.net|5201'
   'americas-us|美洲|芝加哥（美东）|speedtest.chi11.us.leaseweb.net|5201'
   'americas-latam|美洲|加拿大|speedtest.mtl2.ca.leaseweb.net|5201'
-  'americas-latam|美洲|巴西|138.199.4.1|5201'
+  'americas-latam|美洲|巴西|speedtest.sao1.edgoo.net|9209|9208'
   'europe|欧洲|法兰克福|speedtest.fra1.de.leaseweb.net|5201'
   'europe|欧洲|伦敦|speedtest.lon1.uk.leaseweb.net|5201'
   'europe|欧洲|阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
+  'oceania|大洋洲|悉尼|speedtest.syd12.au.leaseweb.net|5201'
 )
 
 # ===================== 省份筛选 =====================
@@ -638,7 +640,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
-  Leaseweb 国际节点延迟使用 iPerf3 TCP RTT，报告按亚洲、美洲、欧洲分组展示 IPv4/IPv6 两列。
+  国际节点延迟使用 iPerf3 TCP RTT；每行最多三个节点，先列三个节点的 IPv4，再列对应的 IPv6。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -1008,7 +1010,8 @@ awk_table_helpers() {
     if (text == "教育网概览") return 10
     if (text == "黑龙江" || text == "内蒙古") return 6
     if (text == "区域" || text == "节点" || text == "服务" || text == "域名" || text == "可达" || text == "延迟") return 4
-    if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "香港" || text == "日本" || text == "巴西" || text == "伦敦") return 4
+    if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "悉尼" || text == "香港" || text == "日本" || text == "巴西" || text == "伦敦") return 4
+    if (text == "大洋洲") return 6
     if (text == "新加坡" || text == "加拿大") return 6
     if (text == "法兰克福") return 8
     if (text == "阿姆斯特丹") return 10
@@ -3473,10 +3476,12 @@ international_test_one() {
 }
 
 international_latency_test_one() {
-  local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}"
+  local idx="$1" family="$2" row_key="$3" region="$4" label="$5" host="$6" base_port="${7:-5201}" v6_base_port="${8:-}"
   local outfile="${RESULT_DIR}/international_latency_${family}_${idx}"
   local ip="" port="" json err_file rtt_us latency="-" status="FAIL"
   local first_port last_port error_reason="" error_lower="" retryable
+
+  [[ "$base_port" =~ ^[0-9]+$ ]] || base_port=5201
 
   if [ "$family" = "4" ]; then
     if is_public_ipv4 "$host"; then
@@ -3501,8 +3506,15 @@ international_latency_test_one() {
     first_port="$base_port"
     last_port=$((base_port + 4))
   else
-    first_port=$((base_port + 5))
+    if [[ "$v6_base_port" =~ ^[0-9]+$ ]]; then
+      first_port="$v6_base_port"
+    else
+      first_port=$((base_port + 5))
+    fi
     last_port=$((base_port + 9))
+    if [ "$first_port" = "$v6_base_port" ]; then
+      last_port=$((first_port + 4))
+    fi
   fi
   for ((port = first_port; port <= last_port; port++)); do
     json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
@@ -3555,7 +3567,7 @@ international_latency_test_one() {
 
 run_international_tests() {
   local idx=0 launched=0 entry name provider domain path category total
-  local row_key region label host port family
+  local row_key region label host port v6_port family
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
   total=$(international_total_task_count)
@@ -3567,13 +3579,13 @@ run_international_tests() {
   for family in "${latency_families[@]}"; do
     idx=0
     for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
-      IFS='|' read -r row_key region label host port <<< "$entry"
+      IFS='|' read -r row_key region label host port v6_port <<< "$entry"
       idx=$((idx + 1))
       while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
         show_progress
         sleep 0.2
       done
-      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" &
+      international_latency_test_one "$idx" "$family" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" &
       launched=$((launched + 1))
       show_progress
     done
@@ -3625,7 +3637,7 @@ append_international_csv() {
 }
 
 append_international_latency_csv() {
-  local csv="$1" entry row_key region label host port family f i
+  local csv="$1" entry row_key region label host port v6_port family f i
   local status result_family result_row_key result_region result_label result_host ip lat loss
   local target_count=${#INTERNATIONAL_IPERF_TARGETS[@]}
   local -a latency_families=()
@@ -3633,7 +3645,7 @@ append_international_latency_csv() {
 
   for ((i = 1; i <= target_count; i++)); do
     entry="${INTERNATIONAL_IPERF_TARGETS[i - 1]}"
-    IFS='|' read -r row_key region label host port <<< "$entry"
+    IFS='|' read -r row_key region label host port v6_port <<< "$entry"
     for family in "${latency_families[@]}"; do
       f="${RESULT_DIR}/international_latency_${family}_${i}"
       [ -f "$f" ] || continue
@@ -3661,8 +3673,9 @@ show_international_latency_results() {
   } | awk -F'|' -v cyan="$CYAN" -v white="$WHITE" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" '
   BEGIN {
     region_w = 8
-    label_w = 18
+    cell_w = 16
     value_w = 9
+    block_w = cell_w * 3 + 6
   }
 '"$(awk_table_helpers)"'
   function value(status, latency) {
@@ -3690,21 +3703,38 @@ show_international_latency_results() {
     s = slot[row_key, label]
     values[row_key, s, family] = value(status, $8)
   }
+  function label_cells(key,    family, s, text, label) {
+    text = ""
+    for (family = 4; family <= 6; family += 2) {
+      for (s = 1; s <= 3; s++) {
+        label = labels[key, s]
+        if (label == "") label = "-"
+        text = text pad_right(label, cell_w) "  "
+      }
+    }
+    return text
+  }
+  function value_cells(key,    family, s, text, value_text) {
+    text = ""
+    for (family = 4; family <= 6; family += 2) {
+      for (s = 1; s <= 3; s++) {
+        value_text = values[key, s, family]
+        if (value_text == "") value_text = "-"
+        text = text pad_right(pad_left(value_text, value_w), cell_w) "  "
+      }
+    }
+    return text
+  }
   END {
     printf "  %s%s国际节点延迟（iPerf3 TCP RTT）%s\n", bold, cyan, nc
-    printf "  %s%s  %s  %s  %s%s\n", cyan, \
+    printf "  %s%s  %s  %s%s\n", cyan, \
       pad_right("区域", region_w), \
-      pad_right("节点", label_w), \
-      pad_left("IPv4", value_w), pad_left("IPv6", value_w), nc
+      center_display("IPv4", block_w, display_width("IPv4")), \
+      center_display("IPv6", block_w, display_width("IPv6")), nc
     for (r = 1; r <= row_count; r++) {
       key = row_order[r]
-      for (s = 1; s <= slot_count[key]; s++) {
-        printf "  %s  %s  %s  %s\n", \
-          s == 1 ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
-          pad_right(labels[key, s], label_w), \
-          pad_left(values[key, s, 4] == "" ? "-" : values[key, s, 4], value_w), \
-          pad_left(values[key, s, 6] == "" ? "-" : values[key, s, 6], value_w)
-      }
+      printf "  %s  %s\n", pad_right("", region_w), label_cells(key)
+      printf "  %s  %s\n", pad_right(row_region[key], region_w), value_cells(key)
     }
     printf "  %sIPv4/IPv6 为 iPerf3 TCP RTT；- 表示该协议不可用或节点未响应。%s\n\n", dim, nc
   }'
@@ -3802,7 +3832,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 IPv4 5201-5205/IPv6 5206-5210${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟节点: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)  并行: $PARALLEL  端口: 443/tcp、iPerf3 默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
