@@ -305,6 +305,7 @@ fi
 INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-5}"
 INTERNATIONAL_IPERF_RATE="${TCPQUALITY_INTERNATIONAL_IPERF_RATE:-1M}"
 INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS="${TCPQUALITY_INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS:-5000}"
+INTERNATIONAL_IPERF_MAX_ATTEMPTS=3
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -644,7 +645,7 @@ NixOS:
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
-  国际节点 iPerf3 默认限速 1M、测试 5 秒；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
+  国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 3 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -3526,7 +3527,7 @@ international_latency_test_one() {
   local fallback_v6_host="${12:-}" fallback_v6_base_port="${13:-}"
   local outfile="${RESULT_DIR}/international_latency_${family}_${direction}_${idx}"
   local ip="" port="" json err_file rtt_us tcp_rtt_ms latency="-" retransmits="-" candidate_retransmits="" status="FAIL"
-  local first_port last_port error_reason="" error_lower="" retryable iperf_pid
+  local first_port last_port attempt=0 error_reason="" iperf_pid
   local -a iperf_direction_args=()
 
   [[ "$base_port" =~ ^[0-9]+$ ]] || base_port=5201
@@ -3562,22 +3563,19 @@ international_latency_test_one() {
   fi
 
   # Leaseweb 每个端口只允许一个连接。IPv4/IPv6 使用互不重叠的端口池，
-  # 同时在遇到 busy/reset/refused 时尝试同一节点的其他 iPerf3 端口。
+  # 每个节点/协议/方向最多尝试 3 个端口，任意一次成功即停止。
   if [ "$family" = "4" ]; then
     first_port="$base_port"
-    last_port=$((base_port + 4))
   else
     if [[ "$v6_base_port" =~ ^[0-9]+$ ]]; then
       first_port="$v6_base_port"
     else
       first_port=$((base_port + 5))
     fi
-    last_port=$((base_port + 9))
-    if [ "$first_port" = "$v6_base_port" ]; then
-      last_port=$((first_port + 4))
-    fi
   fi
+  last_port=$((first_port + INTERNATIONAL_IPERF_MAX_ATTEMPTS - 1))
   for ((port = first_port; port <= last_port; port++)); do
+    attempt=$((attempt + 1))
     json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
     err_file="${json}.err"
     tcp_rtt_ms=""
@@ -3649,13 +3647,8 @@ international_latency_test_one() {
       fi
       error_reason="${error_reason:-no-rtt}"
     fi
-    error_lower=$(printf '%s' "$error_reason" | tr '[:upper:]' '[:lower:]')
-    retryable=0
-    case "$error_lower" in
-      *busy*|*reset*|*closed*|*refused*|*control*) retryable=1 ;;
-    esac
     rm -f -- "$json" "$err_file"
-    [ "$retryable" -eq 1 ] || break
+    [ "$attempt" -lt "$INTERNATIONAL_IPERF_MAX_ATTEMPTS" ] || break
   done
   if [ "$status" != "OK" ] && [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
     international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
@@ -3822,6 +3815,16 @@ show_international_latency_results() {
   function colored_latency(value_text) {
     return latency_color(value_text) pad_left(value_text, latency_w) nc
   }
+  function retransmission_color(value_text, numeric) {
+    if (value_text == "-" || value_text == "") return red
+    numeric = value_text + 0
+    if (numeric >= 50) return red
+    if (numeric > 10) return yellow
+    return green
+  }
+  function colored_retransmission(value_text) {
+    return retransmission_color(value_text) pad_left(value_text, retrans_w) nc
+  }
   function metric_header(text, width) {
     return spaces(width - 8) text
   }
@@ -3837,9 +3840,9 @@ show_international_latency_results() {
     printf "  %s  %s  ", region_text, label_text
     printf "%s  %s  %s  %s\n", \
       colored_latency(metric_latency(key, slot, "download", family)), \
-      pad_left(metric_retransmissions(key, slot, "download", family), retrans_w), \
+      colored_retransmission(metric_retransmissions(key, slot, "download", family)), \
       colored_latency(metric_latency(key, slot, "upload", family)), \
-      pad_left(metric_retransmissions(key, slot, "upload", family), retrans_w)
+      colored_retransmission(metric_retransmissions(key, slot, "upload", family))
   }
   function print_header() {
     printf "  %s%s  %s  ", cyan, \
@@ -4006,7 +4009,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，默认 IPv4 5201-5205/IPv6 5206-5210（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
