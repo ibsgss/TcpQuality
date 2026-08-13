@@ -404,12 +404,12 @@ INTERNATIONAL_IPERF_TARGETS=(
   'americas-us|美洲|洛杉矶（美西）|speedtest.lax12.us.leaseweb.net|5201'
   'americas-us|美洲|达拉斯（美中）|speedtest.dal13.us.leaseweb.net|5201'
   'americas-us|美洲|芝加哥（美东）|speedtest.chi11.us.leaseweb.net|5201'
-  'americas-latam|美洲|加拿大|speedtest.mtl2.ca.leaseweb.net|5201'
-  # 巴西：Edgoo 圣保罗优先；Leaseweb MIA-11 仅作为 IPv4 备用，IPv6 不设置备用。
-  'americas-latam|美洲|巴西|speedtest.sao1.edgoo.net|9209|9208|speedtest.mia11.us.leaseweb.net|5201'
-  'europe|欧洲|法兰克福|speedtest.fra1.de.leaseweb.net|5201'
-  'europe|欧洲|伦敦|speedtest.lon1.uk.leaseweb.net|5201'
-  'europe|欧洲|阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
+  'americas-latam|美洲|加拿大-蒙特利尔|speedtest.mtl2.ca.leaseweb.net|5201'
+  # 巴西：Edgoo 节点优先；Leaseweb MIA-11 仅作为 IPv4 备用，IPv6 不设置备用。
+  'americas-latam|美洲|巴西-里约热内卢|speedtest.sao1.edgoo.net|9209|9208|speedtest.mia11.us.leaseweb.net|5201'
+  'europe|欧洲|德国-法兰克福|speedtest.fra1.de.leaseweb.net|5201'
+  'europe|欧洲|英国-伦敦|speedtest.lon1.uk.leaseweb.net|5201'
+  'europe|欧洲|荷兰-阿姆斯特丹|speedtest.ams1.nl.leaseweb.net|5201'
   'oceania|大洋洲|悉尼|speedtest.syd12.au.leaseweb.net|5201'
 )
 
@@ -1011,11 +1011,12 @@ awk_table_helpers() {
     if (text == "教育网概览") return 10
     if (text == "黑龙江" || text == "内蒙古") return 6
     if (text == "区域" || text == "节点" || text == "服务" || text == "域名" || text == "可达" || text == "延迟") return 4
-    if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "悉尼" || text == "香港" || text == "日本" || text == "巴西" || text == "伦敦") return 4
+    if (text == "亚洲" || text == "美洲" || text == "欧洲" || text == "悉尼" || text == "香港" || text == "日本") return 4
     if (text == "大洋洲") return 6
-    if (text == "新加坡" || text == "加拿大") return 6
-    if (text == "法兰克福") return 8
-    if (text == "阿姆斯特丹") return 10
+    if (text == "新加坡") return 6
+    if (text == "加拿大-蒙特利尔" || text == "巴西-里约热内卢" || text == "荷兰-阿姆斯特丹") return 15
+    if (text == "德国-法兰克福") return 13
+    if (text == "英国-伦敦") return 9
     if (text == "洛杉矶（美西）" || text == "达拉斯（美中）" || text == "芝加哥（美东）") return 14
     if (text == "丢包率") return 6
     if (text == "重传") return 4
@@ -3725,13 +3726,12 @@ show_international_latency_results() {
       key = row_order[r]
       for (s = 1; s <= slot_count[key]; s++) {
         printf "  %s  %s  %s  %s\n", \
-          s == 1 ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
+          s == 1 && key != "americas-latam" ? pad_right(row_region[key], region_w) : pad_right("", region_w), \
           pad_right(labels[key, s], label_w), \
           pad_left(values[key, s, 4] == "" ? "-" : values[key, s, 4], value_w), \
           pad_left(values[key, s, 6] == "" ? "-" : values[key, s, 6], value_w)
       }
     }
-    printf "  %sIPv4/IPv6 为 iPerf3 TCP RTT；- 表示该协议不可用或节点未响应。%s\n\n", dim, nc
   }'
 }
 
