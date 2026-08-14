@@ -28,8 +28,8 @@ runs:
         RUN export DEBIAN_FRONTEND=noninteractive \
             && apt-get update -qq \
             && apt-get install -y -qq --no-install-recommends \
-              bash ca-certificates coreutils curl dnsutils findutils gawk grep \
-              iproute2 iptables iputils-ping kmod nmap ncurses-bin sed tar \
+              bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 \
+              iproute2 iptables iputils-ping jq kmod nmap ncurses-bin sed tar \
               traceroute tzdata \
             && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
             && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
