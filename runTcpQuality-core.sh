@@ -403,9 +403,9 @@ INTERNATIONAL_IPERF_TARGETS=(
   'asia|亚洲|香港|speedtest.hkg12.hk.leaseweb.net|5201'
   'asia|亚洲|日本|speedtest.tyo11.jp.leaseweb.net|5201'
   'asia|亚洲|新加坡|speedtest.sin1.sg.leaseweb.net|5201'
-  'americas-us|美洲|美国东部-洛杉矶|speedtest.lax12.us.leaseweb.net|5201'
+  'americas-us|美洲|美国西部-洛杉矶|speedtest.lax12.us.leaseweb.net|5201'
   'americas-us|美洲|美国中部-达拉斯|speedtest.dal13.us.leaseweb.net|5201'
-  'americas-us|美洲|美国西部-芝加哥|speedtest.chi11.us.leaseweb.net|5201'
+  'americas-us|美洲|美国东部-芝加哥|speedtest.chi11.us.leaseweb.net|5201'
   'americas-latam|美洲|加拿大-蒙特利尔|speedtest.mtl2.ca.leaseweb.net|5201'
   # 巴西：Edgoo 节点优先；Leaseweb MIA-11 仅作为 IPv4 备用，IPv6 不设置备用。
   'americas-latam|美洲|巴西-里约热内卢|speedtest.sao1.edgoo.net|9209|9208|speedtest.mia11.us.leaseweb.net|5201'
@@ -1022,7 +1022,7 @@ awk_table_helpers() {
     if (text == "加拿大-蒙特利尔" || text == "巴西-里约热内卢" || text == "荷兰-阿姆斯特丹") return 15
     if (text == "德国-法兰克福") return 13
     if (text == "英国-伦敦") return 9
-    if (text == "美国东部-洛杉矶" || text == "美国中部-达拉斯" || text == "美国西部-芝加哥") return 15
+    if (text == "美国西部-洛杉矶" || text == "美国中部-达拉斯" || text == "美国东部-芝加哥") return 15
     if (text == "丢包率") return 6
     if (text == "重传") return 4
     if (text == "✓" || text == "x") return 1
