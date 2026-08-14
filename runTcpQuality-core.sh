@@ -4000,7 +4000,7 @@ show_international_results() {
         split(cdns[i], a, SUBSEP)
         row(a[1], a[2], a[3], a[4], a[5], a[6])
       }
-      printf "  %s颜色: %s0-2ms 正常%s  %s2-10ms 一般%s  %s>10ms 异常，或不可达%s\n\n", dim, green, dim, yellow, dim, red, nc
+      printf "  %s颜色: %s0-2ms 正常%s  %s2-10ms 一般%s  %s>10ms 较高%s\n\n", dim, green, dim, yellow, dim, red, nc
     }
   }'
 }
