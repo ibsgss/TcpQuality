@@ -305,7 +305,7 @@ fi
 INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-5}"
 INTERNATIONAL_IPERF_RATE="${TCPQUALITY_INTERNATIONAL_IPERF_RATE:-1M}"
 INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS="${TCPQUALITY_INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS:-5000}"
-INTERNATIONAL_IPERF_MAX_ATTEMPTS=3
+INTERNATIONAL_IPERF_MAX_ATTEMPTS=10
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -645,7 +645,7 @@ NixOS:
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
-  国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 3 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
+  国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -3563,7 +3563,7 @@ international_latency_test_one() {
   fi
 
   # Leaseweb 每个端口只允许一个连接。IPv4/IPv6 使用互不重叠的端口池，
-  # 每个节点/协议/方向最多尝试 3 个端口，任意一次成功即停止。
+  # 每个节点/协议/方向最多尝试 10 次，循环使用同一协议的 5 个端口，任意一次成功即停止。
   if [ "$family" = "4" ]; then
     first_port="$base_port"
   else
@@ -3573,9 +3573,11 @@ international_latency_test_one() {
       first_port=$((base_port + 5))
     fi
   fi
-  last_port=$((first_port + INTERNATIONAL_IPERF_MAX_ATTEMPTS - 1))
-  for ((port = first_port; port <= last_port; port++)); do
+  last_port=$((first_port + 4))
+  attempt=0
+  while [ "$attempt" -lt "$INTERNATIONAL_IPERF_MAX_ATTEMPTS" ]; do
     attempt=$((attempt + 1))
+    port=$((first_port + ( (attempt - 1) % 5 )))
     json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
     err_file="${json}.err"
     tcp_rtt_ms=""
@@ -3659,8 +3661,8 @@ international_latency_test_one() {
     return
   fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    printf 'status=%s\nfamily=IPv%s\ndirection=%s\nhost=%s\nip=%s\nports=%s-%s\nrtt_tcp_info_ms=%s\nretransmits=%s\nreason=%s\n' \
-      "$status" "$family" "$direction" "$host" "$ip" "$first_port" "$last_port" "${tcp_rtt_ms:--}" "$retransmits" "${error_reason:--}" \
+    printf 'status=%s\nfamily=IPv%s\ndirection=%s\nhost=%s\nip=%s\nports=%s-%s\nattempts=%s\nrtt_tcp_info_ms=%s\nretransmits=%s\nreason=%s\n' \
+      "$status" "$family" "$direction" "$host" "$ip" "$first_port" "$last_port" "$attempt" "${tcp_rtt_ms:--}" "$retransmits" "${error_reason:--}" \
       > "${outfile}.debug"
   fi
   printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
