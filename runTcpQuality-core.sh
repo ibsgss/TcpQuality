@@ -4788,11 +4788,11 @@ speedtest_run_probe() {
   if [ "$result" = "failed" ]; then
     # 失败方向没有有效的目标重传/延迟数据；nstat 是主机全局计数，不能作为该方向的结果。
     retrans="failed"
-    reported_connect_ms="-"
-    reported_tls_ms="-"
+    reported_connect_ms="failed"
+    reported_tls_ms="failed"
     sed -i \
-      -e 's/^Build connection cost: .*/Build connection cost: - ms/' \
-      -e 's/^Tls handshake cost: .*/Tls handshake cost: - ms/' \
+      -e 's/^Build connection cost: .*/Build connection cost: failed/' \
+      -e 's/^Tls handshake cost: .*/Tls handshake cost: failed/' \
       "$output_file"
   else
     reported_connect_ms="$build_ms"
