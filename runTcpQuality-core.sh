@@ -4051,6 +4051,8 @@ SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
 SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api64.ipify.org}"
+SPEEDTEST_IPV6_CHECKED=0
+SPEEDTEST_IPV6_AVAILABLE=0
 SPEEDTEST_TOS_REMOTE_LOADED=0
 SPEEDTEST_APPLECDN6_REMOTE_LOADED=0
 SPEEDTEST_APPLECDN6_NODES=()
@@ -4123,8 +4125,13 @@ speedtest_applecdn_tests_enabled() {
   return 0
 }
 
+speedtest_applecdn6_tests_enabled() {
+  speedtest_applecdn_tests_enabled || return 1
+  speedtest_ipv6_available
+}
+
 speedtest_applecdn6_count() {
-  speedtest_applecdn_tests_enabled || {
+  speedtest_applecdn6_tests_enabled || {
     printf '0'
     return 0
   }
@@ -4933,12 +4940,24 @@ speedtest_ipv4_available() {
 
 speedtest_ipv6_available() {
   local response
+  if [ "$SPEEDTEST_IPV6_CHECKED" -eq 1 ]; then
+    [ "$SPEEDTEST_IPV6_AVAILABLE" -eq 1 ]
+    return
+  fi
+  SPEEDTEST_IPV6_CHECKED=1
+  SPEEDTEST_IPV6_AVAILABLE=0
+  if ipv6_available; then
+    SPEEDTEST_IPV6_AVAILABLE=1
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
   response=$(curl -6 -fsS --connect-timeout 5 --max-time 8 \
     "$SPEEDTEST_IPV6_PROBE_URL" 2>/dev/null | \
     awk 'NR == 1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
   if is_valid_ipv6 "$response"; then
     IPV6_PUBLIC="$response"
     IPV6_WORK=1
+    SPEEDTEST_IPV6_AVAILABLE=1
     return 0
   fi
   return 1
@@ -5079,7 +5098,7 @@ speedtest_collect_applecdn6() {
   local download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local node_value selected_ip
   local values=()
-  speedtest_applecdn_tests_enabled || return 0
+  speedtest_applecdn6_tests_enabled || return 0
   load_remote_applecdn6_nodes || true
 
   for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
@@ -5164,21 +5183,9 @@ speedtest_pad_center() {
 }
 
 speedtest_print_group_header() {
-  local label="$1" column_label="${2:-IPv4}" title
-  if [ "$label" = "不限" ]; then
-    title='不限速'
-  elif [[ "$label" == *Mbps ]]; then
-    title="限速 $label"
-  else
-    title="$label"
-  fi
+  local column_label="${2:-IPv4}"
 
   # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
-  printf '  '
-  printf '%b' "$CYAN"
-  speedtest_pad_center 82 "$title"
-  printf '%b' "$NC"
-  printf '\n'
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 12 "$column_label"; printf '%b' "$NC"
   printf '  '
@@ -5196,12 +5203,7 @@ speedtest_print_group_header() {
 
 speedtest_print_applecdn_header() {
   printf '  '
-  printf '%b' "$CYAN"
-  speedtest_pad_center 82 'AppleCDN'
-  printf '%b' "$NC"
-  printf '\n'
-  printf '  '
-  printf '%b' "$CYAN"; speedtest_pad_left 12 '名称'; printf '%b' "$NC"
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '国际方向'; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 10 '下载重传'; printf '%b' "$NC"
   printf '  '
@@ -5338,8 +5340,10 @@ collect_speedtest_results() {
   apple_ipv6_steps=0
   if speedtest_applecdn_tests_enabled; then
     apple_steps=1
-    load_remote_applecdn6_nodes || true
-    apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
+    if speedtest_applecdn6_tests_enabled; then
+      load_remote_applecdn6_nodes || true
+      apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
+    fi
   fi
   [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]} + apple_steps + apple_ipv6_steps))
 
@@ -5482,13 +5486,15 @@ speedtest_set_failed_rows() {
     SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
   if speedtest_applecdn_tests_enabled; then
-    load_remote_applecdn6_nodes || true
-    for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
-      node_label="${node%%|*}"
-      node_candidates="${node#*|}"
-      ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
-    done
-    [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
+    if speedtest_applecdn6_tests_enabled; then
+      load_remote_applecdn6_nodes || true
+      for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
+        node_label="${node%%|*}"
+        node_candidates="${node#*|}"
+        ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
+      done
+      [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
+    fi
     SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;")
   fi
 }
