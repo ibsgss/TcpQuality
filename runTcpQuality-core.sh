@@ -4139,6 +4139,18 @@ speedtest_applecdn6_count() {
   printf '%s' "${#SPEEDTEST_APPLECDN6_NODES[@]}"
 }
 
+speedtest_applecdn_international_count() {
+  speedtest_applecdn_tests_enabled || {
+    printf '0'
+    return 0
+  }
+  if speedtest_applecdn6_tests_enabled; then
+    printf '2'
+  else
+    printf '1'
+  fi
+}
+
 request_rank_session() {
   local response_file session_id token started_at expires_at session_ip4
   RANK_SESSION_ID=""
@@ -5067,8 +5079,12 @@ speedtest_applecdn_curl_upload() {
 speedtest_collect_applecdn() {
   local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local apple_values=()
+  local apple_families=("Apple IPv4:-4")
   speedtest_applecdn_tests_enabled || return 0
-  for family_name in "Apple IPv4:-4"; do
+  if speedtest_applecdn6_tests_enabled; then
+    apple_families+=("Apple IPv6:-6")
+  fi
+  for family_name in "${apple_families[@]}"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
     if [ "$ip_flag" = "-4" ] && ! speedtest_ipv4_available; then
@@ -5090,7 +5106,7 @@ speedtest_collect_applecdn() {
     fi
     [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
   done
-  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};")
+  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};${apple_values[1]:-};")
 }
 
 speedtest_collect_applecdn6() {
@@ -5339,7 +5355,7 @@ collect_speedtest_results() {
   apple_steps=0
   apple_ipv6_steps=0
   if speedtest_applecdn_tests_enabled; then
-    apple_steps=1
+    apple_steps=$(speedtest_applecdn_international_count)
     if speedtest_applecdn6_tests_enabled; then
       load_remote_applecdn6_nodes || true
       apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
@@ -5444,7 +5460,7 @@ collect_speedtest_results() {
       speedtest_show_progress "$done" "$total"
     fi
     speedtest_collect_applecdn
-    done=$((done + 1))
+    done=$((done + apple_steps))
     speedtest_show_progress "$done" "$total"
   fi
 
@@ -5479,7 +5495,7 @@ collect_speedtest_results() {
 
 speedtest_set_failed_rows() {
   SPEEDTEST_ROWS=()
-  local label region rate node node_label node_candidates
+  local label region rate node node_label node_candidates apple_row
   local ipv6_values=()
   while IFS='|' read -r label region rate; do
     [ -n "$label" ] || continue
@@ -5495,7 +5511,11 @@ speedtest_set_failed_rows() {
       done
       [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
     fi
-    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;")
+    apple_row="AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-"
+    if speedtest_applecdn6_tests_enabled; then
+      apple_row+=";failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-"
+    fi
+    SPEEDTEST_ROWS+=("$apple_row;")
   fi
 }
 
@@ -5732,7 +5752,7 @@ append_speedtest_csv() {
       continue
     fi
     if [ "$label" = "AppleCDN" ]; then
-      for result in "$result1"; do
+      for result in "$result1" "$result2"; do
         [ -n "$result" ] || continue
         IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
         if [ "$upload" = "-" ] && [ "$download" = "-" ]; then
@@ -5946,7 +5966,7 @@ main() {
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
     if speedtest_applecdn_tests_enabled; then
-      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
+      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + $(speedtest_applecdn_international_count)))
     fi
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
