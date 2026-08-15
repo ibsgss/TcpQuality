@@ -4113,7 +4113,21 @@ speedtest_group_count() {
   speedtest_group_specs | awk 'NF{count++} END{print count + 0}'
 }
 
+speedtest_applecdn_tests_enabled() {
+  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 1
+  if [[ "$SELECTED_PROVINCES" == *"|北京|"* ||
+        "$SELECTED_PROVINCES" == *"|上海|"* ||
+        "$SELECTED_PROVINCES" == *"|广东|"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
 speedtest_applecdn6_count() {
+  speedtest_applecdn_tests_enabled || {
+    printf '0'
+    return 0
+  }
   load_remote_applecdn6_nodes || true
   printf '%s' "${#SPEEDTEST_APPLECDN6_NODES[@]}"
 }
@@ -5034,7 +5048,7 @@ speedtest_applecdn_curl_upload() {
 speedtest_collect_applecdn() {
   local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local apple_values=()
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 0
+  speedtest_applecdn_tests_enabled || return 0
   for family_name in "Apple IPv4:-4"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
@@ -5065,7 +5079,7 @@ speedtest_collect_applecdn6() {
   local download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local node_value selected_ip
   local values=()
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 0
+  speedtest_applecdn_tests_enabled || return 0
   load_remote_applecdn6_nodes || true
 
   for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
@@ -5322,7 +5336,7 @@ collect_speedtest_results() {
   total=${SPEEDTEST_PROGRESS_TOTAL:-0}
   apple_steps=0
   apple_ipv6_steps=0
-  if [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ]; then
+  if speedtest_applecdn_tests_enabled; then
     apple_steps=1
     load_remote_applecdn6_nodes || true
     apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
@@ -5419,7 +5433,7 @@ collect_speedtest_results() {
   done < <(speedtest_group_specs)
 
   speedtest_cleanup
-  if [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ]; then
+  if speedtest_applecdn_tests_enabled; then
     if [ "$apple_ipv6_steps" -gt 0 ]; then
       speedtest_collect_applecdn6
       done=$((done + apple_ipv6_steps))
@@ -5467,15 +5481,16 @@ speedtest_set_failed_rows() {
     [ -n "$label" ] || continue
     SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
-  load_remote_applecdn6_nodes || true
-  for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
-    node_label="${node%%|*}"
-    node_candidates="${node#*|}"
-    ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
-  done
-  [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && \
+  if speedtest_applecdn_tests_enabled; then
+    load_remote_applecdn6_nodes || true
+    for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
+      node_label="${node%%|*}"
+      node_candidates="${node#*|}"
+      ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
+    done
+    [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
     SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;")
+  fi
 }
 
 speedtest_load_background_state() {
@@ -5924,7 +5939,7 @@ main() {
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
-    if [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ]; then
+    if speedtest_applecdn_tests_enabled; then
       SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
     fi
   fi
