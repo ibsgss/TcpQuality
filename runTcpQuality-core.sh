@@ -59,7 +59,7 @@ bootstrap_nixos_environment() {
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
-    # 单线程测速会按需下载官方 tosutil 二进制。
+    # 单线程测速只依赖 curl，使用 --resolve 固定 TOS 目标 IP。
     :
   fi
 
@@ -617,7 +617,7 @@ TcpQuality 节点 TCP 丢包探测脚本
 
 NixOS:
   脚本会自动通过 nix shell 提供运行依赖，不会写入 environment.systemPackages。
-  使用 --speedtest/--only-speedtest 时会临时下载 tosutil 做单线程测速。
+  使用 --speedtest/--only-speedtest 时会通过 curl --resolve 固定 TOS IP 做单线程测速。
 
 选项:
   -h, --help        显示帮助信息并退出
@@ -661,7 +661,7 @@ NixOS:
   - iperf3/jq/ss: 国际节点 iPerf3 TCP RTT、双向重传与反向 TCP_INFO RTT 解析
   - traceroute: 用于自动识别三网 TCP 回程线路
   - nexttrace-tiny: 可选；用于 IPv4大包回程的 TCP 1200B 大包路由识别
-  - tosutil/iproute2: 单线程测速使用
+  - curl/iproute2: 单线程测速使用
   - awk/sed/grep: 用于结果解析和展示
 
 安装提示:
@@ -4037,30 +4037,10 @@ run_international_mode() {
 
 # ===================== 国内单线程测速 =====================
 SPEEDTEST_IFACE=""
-speedtest_tosutil_url() {
-  local arch tos_arch
-  if [ -n "${TOSUTIL_URL:-}" ]; then
-    printf '%s' "$TOSUTIL_URL"
-    return 0
-  fi
-  arch=$(uname -m 2>/dev/null || printf unknown)
-  case "$arch" in
-    x86_64|amd64) tos_arch=amd64 ;;
-    aarch64|arm64) tos_arch=arm64 ;;
-    *)
-      return 1
-      ;;
-  esac
-  printf 'https://m645b3e1bb36e-mrap.mrap.accesspoint.tos-global.volces.com/linux/%s/tosutil' "$tos_arch"
-}
-
-SPEEDTEST_TOSUTIL_URL="${SPEEDTEST_TOSUTIL_URL:-$(speedtest_tosutil_url || true)}"
-SPEEDTEST_TOSUTIL_BIN="${TOSUTIL_BIN:-}"
 SPEEDTEST_TOS_REGION="${TOS_REGION:-cn-beijing}"
 SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
 SPEEDTEST_TOS_SIZE="${TOS_PROBE_SIZE:-5GB}"
 SPEEDTEST_TOS_TIMEOUT="${TOS_TIMEOUT:-15}"
-SPEEDTEST_TOS_WARMUP="${TOS_WARMUP:-5}"
 SPEEDTEST_APPLECDN_ENABLED="${SPEEDTEST_APPLECDN_ENABLED:-1}"
 SPEEDTEST_APPLECDN_DOWNLOAD_URL="${SPEEDTEST_APPLECDN_DOWNLOAD_URL:-https://mensura.cdn-apple.com/api/v1/gm/large}"
 SPEEDTEST_APPLECDN_UPLOAD_URL="${SPEEDTEST_APPLECDN_UPLOAD_URL:-https://mensura.cdn-apple.com/api/v1/gm/slurp}"
@@ -4078,10 +4058,6 @@ SPEEDTEST_TOS_CM_CITY="北京"
 SPEEDTEST_TOS_CT_CANDIDATES="${TOS_CT_IP:-42.81.80.86}|北京|cn-beijing"
 SPEEDTEST_TOS_CU_CANDIDATES="${TOS_CU_IP:-221.194.175.109}|北京|cn-beijing"
 SPEEDTEST_TOS_CM_CANDIDATES="${TOS_CM_IP:-120.255.0.180}|北京|cn-beijing"
-SPEEDTEST_HOSTS_BACKUP=""
-SPEEDTEST_HOSTS_EXISTED=0
-SPEEDTEST_HOSTS_MARK_BEGIN="# tcpquality-tos-speedtest begin"
-SPEEDTEST_HOSTS_MARK_END="# tcpquality-tos-speedtest end"
 SPEEDTEST_TELECOM_ID=""
 SPEEDTEST_TELECOM_CITY=""
 SPEEDTEST_UNICOM_ID=""
@@ -4281,7 +4257,6 @@ speedtest_set_selected() {
 
 speedtest_cleanup() {
   speedtest_counter_stop_current
-  speedtest_restore_hosts
 }
 
 speedtest_dependencies_ready() {
@@ -4318,45 +4293,6 @@ install_speedtest_dependencies() {
   return 1
 }
 
-install_tosutil_speedtest() {
-  local existing
-  if [ -n "$SPEEDTEST_TOSUTIL_BIN" ] && [ -x "$SPEEDTEST_TOSUTIL_BIN" ]; then
-    if "$SPEEDTEST_TOSUTIL_BIN" version >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
-  if command -v tosutil &>/dev/null; then
-    existing=$(command -v tosutil)
-    if "$existing" version >/dev/null 2>&1; then
-      SPEEDTEST_TOSUTIL_BIN="$existing"
-      return 0
-    fi
-  fi
-  if [ -x ./tosutil ]; then
-    if ./tosutil version >/dev/null 2>&1; then
-      SPEEDTEST_TOSUTIL_BIN="./tosutil"
-      return 0
-    fi
-  fi
-  [ -n "$SPEEDTEST_TOSUTIL_URL" ] || return 1
-  show_dependency_install_notice
-  $USE_SUDO curl -fL -o /usr/local/bin/tosutil "$SPEEDTEST_TOSUTIL_URL" >/dev/null 2>&1 || {
-    clear_dependency_install_notice
-    return 1
-  }
-  $USE_SUDO chmod +x /usr/local/bin/tosutil >/dev/null 2>&1 || {
-    clear_dependency_install_notice
-    return 1
-  }
-  if ! /usr/local/bin/tosutil version >/dev/null 2>&1; then
-    clear_dependency_install_notice
-    return 1
-  fi
-  SPEEDTEST_TOSUTIL_BIN="/usr/local/bin/tosutil"
-  clear_dependency_install_notice
-  return 0
-}
-
 install_speedtest_counter_dependency() {
   command -v iptables &>/dev/null && return 0
   if is_nixos; then
@@ -4383,60 +4319,6 @@ speedtest_retrans_count() {
 speedtest_result_valid() {
   local value="$1"
   [ "$value" != "failed" ] && [ -n "$value" ]
-}
-
-speedtest_endpoint_hosts() {
-  printf '%s\n' \
-    "tos-${SPEEDTEST_TOS_REGION}.volces.com" \
-    "tos7-public.${SPEEDTEST_TOS_REGION}.tos.volces.com"
-}
-
-speedtest_restore_hosts() {
-  [ -n "${SPEEDTEST_HOSTS_BACKUP:-}" ] && [ -f "$SPEEDTEST_HOSTS_BACKUP" ] || return 0
-  if [ "$SPEEDTEST_HOSTS_EXISTED" -eq 1 ]; then
-    $USE_SUDO cp "$SPEEDTEST_HOSTS_BACKUP" /etc/hosts 2>/dev/null || true
-  else
-    printf '127.0.0.1 localhost\n::1 localhost\n' | $USE_SUDO tee /etc/hosts >/dev/null 2>&1 || true
-  fi
-  rm -f "$SPEEDTEST_HOSTS_BACKUP"
-  SPEEDTEST_HOSTS_BACKUP=""
-  SPEEDTEST_HOSTS_EXISTED=0
-}
-
-speedtest_force_hosts() {
-  local ip="$1" tmp host
-  [ -n "$ip" ] || return 1
-  if [ ! -e /etc/hosts ]; then
-    printf '127.0.0.1 localhost\n::1 localhost\n' | $USE_SUDO tee /etc/hosts >/dev/null || return 1
-  fi
-  if [ -z "${SPEEDTEST_HOSTS_BACKUP:-}" ]; then
-    SPEEDTEST_HOSTS_BACKUP=$(mktemp /tmp/tcpquality-tos-hosts.XXXXXX)
-    if [ -f /etc/hosts ]; then
-      cp /etc/hosts "$SPEEDTEST_HOSTS_BACKUP" || return 1
-      SPEEDTEST_HOSTS_EXISTED=1
-    else
-      : > "$SPEEDTEST_HOSTS_BACKUP" || return 1
-      SPEEDTEST_HOSTS_EXISTED=0
-    fi
-  fi
-  tmp=$(mktemp /tmp/tcpquality-tos-hosts-new.XXXXXX)
-  awk -v begin="$SPEEDTEST_HOSTS_MARK_BEGIN" -v end="$SPEEDTEST_HOSTS_MARK_END" '
-    $0 == begin {skip=1; next}
-    $0 == end {skip=0; next}
-    !skip {print}
-  ' "$SPEEDTEST_HOSTS_BACKUP" > "$tmp"
-  {
-    echo "$SPEEDTEST_HOSTS_MARK_BEGIN"
-    while IFS= read -r host; do
-      [ -n "$host" ] && echo "$ip $host"
-    done < <(speedtest_endpoint_hosts)
-    echo "$SPEEDTEST_HOSTS_MARK_END"
-  } >> "$tmp"
-  $USE_SUDO cp "$tmp" /etc/hosts || {
-    rm -f "$tmp"
-    return 1
-  }
-  rm -f "$tmp"
 }
 
 speedtest_parse_rate_mbps() {
@@ -4573,12 +4455,103 @@ speedtest_write_probe_meta() {
     printf 'parsed_rate_mbps=%s\n' "$parsed"
     printf 'connect_ms=%s\n' "$connect_ms"
     printf 'tls_ms=%s\n' "$tls_ms"
+    printf 'target_host=%s\n' "$(speedtest_tos_bucket_host "$SPEEDTEST_TOS_REGION" 2>/dev/null || true)"
+    printf 'pin_method=curl--resolve\n'
     printf 'region=%s\n' "$SPEEDTEST_TOS_REGION"
     printf 'network=%s\n' "$SPEEDTEST_TOS_NETWORK"
     printf 'object_size=%s\n' "$SPEEDTEST_TOS_SIZE"
     printf 'timeout=%s\n' "$SPEEDTEST_TOS_TIMEOUT"
     printf 'recorded_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } > "${output_file}.meta" 2>/dev/null || true
+}
+
+speedtest_tos_bucket_host() {
+  local region="$1" bucket
+  case "$region" in
+    cn-beijing) bucket="beijing" ;;
+    cn-shanghai) bucket="shanghai" ;;
+    cn-guangzhou) bucket="guangzhou" ;;
+    *) return 1 ;;
+  esac
+  printf 'probe-bucket-%s.tos-%s.volces.com' "$bucket" "$region"
+}
+
+speedtest_tos_object_size_bytes() {
+  local value="${SPEEDTEST_TOS_SIZE^^}" number unit multiplier
+  if [[ "$value" =~ ^([0-9]+([.][0-9]+)?)[[:space:]]*([KMGT]?I?B?)$ ]]; then
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+  case "$unit" in
+    ""|B) multiplier=1 ;;
+    K|KB|KI|KIB) multiplier=1024 ;;
+    M|MB|MI|MIB) multiplier=1048576 ;;
+    G|GB|GI|GIB) multiplier=1073741824 ;;
+    T|TB|TI|TIB) multiplier=1099511627776 ;;
+    *) return 1 ;;
+  esac
+  awk -v number="$number" -v multiplier="$multiplier" 'BEGIN {
+    bytes = number * multiplier;
+    if (bytes < 1) exit 1;
+    printf "%.0f", bytes;
+  }'
+}
+
+speedtest_tos_upload_key() {
+  local uuid
+  uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)
+  if ! [[ "$uuid" =~ ^[0-9a-fA-F-]{16,}$ ]]; then
+    uuid="$(date +%s%N)-$RANDOM"
+  fi
+  printf 'upload/%s' "$uuid"
+}
+
+speedtest_curl_seconds_ms() {
+  awk -v value="$1" 'BEGIN {
+    if (value !~ /^[0-9]+([.][0-9]+)?$/) print "-";
+    else printf "%d", value * 1000 + 0.5;
+  }'
+}
+
+speedtest_curl_delta_ms() {
+  awk -v start="$1" -v end="$2" 'BEGIN {
+    if (start !~ /^[0-9]+([.][0-9]+)?$/ || end !~ /^[0-9]+([.][0-9]+)?$/) {
+      print "-";
+      exit;
+    }
+    delta = (end - start) * 1000;
+    if (delta < 0) delta = 0;
+    printf "%d", delta + 0.5;
+  }'
+}
+
+speedtest_curl_rate_mbps() {
+  awk -v bytes_per_second="$1" 'BEGIN {
+    if (bytes_per_second !~ /^[0-9]+([.][0-9]+)?$/ || bytes_per_second <= 0) {
+      print "failed";
+      exit;
+    }
+    printf "%.2f", bytes_per_second / 1000000;
+  }'
+}
+
+speedtest_zero_stream() {
+  local bytes="$1" full_blocks remainder
+  full_blocks=$((bytes / 1048576))
+  remainder=$((bytes % 1048576))
+  [ "$full_blocks" -gt 0 ] && dd if=/dev/zero bs=1048576 count="$full_blocks" 2>/dev/null
+  [ "$remainder" -gt 0 ] && dd if=/dev/zero bs=1 count="$remainder" 2>/dev/null
+}
+
+speedtest_tos_delete_object() {
+  local host="$1" server_ip="$2" key="$3"
+  [ -n "$host" ] && [ -n "$server_ip" ] && [ -n "$key" ] || return 0
+  curl -4 --noproxy '*' --http1.1 -sS -o /dev/null \
+    --connect-timeout 5 --max-time 10 \
+    --resolve "$host:443:$server_ip" -X DELETE \
+    "https://$host/$key" >/dev/null 2>&1 || true
 }
 
 speedtest_read_sysctl() {
@@ -4692,37 +4665,48 @@ speedtest_record_manual_failure_debug() {
 
 speedtest_run_probe() {
   local probe_type="$1" output_file="$2" server_ip="$3"
-  local before after retrans start_bytes end_bytes delta_bytes start_time end_time duration counter_enabled
-  local output parsed pid elapsed exit_code result connect_ms tls_ms
+  local before after retrans start_bytes end_bytes delta_bytes counter_enabled
+  local host key size timeout meta raw_file exit_code result parsed
+  local http_code bytes_download speed_download bytes_upload speed_upload
+  local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
+  local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
+  local -a curl_args pipeline_status
 
-  "$SPEEDTEST_TOSUTIL_BIN" probe -tr "$SPEEDTEST_TOS_REGION" -pt "$probe_type" \
-    -nt "$SPEEDTEST_TOS_NETWORK" -ps "$SPEEDTEST_TOS_SIZE" -timeout "$SPEEDTEST_TOS_TIMEOUT" \
-    >"$output_file" 2>"${output_file}.err" &
-  pid=$!
+  host=$(speedtest_tos_bucket_host "$SPEEDTEST_TOS_REGION" 2>/dev/null || true)
+  size=$(speedtest_tos_object_size_bytes 2>/dev/null || true)
+  timeout="$SPEEDTEST_TOS_TIMEOUT"
+  [[ "$timeout" =~ ^[0-9]+$ ]] && [ "$timeout" -gt 0 ] || timeout=15
+  raw_file="${output_file}.curl"
+  key=""
 
-  elapsed=0
-  while [ "$elapsed" -lt "$SPEEDTEST_TOS_WARMUP" ] && kill -0 "$pid" 2>/dev/null; do
-    sleep 1
-    elapsed=$((elapsed + 1))
-  done
-
-  if ! kill -0 "$pid" 2>/dev/null; then
-    if wait "$pid" 2>/dev/null; then
-      exit_code=0
-    else
-      exit_code=$?
-    fi
-    speedtest_counter_stop_current
-    output=$({
-      cat "$output_file" 2>/dev/null || true
-      printf '\n'
-      cat "${output_file}.err" 2>/dev/null || true
-    })
-    connect_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Build connection cost")
-    tls_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Tls handshake cost")
-    speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "failed" "failed" "$connect_ms" "$tls_ms"
-    printf 'failed|0|%s|%s' "$connect_ms" "$tls_ms"
+  if [ -z "$host" ] || ! [[ "$server_ip" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]] || [ -z "$size" ] || [ "$size" -le 0 ] || [ "$SPEEDTEST_TOS_NETWORK" != "public" ]; then
+    printf 'Average %s rate: failed\n\nTime consuming details\n' "$probe_type" > "$output_file"
+    printf 'Build connection cost: -1 ms\nTls handshake cost: -1 ms\n' >> "$output_file"
+    : > "${output_file}.err"
+    speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" 2 failed failed -1 -1
+    printf 'failed|0|-1|-1'
     return 0
+  fi
+
+  curl_args=(
+    curl -4 --noproxy '*' --http1.1 -sS --fail
+    --connect-timeout 5 --max-time "$timeout"
+    --resolve "$host:443:$server_ip"
+    -A 'TcpQuality fixed TOS probe'
+    -w '%{http_code}|%{size_download}|%{speed_download}|%{size_upload}|%{speed_upload}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_pretransfer}|%{time_starttransfer}|%{time_total}|%{remote_ip}'
+    -o /dev/null
+  )
+  if [ "$probe_type" = "upload" ]; then
+    key=$(speedtest_tos_upload_key)
+    curl_args+=(
+      -X PUT -H "Content-Length: $size" --data-binary @-
+      "https://$host/$key"
+    )
+  else
+    curl_args+=(
+      --range "0-$((size - 1))"
+      "https://$host/download/test"
+    )
   fi
 
   counter_enabled=0
@@ -4735,13 +4719,16 @@ speedtest_run_probe() {
     start_bytes=$(speedtest_net_bytes "$probe_type")
   fi
   before=$(speedtest_retrans_count)
-  start_time=$(date +%s)
-  if wait "$pid"; then
-    exit_code=0
+  set +e
+  if [ "$probe_type" = "upload" ]; then
+    speedtest_zero_stream "$size" | "${curl_args[@]}" > "$raw_file" 2>"${output_file}.err"
+    pipeline_status=(${PIPESTATUS[@]})
+    exit_code=${pipeline_status[1]:-1}
   else
+    "${curl_args[@]}" > "$raw_file" 2>"${output_file}.err"
     exit_code=$?
   fi
-  end_time=$(date +%s)
+  set -e
   if [ "$counter_enabled" -eq 1 ]; then
     end_bytes=$(speedtest_counter_bytes)
     if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
@@ -4753,47 +4740,55 @@ speedtest_run_probe() {
   fi
   speedtest_counter_stop_current
   after=$(speedtest_retrans_count)
-  output=$({
-    cat "$output_file" 2>/dev/null || true
-    printf '\n'
-    cat "${output_file}.err" 2>/dev/null || true
-  })
-  parsed=$(printf '%s\n' "$output" | speedtest_parse_rate_mbps || true)
-  connect_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Build connection cost")
-  tls_ms=$(printf '%s\n' "$output" | speedtest_parse_cost_ms "Tls handshake cost")
-
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
 
-  # ===================== 速度结果计算 =====================
-  # 始终以 tosutil 自身报告的速度为准（最准确的链路层测速结果）。
-  # iptables 计数器仅用于防作弊验证（排名资格），不替代 tosutil 的测速值，
-  # 避免因计数器漏计流量（如只捕获 TCP 握手包而未捕获数据流）导致速度显示为 0 Mbps。
-  if [ "$parsed" != "failed" ]; then
-    result="$parsed"
-  elif [ "$counter_enabled" -eq 1 ] && [ "$start_bytes" != "-" ] && [ "$end_bytes" != "-" ]; then
-    # tosutil 解析失败时的回退：使用 iptables 计数器计算
-    duration=$((end_time - start_time))
-    delta_bytes=$((end_bytes - start_bytes))
-    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
-  elif [ "$start_bytes" != "-" ] && [ "$end_bytes" != "-" ]; then
-    # 继续回退：使用网卡接口字节计数
-    duration=$((end_time - start_time))
-    delta_bytes=$((end_bytes - start_bytes))
-    result=$(speedtest_calc_mbps "$delta_bytes" "$duration")
+  meta=$(cat "$raw_file" 2>/dev/null || true)
+  IFS='|' read -r http_code bytes_download speed_download bytes_upload speed_upload \
+    dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip <<< "$meta"
+  dns_ms=$(speedtest_curl_seconds_ms "$dns_time")
+  build_ms=$(speedtest_curl_delta_ms "$dns_time" "$connect_time")
+  tls_ms=$(speedtest_curl_delta_ms "$connect_time" "$appconnect_time")
+  total_ms=$(speedtest_curl_seconds_ms "$total_time")
+  if [ "$probe_type" = "upload" ]; then
+    wait_ms=0
+    send_ms=$(speedtest_curl_delta_ms "$pretransfer_time" "$total_time")
+    rate_bytes_per_second="${speed_upload:-0}"
   else
+    send_ms=0
+    wait_ms=$(speedtest_curl_delta_ms "$pretransfer_time" "$starttransfer_time")
+    rate_bytes_per_second="${speed_download:-0}"
+  fi
+  rate_mb=$(speedtest_curl_rate_mbps "$rate_bytes_per_second")
+  {
+    if [ "$rate_mb" = "failed" ]; then
+      printf 'Average %s rate: failed\n' "$probe_type"
+    else
+      printf 'Average %s rate: %sMB/s\n' "$probe_type" "$rate_mb"
+    fi
+    printf '\nTime consuming details\n'
+    printf 'Resolve dns cost: %s ms\n' "$dns_ms"
+    printf 'Build connection cost: %s ms\n' "$build_ms"
+    printf 'Tls handshake cost: %s ms\n' "$tls_ms"
+    printf 'Send request cost: %s ms\n' "$send_ms"
+    printf 'Wait response cost: %s ms\n' "$wait_ms"
+    printf 'Total cost: %s ms\n' "$total_ms"
+    printf 'Fixed target: %s (%s)\n' "$server_ip" "${remote_ip:-unknown}"
+  } > "$output_file"
+
+  parsed=$(speedtest_parse_rate_mbps < "$output_file" || true)
+  result="$parsed"
+  # 超时后的部分传输仍有有效平均速率，保持与官方 probe 一致，允许展示该结果；
+  # 只有没有有效速率或 HTTP 请求本身没有成功建立时才判定失败。
+  if [ "$parsed" = "failed" ] || { ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]] && [ "${rate_bytes_per_second:-0}" = "0" ]; }; then
     result="failed"
   fi
 
-  # ===================== 防作弊验证（排名资格） =====================
-  # iptables 计数器独立于 tosutil，用于交叉验证流量确实发生。
-  # 当计数器启用但未检测到匹配流量时，仅禁用排名资格，不影响速度结果展示。
   if [ "$counter_enabled" -eq 1 ]; then
     if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
       SPEEDTEST_RANK_ELIGIBLE=0
       SPEEDTEST_RANK_DISABLED_REASON="target_counter_read_failed"
     else
-      duration=$((end_time - start_time))
       delta_bytes=$((end_bytes - start_bytes))
       if [ "$delta_bytes" -le 0 ]; then
         SPEEDTEST_RANK_ELIGIBLE=0
@@ -4802,12 +4797,18 @@ speedtest_run_probe() {
     fi
   fi
 
-  if [ "$exit_code" -ne 0 ] && [ "$parsed" = "failed" ]; then
-    result="failed"
+  if [ "$probe_type" = "upload" ] && [ -n "$key" ]; then
+    speedtest_tos_delete_object "$host" "$server_ip" "$key"
   fi
-
-  speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$connect_ms" "$tls_ms"
-  printf '%s|%s|%s|%s' "${result:-failed}" "$retrans" "$connect_ms" "$tls_ms"
+  speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$build_ms" "$tls_ms"
+  rm -f "$raw_file"
+  display_connect_ms="$build_ms"
+  display_tls_ms="$tls_ms"
+  # CSV/SVG 的现有兼容层会把连接耗时按 RTT/2 展示；写入两倍值，
+  # 让固定拨号得到的实际 curl 墙钟耗时在报告中保持原值。
+  [[ "$display_connect_ms" =~ ^[0-9]+$ ]] && display_connect_ms=$((display_connect_ms * 2))
+  [[ "$display_tls_ms" =~ ^[0-9]+$ ]] && display_tls_ms=$((display_tls_ms * 2))
+  printf '%s|%s|%s|%s' "${result:-failed}" "$retrans" "$display_connect_ms" "$display_tls_ms"
   return 0
 }
 
@@ -5208,11 +5209,12 @@ collect_speedtest_results() {
   fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
     if [ "$SPEEDTEST_TOS_REMOTE_LOADED" -eq 1 ]; then
-      echo -e "${DIM}[debug] tosutil 入口来自 getNodes scope=tos${NC}" >&2
+      echo -e "${DIM}[debug] TOS 节点入口来自 getNodes scope=tos${NC}" >&2
     else
-      echo -e "${DIM}[debug] tosutil 入口使用内置 fallback IP${NC}" >&2
+      echo -e "${DIM}[debug] TOS 节点入口使用内置 fallback IP${NC}" >&2
     fi
-    echo -e "${DIM}[debug] tosutil 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
+    echo -e "${DIM}[debug] 固定 IP: 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
+    echo -e "${DIM}[debug] 传输方式: curl --resolve（保留 TOS Host/SNI）${NC}" >&2
   fi
   if request_rank_session; then
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 已获取${NC}" >&2
@@ -5220,11 +5222,6 @@ collect_speedtest_results() {
     [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] || SPEEDTEST_RANK_DISABLED_REASON="rank_session_request_failed"
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败：$SPEEDTEST_RANK_DISABLED_REASON，本次报告不会进入排名${NC}" >&2
   fi
-  install_tosutil_speedtest || {
-    echo -e "${RED}[X] tosutil 安装失败${NC}"
-    exit 1
-  }
-
   SPEEDTEST_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
   [ -n "$SPEEDTEST_IFACE" ] || {
     echo -e "${RED}[X] 无法识别默认网络接口${NC}"
@@ -5256,20 +5253,8 @@ collect_speedtest_results() {
       SPEEDTEST_TOS_REGION="$candidate_region"
       speedtest_set_selected "$carrier" "$server_id" "$city"
 
-      if speedtest_force_hosts "$server_id"; then
-        IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_run_probe download "$result_file.download" "$server_id")"
-        IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_run_probe upload "$result_file.upload" "$server_id")"
-      else
-        download="failed"
-        download_retrans="0"
-        download_connect="-"
-        download_tls="-"
-        upload="failed"
-        upload_retrans="0"
-        upload_connect="-"
-        upload_tls="-"
-        speedtest_record_manual_failure_debug "$label" "$carrier" "$server_id" "$city" "force_hosts_failed"
-      fi
+      IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_run_probe download "$result_file.download" "$server_id")"
+      IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_run_probe upload "$result_file.upload" "$server_id")"
 
       [ "$download" = "failed" ] && speedtest_record_failure_debug "$label" "$carrier" "download" "$server_id" "$city" "$result_file.download"
       [ "$upload" = "failed" ] && speedtest_record_failure_debug "$label" "$carrier" "upload" "$server_id" "$city" "$result_file.upload"
@@ -5279,7 +5264,7 @@ collect_speedtest_results() {
       else
         carrier_values+=("failed|failed|failed|$server_id|$city|$upload_connect|$upload_tls|$download_connect|$download_tls")
       fi
-      # debug 模式下保留 tosutil 输出文件，方便排查测速异常
+      # debug 模式下保留固定 IP 的 curl 输出文件，方便排查测速异常
       [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
       done=$((done + 1))
       speedtest_show_progress "$done" "$total"
