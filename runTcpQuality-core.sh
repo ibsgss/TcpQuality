@@ -4139,18 +4139,6 @@ speedtest_applecdn6_count() {
   printf '%s' "${#SPEEDTEST_APPLECDN6_NODES[@]}"
 }
 
-speedtest_applecdn_international_count() {
-  speedtest_applecdn_tests_enabled || {
-    printf '0'
-    return 0
-  }
-  if speedtest_applecdn6_tests_enabled; then
-    printf '2'
-  else
-    printf '1'
-  fi
-}
-
 request_rank_session() {
   local response_file session_id token started_at expires_at session_ip4
   RANK_SESSION_ID=""
@@ -5355,8 +5343,9 @@ collect_speedtest_results() {
   apple_steps=0
   apple_ipv6_steps=0
   if speedtest_applecdn_tests_enabled; then
-    apple_steps=$(speedtest_applecdn_international_count)
+    apple_steps=1
     if speedtest_applecdn6_tests_enabled; then
+      apple_steps=2
       load_remote_applecdn6_nodes || true
       apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
     fi
@@ -5966,7 +5955,9 @@ main() {
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
     if speedtest_applecdn_tests_enabled; then
-      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + $(speedtest_applecdn_international_count)))
+      speedtest_applecdn6_tests_enabled || true
+      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
+      [ "$SPEEDTEST_IPV6_AVAILABLE" -eq 1 ] && SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + 1))
     fi
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
