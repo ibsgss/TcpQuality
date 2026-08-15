@@ -4039,7 +4039,7 @@ run_international_mode() {
 SPEEDTEST_IFACE=""
 SPEEDTEST_TOS_REGION="${TOS_REGION:-cn-beijing}"
 SPEEDTEST_TOS_NETWORK="${TOS_NETWORK:-public}"
-SPEEDTEST_TOS_SIZE="${TOS_PROBE_SIZE:-5GB}"
+SPEEDTEST_TOS_SIZE="${TOS_PROBE_SIZE:-1GB}"
 SPEEDTEST_TOS_TIMEOUT="${TOS_TIMEOUT:-15}"
 SPEEDTEST_APPLECDN_ENABLED="${SPEEDTEST_APPLECDN_ENABLED:-1}"
 SPEEDTEST_APPLECDN_DOWNLOAD_URL="${SPEEDTEST_APPLECDN_DOWNLOAD_URL:-https://mensura.cdn-apple.com/api/v1/gm/large}"
@@ -4699,7 +4699,7 @@ speedtest_run_probe() {
   if [ "$probe_type" = "upload" ]; then
     key=$(speedtest_tos_upload_key)
     curl_args+=(
-      -X PUT -H "Content-Length: $size" --data-binary @-
+      -X PUT -H "Content-Length: $size" --upload-file -
       "https://$host/$key"
     )
   else
