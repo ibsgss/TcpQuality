@@ -4819,10 +4819,9 @@ speedtest_run_probe() {
   rm -f "$raw_file"
   display_connect_ms="$reported_connect_ms"
   display_tls_ms="$reported_tls_ms"
-  # CSV/SVG 的现有兼容层会把连接耗时按 RTT/2 展示；写入两倍值，
-  # 让固定拨号得到的实际 curl 墙钟耗时在报告中保持原值。
+  # CSV/SVG 的现有兼容层会将连接/TLS字段除以 2；连接耗时保持旧兼容口径，
+  # TLS 耗时保留原始 curl 值，使报告中的 TLS 延迟显示为握手耗时的一半。
   [[ "$display_connect_ms" =~ ^[0-9]+$ ]] && display_connect_ms=$((display_connect_ms * 2))
-  [[ "$display_tls_ms" =~ ^[0-9]+$ ]] && display_tls_ms=$((display_tls_ms * 2))
   printf '%s|%s|%s|%s' "${result:-failed}" "$retrans" "$display_connect_ms" "$display_tls_ms"
   return 0
 }
