@@ -4051,7 +4051,11 @@ SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
 SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api64.ipify.org}"
+SPEEDTEST_IPV6_CHECKED=0
+SPEEDTEST_IPV6_AVAILABLE=0
 SPEEDTEST_TOS_REMOTE_LOADED=0
+SPEEDTEST_APPLECDN6_REMOTE_LOADED=0
+SPEEDTEST_APPLECDN6_NODES=()
 SPEEDTEST_TOS_CT_CITY="北京"
 SPEEDTEST_TOS_CU_CITY="北京"
 SPEEDTEST_TOS_CM_CITY="北京"
@@ -4109,6 +4113,30 @@ speedtest_group_specs() {
 
 speedtest_group_count() {
   speedtest_group_specs | awk 'NF{count++} END{print count + 0}'
+}
+
+speedtest_applecdn_tests_enabled() {
+  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 1
+  if [[ "$SELECTED_PROVINCES" == *"|北京|"* ||
+        "$SELECTED_PROVINCES" == *"|上海|"* ||
+        "$SELECTED_PROVINCES" == *"|广东|"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+speedtest_applecdn6_tests_enabled() {
+  speedtest_applecdn_tests_enabled || return 1
+  speedtest_ipv6_available
+}
+
+speedtest_applecdn6_count() {
+  speedtest_applecdn6_tests_enabled || {
+    printf '0'
+    return 0
+  }
+  load_remote_applecdn6_nodes || true
+  printf '%s' "${#SPEEDTEST_APPLECDN6_NODES[@]}"
 }
 
 request_rank_session() {
@@ -4228,6 +4256,49 @@ load_remote_speedtest_nodes() {
     return 0
   fi
   return 1
+}
+
+load_remote_applecdn6_nodes() {
+  local tmp url sep line type family prov isp host ip port target backup_host backup_ip backup_port backup_target label
+  local local_index existing existing_label
+  [ "$SPEEDTEST_APPLECDN6_REMOTE_LOADED" -eq 1 ] && return 0
+  command -v curl &>/dev/null || return 1
+
+  tmp=$(mktemp)
+  sep="?"
+  [[ "$GET_NODES_URL" == *"?"* ]] && sep="&"
+  url="${GET_NODES_URL}${sep}format=tsv&scope=apple6"
+  if ! curl -fsSL --connect-timeout 5 --max-time 30 "$url" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  SPEEDTEST_APPLECDN6_NODES=()
+  while IFS= read -r line; do
+    line=${line//$'\t'/'|'}
+    IFS='|' read -r type family prov isp host ip port target backup_host backup_ip backup_port backup_target <<< "$line"
+    [ "$type" = "type" ] && continue
+    [ "$type" = "applecdn" ] || continue
+    [ "$family" = "6" ] || continue
+    [ "$isp" = "移动" ] || continue
+    is_valid_ipv6 "$ip" || continue
+    label="${prov}${isp}"
+    local_index=0
+    for existing in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
+      existing_label=${existing%%|*}
+      if [ "$existing_label" = "$label" ]; then
+        SPEEDTEST_APPLECDN6_NODES[$local_index]="${existing}|$ip"
+        break
+      fi
+      local_index=$((local_index + 1))
+    done
+    [ "$local_index" -lt "${#SPEEDTEST_APPLECDN6_NODES[@]}" ] || \
+      SPEEDTEST_APPLECDN6_NODES+=("$label|$ip")
+  done < "$tmp"
+  rm -f "$tmp"
+  [ "${#SPEEDTEST_APPLECDN6_NODES[@]}" -gt 0 ] || return 1
+  SPEEDTEST_APPLECDN6_REMOTE_LOADED=1
+  return 0
 }
 
 speedtest_selected_id() {
@@ -4869,25 +4940,40 @@ speedtest_ipv4_available() {
 
 speedtest_ipv6_available() {
   local response
+  if [ "$SPEEDTEST_IPV6_CHECKED" -eq 1 ]; then
+    [ "$SPEEDTEST_IPV6_AVAILABLE" -eq 1 ]
+    return
+  fi
+  SPEEDTEST_IPV6_CHECKED=1
+  SPEEDTEST_IPV6_AVAILABLE=0
+  if ipv6_available; then
+    SPEEDTEST_IPV6_AVAILABLE=1
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
   response=$(curl -6 -fsS --connect-timeout 5 --max-time 8 \
     "$SPEEDTEST_IPV6_PROBE_URL" 2>/dev/null | \
     awk 'NR == 1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
   if is_valid_ipv6 "$response"; then
     IPV6_PUBLIC="$response"
     IPV6_WORK=1
+    SPEEDTEST_IPV6_AVAILABLE=1
     return 0
   fi
   return 1
 }
 
 speedtest_applecdn_curl_download() {
-  local output_file="$1" ip_flag="$2" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
+  local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
+  [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
   before=$(speedtest_retrans_count)
   set +e
   meta=$(curl "$ip_flag" -sS -L \
     --connect-timeout 5 --max-time "$timeout" \
+    "${resolve_args[@]}" \
     -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
     -H 'Accept: */*' \
     -H 'Accept-Language: zh-CN,zh-Hans;q=0.9' \
@@ -4925,15 +5011,19 @@ speedtest_applecdn_curl_download() {
 }
 
 speedtest_applecdn_curl_upload() {
-  local output_file="$1" ip_flag="$2" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
-  local speed latency
+  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local before after retrans speed latency
+  local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
+  [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
+  before=$(speedtest_retrans_count)
   set +e
   meta=$(
     dd if=/dev/zero bs=1M count="$max_mb" 2>/dev/null | \
       curl "$ip_flag" -sS -L \
         --connect-timeout 5 --max-time "$timeout" \
+        "${resolve_args[@]}" \
         -T - \
         -A "$SPEEDTEST_APPLECDN_USER_AGENT" \
         -H 'Accept: */*' \
@@ -4947,14 +5037,17 @@ speedtest_applecdn_curl_upload() {
   )
   exit_code=$?
   set -e
+  after=$(speedtest_retrans_count)
+  retrans=$((after - before))
+  [ "$retrans" -ge 0 ] || retrans=0
   IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
-    printf 'failed|0|%s|%s' "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+    printf 'failed|%s|%s|%s' "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
   else
-    printf '%s|0|%s|%s' "$speed" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
+    printf '%s|%s|%s|%s' "$speed" "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
   fi
   {
     printf 'type=upload\n'
@@ -4974,12 +5067,15 @@ speedtest_applecdn_curl_upload() {
 speedtest_collect_applecdn() {
   local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local apple_values=()
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] || return 0
-  for family_name in "Apple IPv4:-4" "Apple IPv6:-6"; do
+  local apple_families=("Apple IPv4:-4")
+  speedtest_applecdn_tests_enabled || return 0
+  if speedtest_applecdn6_tests_enabled; then
+    apple_families+=("Apple IPv6:-6")
+  fi
+  for family_name in "${apple_families[@]}"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
-    if { [ "$ip_flag" = "-4" ] && ! speedtest_ipv4_available; } ||
-      { [ "$ip_flag" = "-6" ] && ! speedtest_ipv6_available; }; then
+    if [ "$ip_flag" = "-4" ] && ! speedtest_ipv4_available; then
       apple_values+=("-|-|-|$SPEEDTEST_APPLECDN_HOST|$family_name|-|-|-|-")
       continue
     fi
@@ -4998,7 +5094,48 @@ speedtest_collect_applecdn() {
     fi
     [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
   done
-  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};${apple_values[1]};")
+  SPEEDTEST_ROWS+=("AppleCDN;${apple_values[0]};${apple_values[1]:-};")
+}
+
+speedtest_collect_applecdn6() {
+  local node label candidates candidate workdir result_file
+  local download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
+  local node_value selected_ip
+  local values=()
+  speedtest_applecdn6_tests_enabled || return 0
+  load_remote_applecdn6_nodes || true
+
+  for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
+    label="${node%%|*}"
+    candidates="${node#*|}"
+    node_value=""
+    selected_ip=""
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn6.XXXXXX")
+      result_file="$workdir/result"
+      IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "-6" "$candidate")"
+      IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "-6" "$candidate")"
+
+      [ "$download" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "download" "$candidate" "$label" "$result_file.download"
+      [ "$upload" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "upload" "$candidate" "$label" "$result_file.upload"
+      if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
+        node_value="$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$candidate|$label|$upload_connect|$upload_tls|$download_connect|$download_tls"
+        selected_ip="$candidate"
+      fi
+      [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
+      [ -n "$node_value" ] && break
+    done < <(printf '%s\n' "$candidates" | tr '|' '\n')
+
+    if [ -z "$node_value" ]; then
+      selected_ip="${candidates%%|*}"
+      node_value="failed|failed|failed|$selected_ip|$label|-|-|-|-"
+    fi
+    values+=("$node_value")
+  done
+
+  [ "${#values[@]}" -gt 0 ] || return 0
+  SPEEDTEST_ROWS+=("IPv6;${values[0]};${values[1]};")
 }
 
 speedtest_format_mbps() {
@@ -5050,23 +5187,11 @@ speedtest_pad_center() {
 }
 
 speedtest_print_group_header() {
-  local label="$1" title
-  if [ "$label" = "不限" ]; then
-    title='不限速'
-  elif [[ "$label" == *Mbps ]]; then
-    title="限速 $label"
-  else
-    title="$label"
-  fi
+  local column_label="${2:-IPv4}"
 
   # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
   printf '  '
-  printf '%b' "$CYAN"
-  speedtest_pad_center 82 "$title"
-  printf '%b' "$NC"
-  printf '\n'
-  printf '  '
-  printf '%b' "$CYAN"; speedtest_pad_left 12 '地区'; printf '%b' "$NC"
+  printf '%b' "$CYAN"; speedtest_pad_left 12 "$column_label"; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 10 '回程重传'; printf '%b' "$NC"
   printf '  '
@@ -5082,12 +5207,7 @@ speedtest_print_group_header() {
 
 speedtest_print_applecdn_header() {
   printf '  '
-  printf '%b' "$CYAN"
-  speedtest_pad_center 82 'AppleCDN'
-  printf '%b' "$NC"
-  printf '\n'
-  printf '  '
-  printf '%b' "$CYAN"; speedtest_pad_left 12 '名称'; printf '%b' "$NC"
+  printf '%b' "$CYAN"; speedtest_pad_left 12 '国际方向'; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 10 '下载重传'; printf '%b' "$NC"
   printf '  '
@@ -5214,15 +5334,23 @@ speedtest_retrans_color() {
 
 collect_speedtest_results() {
   local group group_region rate label carrier workdir result_file index candidate server_id city candidate_region
-  local upload upload_retrans upload_connect upload_tls download download_retrans download_connect download_tls done total offset apple_steps
+  local upload upload_retrans upload_connect upload_tls download download_retrans download_connect download_tls done total offset apple_steps apple_ipv6_steps
   local carriers=(电信 联通 移动)
   local carrier_values=()
   offset=${SPEEDTEST_PROGRESS_OFFSET:-0}
   done="$offset"
   total=${SPEEDTEST_PROGRESS_TOTAL:-0}
   apple_steps=0
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && apple_steps=1
-  [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]} + apple_steps))
+  apple_ipv6_steps=0
+  if speedtest_applecdn_tests_enabled; then
+    apple_steps=1
+    if speedtest_applecdn6_tests_enabled; then
+      apple_steps=2
+      load_remote_applecdn6_nodes || true
+      apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
+    fi
+  fi
+  [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]} + apple_steps + apple_ipv6_steps))
 
   if [ "${SPEEDTEST_APPEND_STATE:-0}" -eq 1 ]; then
     speedtest_load_background_state || true
@@ -5314,9 +5442,14 @@ collect_speedtest_results() {
   done < <(speedtest_group_specs)
 
   speedtest_cleanup
-  if [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ]; then
+  if speedtest_applecdn_tests_enabled; then
+    if [ "$apple_ipv6_steps" -gt 0 ]; then
+      speedtest_collect_applecdn6
+      done=$((done + apple_ipv6_steps))
+      speedtest_show_progress "$done" "$total"
+    fi
     speedtest_collect_applecdn
-    done=$((done + 1))
+    done=$((done + apple_steps))
     speedtest_show_progress "$done" "$total"
   fi
 
@@ -5351,13 +5484,28 @@ collect_speedtest_results() {
 
 speedtest_set_failed_rows() {
   SPEEDTEST_ROWS=()
-  local label region rate
+  local label region rate node node_label node_candidates apple_row
+  local ipv6_values=()
   while IFS='|' read -r label region rate; do
     [ -n "$label" ] || continue
     SPEEDTEST_ROWS+=("$label;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-;failed|failed|failed|||-|-|-|-")
   done < <(speedtest_group_specs)
-  [ "$SPEEDTEST_APPLECDN_ENABLED" = "1" ] && \
-    SPEEDTEST_ROWS+=("AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-;")
+  if speedtest_applecdn_tests_enabled; then
+    if speedtest_applecdn6_tests_enabled; then
+      load_remote_applecdn6_nodes || true
+      for node in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
+        node_label="${node%%|*}"
+        node_candidates="${node#*|}"
+        ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
+      done
+      [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
+    fi
+    apple_row="AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-"
+    if speedtest_applecdn6_tests_enabled; then
+      apple_row+=";failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-"
+    fi
+    SPEEDTEST_ROWS+=("$apple_row;")
+  fi
 }
 
 speedtest_load_background_state() {
@@ -5454,6 +5602,8 @@ show_speedtest_results() {
         printf '  '
         if [ "$retrans" = "-" ]; then
           printf '%b' "$DIM"; speedtest_pad_left 10 '-'; printf '%b' "$NC"
+        elif speedtest_metric_failed "$download"; then
+          printf '%b' "$RED"; speedtest_pad_left 10 'failed'; printf '%b' "$NC"
         else
           retrans_color=$(speedtest_retrans_color "$retrans")
           printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
@@ -5482,7 +5632,9 @@ show_speedtest_results() {
         else
           download_tls_text=$(speedtest_direction_latency_text "$download_tls" "$download")
         fi
-        if [ "$download_tls" = "-" ]; then
+        if speedtest_metric_failed "$download"; then
+          tls_color="$RED"
+        elif [ "$download_tls" = "-" ]; then
           if [ "$download" = "-" ]; then
             tls_color="$DIM"
           else
@@ -5498,7 +5650,9 @@ show_speedtest_results() {
         else
           upload_tls_text=$(speedtest_direction_latency_text "$upload_tls" "$upload")
         fi
-        if [ "$upload_tls" = "-" ]; then
+        if speedtest_metric_failed "$upload"; then
+          tls_color="$RED"
+        elif [ "$upload_tls" = "-" ]; then
           if [ "$upload" = "-" ]; then
             tls_color="$DIM"
           else
@@ -5513,14 +5667,28 @@ show_speedtest_results() {
       printf '\n'
       continue
     fi
-    speedtest_print_group_header "$label"
-    results=("$result1" "$result2" "$result3")
+    if [ "$label" = "IPv6" ]; then
+      carriers=(深圳移动 重庆移动)
+      speedtest_print_group_header "IPv6" "IPv6"
+    else
+      carriers=(电信 联通 移动)
+      speedtest_print_group_header "$label" "IPv4"
+    fi
+    if [ "$label" = "IPv6" ]; then
+      results=("$result1" "$result2")
+    else
+      results=("$result1" "$result2" "$result3")
+    fi
     for index in "${!results[@]}"; do
       result="${results[$index]}"
       carrier="${carriers[$index]}"
       IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
-      region="${city:-$(speedtest_selected_city "$carrier")}${carrier}"
-      [ -n "${city:-$(speedtest_selected_city "$carrier")}" ] || region="${carrier}失败"
+      if [ "$label" = "IPv6" ]; then
+        region="${city:-$carrier}"
+      else
+        region="${city:-$(speedtest_selected_city "$carrier")}${carrier}"
+        [ -n "${city:-$(speedtest_selected_city "$carrier")}" ] || region="${carrier}失败"
+      fi
       printf '  '
       printf '%b' "$CYAN"; speedtest_pad_left 12 "$region"; printf '%b' "$NC"
       printf '  '
@@ -5554,6 +5722,24 @@ append_speedtest_csv() {
   local carriers=(电信 联通 移动)
   for row in "${SPEEDTEST_ROWS[@]}"; do
     IFS=';' read -r label result1 result2 result3 <<<"$row"
+    if [ "$label" = "IPv6" ]; then
+      for result in "$result1" "$result2"; do
+        [ -n "$result" ] || continue
+        IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
+        city="${city:-IPv6}"
+        if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
+          printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "$city" "$city" "FAIL" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        else
+          printf '三网单线程速度,%s,%s,%s,%s,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "$city" "$city" "$server_id" \
+            "OK" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        fi
+      done
+      continue
+    fi
     if [ "$label" = "AppleCDN" ]; then
       for result in "$result1" "$result2"; do
         [ -n "$result" ] || continue
@@ -5768,6 +5954,11 @@ main() {
   SPEEDTEST_PROGRESS_TOTAL=0
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
+    if speedtest_applecdn_tests_enabled; then
+      speedtest_applecdn6_tests_enabled || true
+      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
+      [ "$SPEEDTEST_IPV6_AVAILABLE" -eq 1 ] && SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + 1))
+    fi
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     INTERNATIONAL_PROGRESS_TOTAL=$(international_total_task_count)
