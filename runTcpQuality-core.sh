@@ -4670,6 +4670,7 @@ speedtest_run_probe() {
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
   local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
+  local reported_connect_ms reported_tls_ms
   local -a curl_args pipeline_status
 
   host=$(speedtest_tos_bucket_host "$SPEEDTEST_TOS_REGION" 2>/dev/null || true)
@@ -4784,6 +4785,20 @@ speedtest_run_probe() {
     result="failed"
   fi
 
+  if [ "$result" = "failed" ]; then
+    # 失败方向没有有效的目标重传/延迟数据；nstat 是主机全局计数，不能作为该方向的结果。
+    retrans="failed"
+    reported_connect_ms="-"
+    reported_tls_ms="-"
+    sed -i \
+      -e 's/^Build connection cost: .*/Build connection cost: - ms/' \
+      -e 's/^Tls handshake cost: .*/Tls handshake cost: - ms/' \
+      "$output_file"
+  else
+    reported_connect_ms="$build_ms"
+    reported_tls_ms="$tls_ms"
+  fi
+
   if [ "$counter_enabled" -eq 1 ]; then
     if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
       SPEEDTEST_RANK_ELIGIBLE=0
@@ -4800,10 +4815,10 @@ speedtest_run_probe() {
   if [ "$probe_type" = "upload" ] && [ -n "$key" ]; then
     speedtest_tos_delete_object "$host" "$server_ip" "$key"
   fi
-  speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$build_ms" "$tls_ms"
+  speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$reported_connect_ms" "$reported_tls_ms"
   rm -f "$raw_file"
-  display_connect_ms="$build_ms"
-  display_tls_ms="$tls_ms"
+  display_connect_ms="$reported_connect_ms"
+  display_tls_ms="$reported_tls_ms"
   # CSV/SVG 的现有兼容层会把连接耗时按 RTT/2 展示；写入两倍值，
   # 让固定拨号得到的实际 curl 墙钟耗时在报告中保持原值。
   [[ "$display_connect_ms" =~ ^[0-9]+$ ]] && display_connect_ms=$((display_connect_ms * 2))
