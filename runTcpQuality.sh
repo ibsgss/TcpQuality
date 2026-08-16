@@ -128,7 +128,19 @@ run_core_direct() {
       "$RAW_BASE/runTcpQuality-core.sh" -o "$core"
     chmod 0755 "$core"
   fi
-  exec bash "$core" "${CORE_ARGS[@]}"
+  if [ "${#CORE_ARGS[@]}" -gt 0 ]; then
+    exec bash "$core" "${CORE_ARGS[@]}"
+  fi
+  exec bash "$core"
+}
+
+run_rootfs() {
+  local runner="$1"
+  shift
+  if [ "${#CORE_ARGS[@]}" -gt 0 ]; then
+    exec bash "$runner" "$@" -- "${CORE_ARGS[@]}"
+  fi
+  exec bash "$runner" "$@" --
 }
 
 if [ "$NO_ROOTFS" -eq 1 ] || [ "${TCPQUALITY_INSIDE_ROOTFS:-0}" -eq 1 ]; then
@@ -146,13 +158,22 @@ if [ "$(id -u)" -ne 0 ]; then
     temp_entry="$TEMP_DIR/runTcpQuality.sh"
     cat "$0" > "$temp_entry"
     chmod 0755 "$temp_entry"
+    if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+      exec sudo -E bash -c '
+        dir=$1
+        script=$2
+        shift 2
+        trap "rm -rf -- \"$dir\"" EXIT
+        exec bash "$script" "$@"
+      ' bash "$TEMP_DIR" "$temp_entry" "${ORIGINAL_ARGS[@]}"
+    fi
     exec sudo -E bash -c '
       dir=$1
       script=$2
       shift 2
       trap "rm -rf -- \"$dir\"" EXIT
       exec bash "$script" "$@"
-    ' bash "$TEMP_DIR" "$temp_entry" "${ORIGINAL_ARGS[@]}"
+    ' bash "$TEMP_DIR" "$temp_entry"
   fi
   echo "[X] 默认 rootfs 模式需要 root 权限；请使用 root 运行，或加 --no-rootfs 直接运行宿主模式" >&2
   exit 1
@@ -164,7 +185,7 @@ ROOTFS_EXTRA_ARGS+=(--distro "$ROOTFS_DISTRO")
 
 if [ -f "$LOCAL_ROOTFS" ] && [ -f "$LOCAL_CORE" ]; then
   export TCPQUALITY_CORE_SCRIPT="$LOCAL_CORE"
-  exec bash "$LOCAL_ROOTFS" "${ROOTFS_EXTRA_ARGS[@]}" -- "${CORE_ARGS[@]}"
+  run_rootfs "$LOCAL_ROOTFS" "${ROOTFS_EXTRA_ARGS[@]}"
 fi
 
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tcpquality-entry.XXXXXX")
@@ -176,4 +197,4 @@ curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
   "$RAW_BASE/runTcpQuality-core.sh" -o "$core_script"
 chmod 0755 "$rootfs_runner" "$core_script"
 export TCPQUALITY_CORE_SCRIPT="$core_script"
-exec bash "$rootfs_runner" "${ROOTFS_EXTRA_ARGS[@]}" -- "${CORE_ARGS[@]}"
+run_rootfs "$rootfs_runner" "${ROOTFS_EXTRA_ARGS[@]}"

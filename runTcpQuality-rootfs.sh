@@ -150,7 +150,11 @@ configure_interactive_args() {
 
   [ "$upload_rank" -eq 0 ] && selected_args+=("--no-rank-upload")
 
-  set -- "${selected_args[@]}"
+  if [ "${#selected_args[@]}" -gt 0 ]; then
+    set -- "${selected_args[@]}"
+  else
+    set --
+  fi
   INTERACTIVE_ARGS=("$@")
 }
 
@@ -218,7 +222,10 @@ esac
 # constrained VPS containers reject unshare, so fall back to explicit cleanup.
 if [ "${TCPQUALITY_MOUNT_NS:-0}" -eq 0 ] && command -v unshare >/dev/null 2>&1; then
   if unshare -m true >/dev/null 2>&1; then
-    exec env TCPQUALITY_MOUNT_NS=1 unshare -m /bin/bash "$SELF_SCRIPT" "${ORIGINAL_ARGS[@]}"
+    if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+      exec env TCPQUALITY_MOUNT_NS=1 unshare -m /bin/bash "$SELF_SCRIPT" "${ORIGINAL_ARGS[@]}"
+    fi
+    exec env TCPQUALITY_MOUNT_NS=1 unshare -m /bin/bash "$SELF_SCRIPT"
   fi
 fi
 if [ "${TCPQUALITY_MOUNT_NS:-0}" -eq 1 ]; then
@@ -232,9 +239,15 @@ fi
 if ! has_non_debug_args "$@"; then
   configure_interactive_args
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    set -- "${INTERACTIVE_ARGS[@]}" --debug
-  else
+    if [ "${#INTERACTIVE_ARGS[@]}" -gt 0 ]; then
+      set -- "${INTERACTIVE_ARGS[@]}" --debug
+    else
+      set -- --debug
+    fi
+  elif [ "${#INTERACTIVE_ARGS[@]}" -gt 0 ]; then
     set -- "${INTERACTIVE_ARGS[@]}"
+  else
+    set --
   fi
 fi
 if [ "$#" -gt 0 ]; then
