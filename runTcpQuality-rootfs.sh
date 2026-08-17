@@ -517,15 +517,29 @@ download_extract() {
 }
 
 rootfs_source_base() {
+  local source="$1" tag="${2:-$ROOTFS_RELEASE_TAG}"
   case "$1" in
     github)
-      printf 'https://github.com/%s/releases/download/%s\n' "$ROOTFS_GITHUB_REPOSITORY" "$ROOTFS_RELEASE_TAG"
+      printf 'https://github.com/%s/releases/download/%s\n' "$ROOTFS_GITHUB_REPOSITORY" "$tag"
       ;;
     ibsgss)
-      printf '%s/%s\n' "${ROOTFS_IBSGSS_BASE%/}" "$ROOTFS_RELEASE_TAG"
+      printf '%s/%s\n' "${ROOTFS_IBSGSS_BASE%/}" "$tag"
       ;;
     *) return 1 ;;
   esac
+}
+
+parse_rootfs_manifest_version() {
+  local manifest="$1"
+  awk '
+    /"version"[[:space:]]*:/ {
+      line=$0
+      sub(/^.*"version"[[:space:]]*:[[:space:]]*"/, "", line)
+      sub(/".*$/, "", line)
+      if (line ~ /^v1\.[0-9][0-9][0-9][0-9][0-9]$/) print line
+      exit
+    }
+  ' "$manifest"
 }
 
 parse_rootfs_manifest() {
@@ -549,13 +563,16 @@ parse_rootfs_manifest() {
 }
 
 download_prebuilt_debian_from() {
-  local source="$1" base manifest archive metadata file checksum expected_size actual_size
+  local source="$1" base asset_base manifest manifest_version archive metadata file checksum expected_size actual_size
   base=$(rootfs_source_base "$source") || return 1
   manifest="$TEMP_ROOT_PARENT/rootfs-manifest-${source}.json"
   archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
   echo "[i] 尝试 ${source} 预构建 rootfs: ${ROOTFS_RELEASE_TAG}"
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 45 \
     "$base/rootfs-manifest.json" -o "$manifest" || return 1
+  manifest_version=$(parse_rootfs_manifest_version "$manifest") || return 1
+  [ -n "$manifest_version" ] || return 1
+  asset_base=$(rootfs_source_base "$source" "$manifest_version") || return 1
   metadata=$(parse_rootfs_manifest "$manifest" "$DEBIAN_ARCH") || return 1
   [ -n "$metadata" ] || return 1
   IFS='|' read -r file checksum expected_size <<< "$metadata"
@@ -563,9 +580,9 @@ download_prebuilt_debian_from() {
     tcpquality-rootfs-*.tar.gz) ;;
     *) return 1 ;;
   esac
-  echo "[i] 下载 rootfs: $base/$file"
+  echo "[i] 下载 rootfs: $asset_base/$file"
   curl -fL --retry 3 --connect-timeout 15 --max-time 600 \
-    "$base/$file" -o "$archive" || return 1
+    "$asset_base/$file" -o "$archive" || return 1
   actual_size=$(wc -c < "$archive" | tr -d ' ')
   if [ "$actual_size" != "$expected_size" ]; then
     echo "[!] ${source} rootfs 大小校验失败: expected=$expected_size actual=$actual_size" >&2
