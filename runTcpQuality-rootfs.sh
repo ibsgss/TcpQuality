@@ -563,13 +563,15 @@ parse_rootfs_manifest() {
 }
 
 download_prebuilt_debian_from() {
-  local source="$1" base asset_base manifest manifest_version archive metadata file checksum expected_size actual_size
+  local source="$1" base asset_base manifest manifest_url manifest_version archive metadata file checksum expected_size actual_size cache_buster
   base=$(rootfs_source_base "$source") || return 1
   manifest="$TEMP_ROOT_PARENT/rootfs-manifest-${source}.json"
   archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
   echo "[i] 尝试 ${source} 预构建 rootfs: ${ROOTFS_RELEASE_TAG}"
+  cache_buster="$(date +%s)-$$"
+  manifest_url="$base/rootfs-manifest.json?refresh=$cache_buster"
   curl -fsSL --retry 2 --connect-timeout 10 --max-time 45 \
-    "$base/rootfs-manifest.json" -o "$manifest" || return 1
+    "$manifest_url" -o "$manifest" || return 1
   manifest_version=$(parse_rootfs_manifest_version "$manifest") || return 1
   [ -n "$manifest_version" ] || return 1
   asset_base=$(rootfs_source_base "$source" "$manifest_version") || return 1
