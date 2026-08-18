@@ -4078,6 +4078,7 @@ SPEEDTEST_RANK_ELIGIBLE=1
 SPEEDTEST_RANK_DISABLED_REASON=""
 SPEEDTEST_COUNTER_CHAIN=""
 SPEEDTEST_COUNTER_HOOK=""
+SPEEDTEST_COUNTER_TOOL=""
 
 speedtest_candidates() {
   case "$1" in
@@ -4370,7 +4371,7 @@ install_speedtest_dependencies() {
 }
 
 install_speedtest_counter_dependency() {
-  command -v iptables &>/dev/null && return 0
+  command -v iptables &>/dev/null && command -v ip6tables &>/dev/null && return 0
   if is_nixos; then
     return 1
   fi
@@ -4385,11 +4386,22 @@ install_speedtest_counter_dependency() {
   else
     return 1
   fi
-  command -v iptables &>/dev/null
+  command -v iptables &>/dev/null && command -v ip6tables &>/dev/null
 }
 
 speedtest_retrans_count() {
   nstat -az 2>/dev/null | awk '$1=="TcpRetransSegs"{print $2; found=1} END{if(!found) print 0}'
+}
+
+speedtest_retrans_percent() {
+  local retrans="$1" packets="$2"
+  awk -v retrans="$retrans" -v packets="$packets" 'BEGIN {
+    if (retrans !~ /^[0-9]+$/ || packets !~ /^[0-9]+$/ || packets <= 0) {
+      print "-"
+      exit
+    }
+    printf "%.2f%%", retrans / packets * 100
+  }'
 }
 
 speedtest_result_valid() {
@@ -4435,20 +4447,23 @@ speedtest_net_bytes() {
 }
 
 speedtest_counter_stop_current() {
+  local tool="${SPEEDTEST_COUNTER_TOOL:-iptables}"
   if [ -n "${SPEEDTEST_COUNTER_CHAIN:-}" ] && [ -n "${SPEEDTEST_COUNTER_HOOK:-}" ]; then
-    $USE_SUDO iptables -D "$SPEEDTEST_COUNTER_HOOK" -j "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
-    $USE_SUDO iptables -F "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
-    $USE_SUDO iptables -X "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+    $USE_SUDO "$tool" -D "$SPEEDTEST_COUNTER_HOOK" -j "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+    $USE_SUDO "$tool" -F "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
+    $USE_SUDO "$tool" -X "$SPEEDTEST_COUNTER_CHAIN" >/dev/null 2>&1 || true
   fi
   SPEEDTEST_COUNTER_CHAIN=""
   SPEEDTEST_COUNTER_HOOK=""
+  SPEEDTEST_COUNTER_TOOL=""
 }
 
 speedtest_counter_start() {
-  local probe_type="$1" server_ip="$2" hook chain
+  local probe_type="$1" server_ip="$2" hook chain tool="iptables"
   speedtest_counter_stop_current
-  command -v iptables &>/dev/null || return 1
   [ -n "$server_ip" ] || return 1
+  [[ "$server_ip" == *:* ]] && tool="ip6tables"
+  command -v "$tool" &>/dev/null || return 1
 
   if [ "$probe_type" = "download" ]; then
     hook="INPUT"
@@ -4457,24 +4472,26 @@ speedtest_counter_start() {
   fi
   chain="TCPQ_TOS_$$_$RANDOM"
 
-  $USE_SUDO iptables -N "$chain" >/dev/null 2>&1 || return 1
-  $USE_SUDO iptables -I "$hook" 1 -j "$chain" >/dev/null 2>&1 || {
-    $USE_SUDO iptables -F "$chain" >/dev/null 2>&1 || true
-    $USE_SUDO iptables -X "$chain" >/dev/null 2>&1 || true
+  $USE_SUDO "$tool" -N "$chain" >/dev/null 2>&1 || return 1
+  $USE_SUDO "$tool" -I "$hook" 1 -j "$chain" >/dev/null 2>&1 || {
+    $USE_SUDO "$tool" -F "$chain" >/dev/null 2>&1 || true
+    $USE_SUDO "$tool" -X "$chain" >/dev/null 2>&1 || true
     return 1
   }
 
   if [ "$probe_type" = "download" ]; then
-    $USE_SUDO iptables -A "$chain" -p tcp -s "$server_ip" --sport 443 -j RETURN >/dev/null 2>&1 || {
+    $USE_SUDO "$tool" -A "$chain" -p tcp -s "$server_ip" --sport 443 -j RETURN >/dev/null 2>&1 || {
       SPEEDTEST_COUNTER_CHAIN="$chain"
       SPEEDTEST_COUNTER_HOOK="$hook"
+      SPEEDTEST_COUNTER_TOOL="$tool"
       speedtest_counter_stop_current
       return 1
     }
   else
-    $USE_SUDO iptables -A "$chain" -p tcp -d "$server_ip" --dport 443 -j RETURN >/dev/null 2>&1 || {
+    $USE_SUDO "$tool" -A "$chain" -p tcp -d "$server_ip" --dport 443 -j RETURN >/dev/null 2>&1 || {
       SPEEDTEST_COUNTER_CHAIN="$chain"
       SPEEDTEST_COUNTER_HOOK="$hook"
+      SPEEDTEST_COUNTER_TOOL="$tool"
       speedtest_counter_stop_current
       return 1
     }
@@ -4482,16 +4499,30 @@ speedtest_counter_start() {
 
   SPEEDTEST_COUNTER_CHAIN="$chain"
   SPEEDTEST_COUNTER_HOOK="$hook"
+  SPEEDTEST_COUNTER_TOOL="$tool"
   return 0
 }
 
 speedtest_counter_bytes() {
+  local tool="${SPEEDTEST_COUNTER_TOOL:-iptables}"
   [ -n "${SPEEDTEST_COUNTER_CHAIN:-}" ] || {
     printf -- '-'
     return 0
   }
-  $USE_SUDO iptables -L "$SPEEDTEST_COUNTER_CHAIN" -v -x -n 2>/dev/null | awk '
+  $USE_SUDO "$tool" -L "$SPEEDTEST_COUNTER_CHAIN" -v -x -n 2>/dev/null | awk '
     NR > 2 && $3 == "RETURN" { print $2; found=1; exit }
+    END { if (!found) print "-" }
+  '
+}
+
+speedtest_counter_packets() {
+  local tool="${SPEEDTEST_COUNTER_TOOL:-iptables}"
+  [ -n "${SPEEDTEST_COUNTER_CHAIN:-}" ] || {
+    printf -- '-'
+    return 0
+  }
+  $USE_SUDO "$tool" -L "$SPEEDTEST_COUNTER_CHAIN" -v -x -n 2>/dev/null | awk '
+    NR > 2 && $3 == "RETURN" { print $1; found=1; exit }
     END { if (!found) print "-" }
   '
 }
@@ -4741,7 +4772,7 @@ speedtest_record_manual_failure_debug() {
 
 speedtest_run_probe() {
   local probe_type="$1" output_file="$2" server_ip="$3"
-  local before after retrans start_bytes end_bytes delta_bytes counter_enabled
+  local before after retrans start_bytes end_bytes start_packets end_packets packet_delta delta_bytes counter_enabled
   local host key size timeout meta raw_file exit_code result parsed
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
@@ -4790,10 +4821,12 @@ speedtest_run_probe() {
   if speedtest_counter_start "$probe_type" "$server_ip"; then
     counter_enabled=1
     start_bytes=$(speedtest_counter_bytes)
+    start_packets=$(speedtest_counter_packets)
   else
     SPEEDTEST_RANK_ELIGIBLE=0
     SPEEDTEST_RANK_DISABLED_REASON="target_counter_unavailable"
     start_bytes=$(speedtest_net_bytes "$probe_type")
+    start_packets="-"
   fi
   before=$(speedtest_retrans_count)
   set +e
@@ -4808,17 +4841,28 @@ speedtest_run_probe() {
   set -e
   if [ "$counter_enabled" -eq 1 ]; then
     end_bytes=$(speedtest_counter_bytes)
+    end_packets=$(speedtest_counter_packets)
     if [ "$start_bytes" = "-" ] || [ "$end_bytes" = "-" ]; then
       SPEEDTEST_RANK_ELIGIBLE=0
       SPEEDTEST_RANK_DISABLED_REASON="target_counter_read_failed"
     fi
   else
     end_bytes=$(speedtest_net_bytes "$probe_type")
+    end_packets="-"
   fi
   speedtest_counter_stop_current
   after=$(speedtest_retrans_count)
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
+  if [ "$probe_type" = "upload" ]; then
+    if [ "$counter_enabled" -eq 1 ] &&
+       [[ "$start_packets" =~ ^[0-9]+$ ]] && [[ "$end_packets" =~ ^[0-9]+$ ]]; then
+      packet_delta=$((end_packets - start_packets))
+      retrans=$(speedtest_retrans_percent "$retrans" "$packet_delta")
+    else
+      retrans="-"
+    fi
+  fi
 
   meta=$(cat "$raw_file" 2>/dev/null || true)
   IFS='|' read -r http_code bytes_download speed_download bytes_upload speed_upload \
@@ -5016,12 +5060,17 @@ speedtest_applecdn_curl_download() {
 }
 
 speedtest_applecdn_curl_upload() {
-  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" ratio_mode="${4:-0}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
+  local counter_enabled=0 start_packets="-" end_packets="-" packet_delta
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
   [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
+  if [ "$ratio_mode" = "1" ] && [ -n "$fixed_ip" ] && speedtest_counter_start upload "$fixed_ip"; then
+    counter_enabled=1
+    start_packets=$(speedtest_counter_packets)
+  fi
   before=$(speedtest_retrans_count)
   set +e
   meta=$(
@@ -5042,9 +5091,22 @@ speedtest_applecdn_curl_upload() {
   )
   exit_code=$?
   set -e
+  if [ "$counter_enabled" -eq 1 ]; then
+    end_packets=$(speedtest_counter_packets)
+  fi
+  speedtest_counter_stop_current
   after=$(speedtest_retrans_count)
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
+  if [ "$ratio_mode" = "1" ]; then
+    if [ "$counter_enabled" -eq 1 ] &&
+       [[ "$start_packets" =~ ^[0-9]+$ ]] && [[ "$end_packets" =~ ^[0-9]+$ ]]; then
+      packet_delta=$((end_packets - start_packets))
+      retrans=$(speedtest_retrans_percent "$retrans" "$packet_delta")
+    else
+      retrans="-"
+    fi
+  fi
   IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
@@ -5120,7 +5182,7 @@ speedtest_collect_applecdn6() {
       workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn6.XXXXXX")
       result_file="$workdir/result"
       IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "-6" "$candidate")"
-      IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "-6" "$candidate")"
+      IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "-6" "$candidate" 1)"
 
       [ "$download" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "download" "$candidate" "$label" "$result_file.download"
       [ "$upload" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "upload" "$candidate" "$label" "$result_file.upload"
@@ -5192,13 +5254,13 @@ speedtest_pad_center() {
 }
 
 speedtest_print_group_header() {
-  local column_label="${2:-IPv4}"
+  local column_label="${2:-IPv4}" retrans_label="${3:-回程重传}"
 
   # The terminal formatter counts UTF-8 bytes, so align CJK headings by display width.
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 12 "$column_label"; printf '%b' "$NC"
   printf '  '
-  printf '%b' "$CYAN"; speedtest_pad_left 10 '回程重传'; printf '%b' "$NC"
+  printf '%b' "$CYAN"; speedtest_pad_left 10 "$retrans_label"; printf '%b' "$NC"
   printf '  '
   printf '%b' "$CYAN"; speedtest_pad_left 12 '回程速度'; printf '%b' "$NC"
   printf '  '
@@ -5328,6 +5390,19 @@ speedtest_speed_color() {
 
 speedtest_retrans_color() {
   local value="$1"
+  if [[ "$value" == *% ]]; then
+    value="${value%\%}"
+    if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      printf '%s' "$RED"
+    elif awk -v value="$value" 'BEGIN { exit !(value > 5) }'; then
+      printf '%s' "$RED"
+    elif awk -v value="$value" 'BEGIN { exit !(value > 1) }'; then
+      printf '%s' "$YELLOW"
+    else
+      printf '%s' "$GREEN"
+    fi
+    return
+  fi
   if [ "$value" = "failed" ] || [ "$value" -gt 999 ] 2>/dev/null; then
     printf '%s' "$RED"
   elif [ "$value" -ge 100 ] 2>/dev/null; then
@@ -5674,10 +5749,10 @@ show_speedtest_results() {
     fi
     if [ "$label" = "IPv6" ]; then
       carriers=(深圳移动 重庆移动)
-      speedtest_print_group_header "IPv6" "IPv6"
+      speedtest_print_group_header "IPv6" "IPv6" "回程重传率"
     else
       carriers=(电信 联通 移动)
-      speedtest_print_group_header "$label" "IPv4"
+      speedtest_print_group_header "$label" "IPv4" "回程重传率"
     fi
     if [ "$label" = "IPv6" ]; then
       results=("$result1" "$result2")
