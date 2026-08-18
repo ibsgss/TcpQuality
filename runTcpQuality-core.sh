@@ -5394,9 +5394,9 @@ speedtest_retrans_color() {
     value="${value%\%}"
     if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       printf '%s' "$RED"
-    elif awk -v value="$value" 'BEGIN { exit !(value > 5) }'; then
+    elif awk -v value="$value" 'BEGIN { exit !(value >= 20) }'; then
       printf '%s' "$RED"
-    elif awk -v value="$value" 'BEGIN { exit !(value > 1) }'; then
+    elif awk -v value="$value" 'BEGIN { exit !(value > 10) }'; then
       printf '%s' "$YELLOW"
     else
       printf '%s' "$GREEN"
