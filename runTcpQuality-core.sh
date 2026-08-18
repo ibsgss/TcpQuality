@@ -4902,9 +4902,10 @@ speedtest_run_probe() {
 
   parsed=$(speedtest_parse_rate_mbps < "$output_file" || true)
   result="$parsed"
-  # 超时后的部分传输仍有有效平均速率，保持与官方 probe 一致，允许展示该结果；
-  # 只有没有有效速率或 HTTP 请求本身没有成功建立时才判定失败。
-  if [ "$parsed" = "failed" ] || { ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]] && [ "${rate_bytes_per_second:-0}" = "0" ]; }; then
+  # 国内单线程测速必须完整成功；超时或其他非零退出码产生的部分速率不能作为有效结果。
+  if [ "$parsed" = "failed" ] ||
+     [ "$exit_code" -ne 0 ] ||
+     ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
     result="failed"
   fi
 
@@ -4914,6 +4915,7 @@ speedtest_run_probe() {
     reported_connect_ms="failed"
     reported_tls_ms="failed"
     sed -i \
+      -e "s/^Average ${probe_type} rate: .*/Average ${probe_type} rate: failed/" \
       -e 's/^Build connection cost: .*/Build connection cost: failed/' \
       -e 's/^Tls handshake cost: .*/Tls handshake cost: failed/' \
       "$output_file"
@@ -5016,8 +5018,9 @@ speedtest_ipv6_available() {
 }
 
 speedtest_applecdn_curl_download() {
-  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
+  local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" strict_mode="${4:-0}" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
+  local direction_failed=0
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
   [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
@@ -5042,7 +5045,16 @@ speedtest_applecdn_curl_download() {
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
-  if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
+  if [ "$speed" = "failed" ]; then
+    direction_failed=1
+  elif [ "$strict_mode" = "1" ]; then
+    if [ "$exit_code" -ne 0 ] || ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+      direction_failed=1
+    fi
+  elif [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; then
+    direction_failed=1
+  fi
+  if [ "$direction_failed" -eq 1 ]; then
     printf 'failed|%s|%s|%s' "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
   else
     printf '%s|%s|%s|%s' "$speed" "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
@@ -5065,7 +5077,7 @@ speedtest_applecdn_curl_download() {
 speedtest_applecdn_curl_upload() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" ratio_mode="${4:-0}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency
-  local counter_enabled=0 start_packets="-" end_packets="-" packet_delta
+  local counter_enabled=0 start_packets="-" end_packets="-" packet_delta direction_failed=0
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
@@ -5114,7 +5126,16 @@ speedtest_applecdn_curl_upload() {
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
-  if [ "$speed" = "failed" ] || { [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; }; then
+  if [ "$speed" = "failed" ]; then
+    direction_failed=1
+  elif [ "$ratio_mode" = "1" ]; then
+    if [ "$exit_code" -ne 0 ] || ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+      direction_failed=1
+    fi
+  elif [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; then
+    direction_failed=1
+  fi
+  if [ "$direction_failed" -eq 1 ]; then
     printf 'failed|%s|%s|%s' "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
   else
     printf '%s|%s|%s|%s' "$speed" "$retrans" "$(speedtest_applecdn_seconds_to_ms "${connect:-0}")" "$latency"
@@ -5184,7 +5205,7 @@ speedtest_collect_applecdn6() {
       [ -n "$candidate" ] || continue
       workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn6.XXXXXX")
       result_file="$workdir/result"
-      IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "-6" "$candidate")"
+      IFS='|' read -r download download_retrans download_connect download_tls <<<"$(speedtest_applecdn_curl_download "$result_file.download" "-6" "$candidate" 1)"
       IFS='|' read -r upload upload_retrans upload_connect upload_tls <<<"$(speedtest_applecdn_curl_upload "$result_file.upload" "-6" "$candidate" 1)"
 
       [ "$download" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "download" "$candidate" "$label" "$result_file.download"
