@@ -4400,7 +4400,10 @@ speedtest_retrans_percent() {
       print "-"
       exit
     }
-    printf "%.2f%%", retrans / packets * 100
+    ratio = retrans / packets * 100
+    if (ratio < 0) ratio = 0
+    if (ratio > 100) ratio = 100
+    printf "%.2f%%", ratio
   }'
 }
 
