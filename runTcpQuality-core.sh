@@ -1568,9 +1568,14 @@ get_public_ipv4() {
 
 get_public_ipv6() {
   local api response
-  local apis=("ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
+  local apis=(
+    "https://api6.ipify.org"
+    "https://ipv6.icanhazip.com"
+    "https://ifconfig.co/ip"
+    "https://ident.me"
+  )
   for api in "${apis[@]}"; do
-    response=$(curl -s6k --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
+    response=$(curl -6 -fsSL --connect-timeout 5 --max-time 8 "$api" 2>/dev/null | awk 'NR==1 {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print}')
     if is_valid_ipv6 "$response"; then
       IPV6_PUBLIC="$response"
       IPV6_WORK=1
@@ -4050,7 +4055,7 @@ SPEEDTEST_APPLECDN_USER_AGENT="${SPEEDTEST_APPLECDN_USER_AGENT:-networkQuality/1
 SPEEDTEST_TOS_CT_IP="${TOS_CT_IP:-42.81.80.86}"
 SPEEDTEST_TOS_CU_IP="${TOS_CU_IP:-221.194.175.109}"
 SPEEDTEST_TOS_CM_IP="${TOS_CM_IP:-120.255.0.180}"
-SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api64.ipify.org}"
+SPEEDTEST_IPV6_PROBE_URL="${SPEEDTEST_IPV6_PROBE_URL:-https://api6.ipify.org}"
 SPEEDTEST_IPV6_CHECKED=0
 SPEEDTEST_IPV6_AVAILABLE=0
 SPEEDTEST_TOS_REMOTE_LOADED=0
