@@ -5791,6 +5791,13 @@ append_speedtest_csv() {
 
 run_speedtest_mode() {
   local report_time csv
+  check_curl
+  detect_ip_stack
+  if ipv6_available; then
+    echo -e "${GREEN}[√] 单线程测速检测到可用 IPv6${NC}"
+  else
+    echo -e "${YELLOW}[!] 单线程测速未检测到可用 IPv6，跳过 IPv6 测速${NC}"
+  fi
   collect_speedtest_results
   report_time=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST（北京时间）')
   csv="/tmp/zstatic_nping_$(date +%Y%m%d_%H%M%S).csv"
