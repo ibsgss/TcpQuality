@@ -5749,10 +5749,10 @@ show_speedtest_results() {
     fi
     if [ "$label" = "IPv6" ]; then
       carriers=(深圳移动 重庆移动)
-      speedtest_print_group_header "IPv6" "IPv6" "回程重传率"
+      speedtest_print_group_header "IPv6" "IPv6"
     else
       carriers=(电信 联通 移动)
-      speedtest_print_group_header "$label" "IPv4" "回程重传率"
+      speedtest_print_group_header "$label" "IPv4"
     fi
     if [ "$label" = "IPv6" ]; then
       results=("$result1" "$result2")
