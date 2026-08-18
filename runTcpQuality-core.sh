@@ -4407,6 +4407,31 @@ speedtest_retrans_percent() {
   }'
 }
 
+speedtest_curl_partial_timeout_valid() {
+  local exit_code="$1" elapsed="$2" timeout="$3" bytes="$4"
+  [ "$exit_code" -eq 28 ] || return 1
+  [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ] || return 1
+  awk -v elapsed="$elapsed" -v timeout="$timeout" 'BEGIN {
+    if (elapsed !~ /^[0-9]+([.][0-9]+)?$/ ||
+        timeout !~ /^[0-9]+([.][0-9]+)?$/) {
+      exit 1
+    }
+    exit !((elapsed + 0) >= (timeout + 0) - 0.1)
+  }'
+}
+
+speedtest_curl_average_rate() {
+  local bytes="$1" elapsed="$2"
+  awk -v bytes="$bytes" -v elapsed="$elapsed" 'BEGIN {
+    if (bytes !~ /^[0-9]+$/ || elapsed !~ /^[0-9]+([.][0-9]+)?$/ ||
+        bytes <= 0 || elapsed <= 0) {
+      print 0
+      exit
+    }
+    printf "%.0f", bytes / elapsed
+  }'
+}
+
 speedtest_result_valid() {
   local value="$1"
   [ "$value" != "failed" ] && [ -n "$value" ]
@@ -4776,7 +4801,7 @@ speedtest_record_manual_failure_debug() {
 speedtest_run_probe() {
   local probe_type="$1" output_file="$2" server_ip="$3"
   local before after retrans start_bytes end_bytes start_packets end_packets packet_delta delta_bytes counter_enabled
-  local host key size timeout meta raw_file exit_code result parsed
+  local host key size timeout meta raw_file exit_code result parsed transfer_bytes partial_timeout
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
   local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
@@ -4878,10 +4903,18 @@ speedtest_run_probe() {
     wait_ms=0
     send_ms=$(speedtest_curl_delta_ms "$pretransfer_time" "$total_time")
     rate_bytes_per_second="${speed_upload:-0}"
+    transfer_bytes="${bytes_upload:-0}"
   else
     send_ms=0
     wait_ms=$(speedtest_curl_delta_ms "$pretransfer_time" "$starttransfer_time")
     rate_bytes_per_second="${speed_download:-0}"
+    transfer_bytes="${bytes_download:-0}"
+  fi
+  partial_timeout=0
+  if speedtest_curl_partial_timeout_valid "$exit_code" "$total_time" "$timeout" "$transfer_bytes"; then
+    partial_timeout=1
+    # 达到 max-time 但未完成时，明确使用完整运行时长计算平均速率。
+    rate_bytes_per_second=$(speedtest_curl_average_rate "$transfer_bytes" "$total_time")
   fi
   rate_mb=$(speedtest_curl_rate_mbps "$rate_bytes_per_second")
   {
@@ -4902,10 +4935,13 @@ speedtest_run_probe() {
 
   parsed=$(speedtest_parse_rate_mbps < "$output_file" || true)
   result="$parsed"
-  # 国内单线程测速必须完整成功；超时或其他非零退出码产生的部分速率不能作为有效结果。
-  if [ "$parsed" = "failed" ] ||
-     [ "$exit_code" -ne 0 ] ||
-     ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+  # 达到 max-time 且已传输数据属于有效的时间窗口样本；连接阶段超时、
+  # 连接重置和其他非零退出码仍然判定为失败。
+  if [ "$parsed" = "failed" ]; then
+    result="failed"
+  elif [ "$exit_code" -eq 0 ]; then
+    ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]] && result="failed"
+  elif [ "$partial_timeout" -ne 1 ]; then
     result="failed"
   fi
 
@@ -5019,7 +5055,7 @@ speedtest_ipv6_available() {
 
 speedtest_applecdn_curl_download() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" strict_mode="${4:-0}" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
-  local before after retrans speed latency
+  local before after retrans speed latency partial_timeout=0
   local direction_failed=0
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
@@ -5042,13 +5078,22 @@ speedtest_applecdn_curl_download() {
   retrans=$((after - before))
   [ "$retrans" -ge 0 ] || retrans=0
   IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  if [ "$strict_mode" = "1" ] &&
+     speedtest_curl_partial_timeout_valid "$exit_code" "$total" "$timeout" "${bytes:-0}"; then
+    partial_timeout=1
+    curl_speed=$(speedtest_curl_average_rate "${bytes:-0}" "$total")
+  fi
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ]; then
     direction_failed=1
   elif [ "$strict_mode" = "1" ]; then
-    if [ "$exit_code" -ne 0 ] || ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    if [ "$exit_code" -eq 0 ]; then
+      if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        direction_failed=1
+      fi
+    elif [ "$partial_timeout" -ne 1 ]; then
       direction_failed=1
     fi
   elif [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; then
@@ -5076,7 +5121,7 @@ speedtest_applecdn_curl_download() {
 
 speedtest_applecdn_curl_upload() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" ratio_mode="${4:-0}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
-  local before after retrans speed latency
+  local before after retrans speed latency partial_timeout=0
   local counter_enabled=0 start_packets="-" end_packets="-" packet_delta direction_failed=0
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
@@ -5123,13 +5168,22 @@ speedtest_applecdn_curl_upload() {
     fi
   fi
   IFS='|' read -r bytes total curl_speed remote_ip connect appconnect starttransfer http_code <<<"$meta"
+  if [ "$ratio_mode" = "1" ] &&
+     speedtest_curl_partial_timeout_valid "$exit_code" "$total" "$timeout" "${bytes:-0}"; then
+    partial_timeout=1
+    curl_speed=$(speedtest_curl_average_rate "${bytes:-0}" "$total")
+  fi
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ]; then
     direction_failed=1
   elif [ "$ratio_mode" = "1" ]; then
-    if [ "$exit_code" -ne 0 ] || ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    if [ "$exit_code" -eq 0 ]; then
+      if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        direction_failed=1
+      fi
+    elif [ "$partial_timeout" -ne 1 ]; then
       direction_failed=1
     fi
   elif [ "$exit_code" -ne 0 ] && [ "${bytes:-0}" -le 0 ] 2>/dev/null; then
