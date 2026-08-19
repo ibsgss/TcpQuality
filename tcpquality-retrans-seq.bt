@@ -1,0 +1,42 @@
+#!/usr/bin/env bpftrace
+
+/*
+ * Emit the TCP sequence range carried by each retransmitted skb.
+ *
+ * BPFTRACE_BTF must point at the running kernel's BTF file.  The tracepoint
+ * exposes the skb and socket pointers; TCP_SKB_CB(skb) contains the
+ * host-order sequence range.  The caller deduplicates skaddr+seq+end_seq
+ * after the probe, so repeated retransmissions of one segment contribute
+ * once.
+ *
+ * Do not read `$skb->cb` through the BTF array directly here.  bpftrace 0.17
+ * copies char cb[48] to a temporary stack array and can end that array's
+ * lifetime before the derived tcp_skb_cb pointer is read, producing valid
+ * trace records with seq/end_seq equal to zero.  On Linux kernels using the
+ * current sk_buff layout, cb starts at byte 40: the first union is 24 bytes,
+ * followed by sk (8 bytes) and tstamp (8 bytes).  The shell-side validator
+ * rejects the trace if a kernel has a different layout, so it can never
+ * replace TCP_INFO with an invalid zero-sequence result.
+ *
+ * Keep the tracepoint fields limited to the long-lived fields.  Some kernels
+ * do not expose the newer `err` field, while skbaddr/skaddr and the address
+ * tuple are present on the older tracepoint as well.
+ */
+
+tracepoint:tcp:tcp_retransmit_skb
+/args->dport == 443/
+{
+  if (args->skbaddr != 0) {
+    $skb = (uint64)args->skbaddr;
+    $seq = *(uint32 *)($skb + 40);
+    $end_seq = *(uint32 *)($skb + 44);
+    printf("%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%p|%u|%u\n",
+      args->family,
+      args->daddr[0], args->daddr[1], args->daddr[2], args->daddr[3],
+      args->daddr_v6[0], args->daddr_v6[1], args->daddr_v6[2],
+      args->daddr_v6[3], args->daddr_v6[4], args->daddr_v6[5],
+      args->daddr_v6[6], args->daddr_v6[7], args->daddr_v6[8],
+      args->daddr_v6[9], args->daddr_v6[10], args->daddr_v6[11],
+      args->skaddr, $seq, $end_seq);
+  }
+}

@@ -1,0 +1,21 @@
+#!/usr/bin/env bpftrace
+
+/*
+ * Fallback for kernels without readable BTF TCP types.  The TCP retransmit
+ * tracepoint exposes skbaddr and skaddr; Linux normally retains the same skb
+ * in the write queue across repeated retransmissions.  The caller uses the
+ * pair as a conservative per-connection deduplication key.
+ */
+
+tracepoint:tcp:tcp_retransmit_skb
+/args->dport == 443/
+{
+  printf("%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%u|%p|%p\n",
+    args->family,
+    args->daddr[0], args->daddr[1], args->daddr[2], args->daddr[3],
+    args->daddr_v6[0], args->daddr_v6[1], args->daddr_v6[2],
+    args->daddr_v6[3], args->daddr_v6[4], args->daddr_v6[5],
+    args->daddr_v6[6], args->daddr_v6[7], args->daddr_v6[8],
+    args->daddr_v6[9], args->daddr_v6[10], args->daddr_v6[11],
+    args->skaddr, args->skbaddr);
+}
