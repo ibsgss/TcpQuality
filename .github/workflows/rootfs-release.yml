@@ -180,6 +180,7 @@ jobs:
             dist/rootfs-manifest.json \
             dist/tcpquality-rootfs-amd64.tar.gz \
             dist/tcpquality-rootfs-arm64.tar.gz \
+            --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
 
