@@ -11,6 +11,7 @@ on:
       - tcpquality-retrans-seq.bt
       - tcpquality-retrans-skb.bt
       - runTcpQuality-rootfs.sh
+      - runTcpQuality-core.sh
       - runTcpQuality.sh
   workflow_dispatch:
 

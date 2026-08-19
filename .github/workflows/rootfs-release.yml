@@ -1,22 +1,89 @@
 name: Build rootfs release
 
 on:
+  push:
+    branches: [v1beta]
+    paths:
+      - .github/actions/build-rootfs/action.yml
+      - .github/workflows/rootfs-release.yml
+      - runTcpQuality-core.sh
+      - runTcpQuality-beta.sh
+      - runTcpQuality-rootfs.sh
+      - runTcpQuality.sh
+      - tcpquality-tcpinfo.c
+      - tcpquality-retrans-seq.bt
+      - tcpquality-retrans-skb.bt
   workflow_dispatch:
     inputs:
       release_tag:
         description: Immutable release tag, for example v1.00001
-        required: true
-        default: v1.00001
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
-env:
-  RELEASE_TAG: ${{ inputs.release_tag }}
+concurrency:
+  group: rootfs-release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Select release channel
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      alias_tag: ${{ steps.release.outputs.alias_tag }}
+    steps:
+      - name: Select immutable release tag and channel alias
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -Eeuo pipefail
+
+          case "$GITHUB_REF_NAME" in
+            main)
+              alias_tag=v1.latest
+              ;;
+            v1beta)
+              alias_tag=v1beta.latest
+              ;;
+            *)
+              echo "rootfs release is only allowed from main or v1beta" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            latest_number=$(gh release list --repo "$GH_REPO" --limit 1000 --json tagName --jq '.[].tagName' \
+              | sed -nE 's/^v1\.([0-9]{5})$/\1/p' \
+              | sort -n \
+              | tail -1)
+            latest_number=${latest_number:-0}
+            next_number=$((10#$latest_number + 1))
+            [ "$next_number" -le 99999 ] || {
+              echo "no v1 release tag remains" >&2
+              exit 1
+            }
+            printf -v release_tag 'v1.%05d' "$next_number"
+          fi
+
+          [[ "$release_tag" =~ ^v1\.[0-9]{5}$ ]] || {
+            echo "release_tag must match v1.00001, v1.00002, ..." >&2
+            exit 1
+          }
+          printf 'release_tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'alias_tag=%s\n' "$alias_tag" >> "$GITHUB_OUTPUT"
+          printf 'Publishing %s from %s as %s\n' "$release_tag" "$GITHUB_REF_NAME" "$alias_tag"
+
   build:
     name: Build ${{ matrix.arch }}
+    needs: prepare
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -36,7 +103,7 @@ jobs:
         uses: ./.github/actions/build-rootfs
         with:
           arch: ${{ matrix.arch }}
-          release-marker: ${{ env.RELEASE_TAG }}
+          release-marker: ${{ needs.prepare.outputs.release_tag }}
 
       - name: Upload architecture artifact
         uses: actions/upload-artifact@v4
@@ -48,8 +115,11 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      ALIAS_TAG: ${{ needs.prepare.outputs.alias_tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -113,27 +183,27 @@ jobs:
             --title "$RELEASE_TAG" \
             --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
 
-      - name: Update v1.latest alias
+      - name: Update channel alias
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
-          git tag -f v1.latest "$GITHUB_SHA"
-          git push --force origin refs/tags/v1.latest
-          if gh release view v1.latest >/dev/null 2>&1; then
-            gh release upload v1.latest --clobber \
+          git tag -f "$ALIAS_TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$ALIAS_TAG"
+          if gh release view "$ALIAS_TAG" >/dev/null 2>&1; then
+            gh release upload "$ALIAS_TAG" --clobber \
               dist/tcpquality-rootfs-amd64.tar.gz \
               dist/tcpquality-rootfs-arm64.tar.gz
-            gh release upload v1.latest --clobber dist/rootfs-manifest.json
-            gh release edit v1.latest \
-              --title "v1.latest" \
-              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+            gh release upload "$ALIAS_TAG" --clobber dist/rootfs-manifest.json
+            gh release edit "$ALIAS_TAG" \
+              --title "$ALIAS_TAG" \
+              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
           else
-            gh release create v1.latest \
+            gh release create "$ALIAS_TAG" \
               dist/tcpquality-rootfs-amd64.tar.gz \
               dist/tcpquality-rootfs-arm64.tar.gz \
               dist/rootfs-manifest.json \
-              --title "v1.latest" \
-              --notes "Stable alias for $RELEASE_TAG. Verify downloads with the attached manifest."
+              --title "$ALIAS_TAG" \
+              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
           fi
