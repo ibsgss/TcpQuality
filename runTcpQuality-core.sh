@@ -4823,6 +4823,7 @@ speedtest_write_probe_meta() {
   local tcp_info_ratio_denominator="${15:--}" tcp_info_ratio="${16:--}" retrans_source="${17:-nstat}"
   local trace_available="${18:-0}" trace_unique_retrans="${19:--}" trace_ratio_denominator="${20:--}"
   local trace_ratio="${21:--}" tcp_info_mode="${22:-none}" trace_key="${23:-skbaddr+skaddr}"
+  local trace_valid="${24:-0}"
   {
     printf 'probe_type=%s\n' "$probe_type"
     printf 'server_ip=%s\n' "$server_ip"
@@ -4842,6 +4843,7 @@ speedtest_write_probe_meta() {
     printf 'tcp_info_ratio=%s\n' "$tcp_info_ratio"
     printf 'tcp_info_mode=%s\n' "$tcp_info_mode"
     printf 'retrans_trace_available=%s\n' "$trace_available"
+    printf 'retrans_trace_valid=%s\n' "$trace_valid"
     printf 'retrans_trace_unique=%s\n' "$trace_unique_retrans"
     printf 'retrans_trace_ratio_denominator=%s\n' "$trace_ratio_denominator"
     printf 'retrans_trace_ratio=%s\n' "$trace_ratio"
@@ -5061,7 +5063,7 @@ speedtest_run_probe() {
   local tcp_info_file tcp_info_available=0 tcp_info_retrans=0
   local tcp_info_data_segs_out=0 tcp_info_segs_out=0 tcp_info_bytes_retrans=0 tcp_info_ratio="-"
   local tcp_info_ratio_denominator=0 retrans_source="nstat"
-  local tcp_info_mode="none" trace_unique_retrans=0 trace_ratio="-" trace_available=0
+  local tcp_info_mode="none" trace_unique_retrans=0 trace_ratio="-" trace_available=0 trace_valid=0
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
   local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
@@ -5186,15 +5188,26 @@ speedtest_run_probe() {
   if [ "$trace_available" -eq 1 ]; then
     trace_unique_retrans=$(speedtest_retrans_trace_count_ipv4 "$SPEEDTEST_RETRANS_TRACE_FILE" "$server_ip" 2>/dev/null || true)
     if [[ "$trace_unique_retrans" =~ ^[0-9]+$ ]] && [ "$tcp_info_available" -eq 1 ]; then
-      trace_ratio_denominator=$(awk -v data="$tcp_info_data_segs_out" -v retrans="$tcp_info_retrans" 'BEGIN {
-        if (data !~ /^[0-9]+$/ || retrans !~ /^[0-9]+$/ || data <= 0) print 0;
-        else {
-          value = data - retrans;
-          if (value <= 0) value = data;
-          print value;
-        }
-      }')
-      trace_ratio=$(speedtest_unique_retrans_percent "$trace_unique_retrans" "$tcp_info_data_segs_out" "$tcp_info_retrans")
+      if [ "$trace_unique_retrans" -gt 0 ] && [ "$trace_unique_retrans" -le "$tcp_info_retrans" ]; then
+        trace_ratio_denominator=$(awk -v packets="$tcp_info_ratio_denominator" -v retrans="$tcp_info_retrans" 'BEGIN {
+          if (packets !~ /^[0-9]+$/ || retrans !~ /^[0-9]+$/ || packets <= 0) print 0;
+          else {
+            value = packets - retrans;
+            if (value <= 0) value = packets;
+            print value;
+          }
+        }')
+        trace_ratio=$(speedtest_unique_retrans_percent "$trace_unique_retrans" "$tcp_info_ratio_denominator" "$tcp_info_retrans")
+        if [ "$trace_ratio" != "-" ]; then
+          trace_valid=1
+        fi
+      else
+        # A successfully attached trace can still be unusable when the
+        # kernel/BTF layout makes seq/end_seq unreadable. Never let that
+        # synthetic zero count override the socket-level TCP_INFO result.
+        trace_ratio_denominator="-"
+        trace_ratio="-"
+      fi
     fi
   fi
   if [ "$counter_enabled" -eq 1 ]; then
@@ -5214,7 +5227,7 @@ speedtest_run_probe() {
   [ "$nstat_retrans" -ge 0 ] || nstat_retrans=0
   retrans="$nstat_retrans"
   if [ "$tcp_info_available" -eq 1 ]; then
-    if [ "$trace_available" -eq 1 ] && [ "$trace_ratio" != "-" ]; then
+    if [ "$trace_available" -eq 1 ] && [ "$trace_valid" -eq 1 ] && [ "$trace_ratio" != "-" ]; then
       retrans="$trace_ratio"
       if [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ]; then
         retrans_source="ebpf_seq"
@@ -5323,7 +5336,8 @@ speedtest_run_probe() {
     "$nstat_retrans" "$tcp_info_available" "$tcp_info_retrans" "$tcp_info_data_segs_out" \
     "$tcp_info_segs_out" "$tcp_info_bytes_retrans" "$tcp_info_ratio_denominator" "$tcp_info_ratio" "$retrans_source" \
     "$trace_available" "$trace_unique_retrans" "$trace_ratio_denominator" "$trace_ratio" "$tcp_info_mode" \
-    "$( [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ] && printf 'skaddr+seq+end_seq' || printf 'skaddr+skbaddr' )"
+    "$( [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ] && printf 'skaddr+seq+end_seq' || printf 'skaddr+skbaddr' )" \
+    "$trace_valid"
   rm -f "$raw_file"
   [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -f "$tcp_info_file" "${tcp_info_file}.tmp" \
     "$SPEEDTEST_RETRANS_TRACE_FILE" "$SPEEDTEST_RETRANS_TRACE_ERR"
