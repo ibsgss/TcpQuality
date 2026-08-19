@@ -4081,6 +4081,19 @@ SPEEDTEST_COUNTER_HOOK=""
 SPEEDTEST_COUNTER_TOOL=""
 SPEEDTEST_TCP_INFO_ENABLED="${TCPQUALITY_TCP_INFO:-1}"
 SPEEDTEST_TCP_INFO_MONITOR_PID=""
+SPEEDTEST_TCP_INFO_ACTIVE_MODE="none"
+SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD=""
+SPEEDTEST_RETRANS_TRACE_ENABLED="${TCPQUALITY_RETRANS_TRACE:-1}"
+SPEEDTEST_RETRANS_TRACE_PID=""
+SPEEDTEST_RETRANS_TRACE_FILE=""
+SPEEDTEST_RETRANS_TRACE_ERR=""
+SPEEDTEST_RETRANS_TRACE_READY=0
+SPEEDTEST_RETRANS_TRACE_KEY=""
+SPEEDTEST_RETRANS_TRACE_DISABLED=0
+SPEEDTEST_TCP_INFO_PRELOAD="${TCPQUALITY_TCP_INFO_PRELOAD:-/usr/local/lib/libtcpquality-tcpinfo.so}"
+SPEEDTEST_RETRANS_TRACE_SCRIPT="${TCPQUALITY_RETRANS_TRACE_SCRIPT:-/usr/local/libexec/tcpquality-retrans-seq.bt}"
+SPEEDTEST_RETRANS_TRACE_FALLBACK_SCRIPT="${TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT:-/usr/local/libexec/tcpquality-retrans-skb.bt}"
+SPEEDTEST_BPFTRACE_BTF="${TCPQUALITY_BPFTRACE_BTF:-/sys/kernel/btf/vmlinux}"
 
 speedtest_candidates() {
   case "$1" in
@@ -4336,6 +4349,7 @@ speedtest_set_selected() {
 
 speedtest_cleanup() {
   speedtest_tcp_info_monitor_stop
+  speedtest_retrans_trace_stop
   speedtest_counter_stop_current
 }
 
@@ -4408,6 +4422,20 @@ speedtest_retrans_percent() {
     if (ratio > 100) ratio = 100
     printf "%.2f%%", ratio
   }'
+}
+
+speedtest_unique_retrans_percent() {
+  local retrans="$1" data_segs_out="$2" total_retrans="$3" denominator
+  denominator=$(awk -v data="$data_segs_out" -v retrans="$total_retrans" 'BEGIN {
+    if (data !~ /^[0-9]+$/ || retrans !~ /^[0-9]+$/ || data <= 0) {
+      print 0
+      exit
+    }
+    denominator = data - retrans
+    if (denominator <= 0) denominator = data
+    print denominator
+  }')
+  speedtest_retrans_percent "$retrans" "$denominator"
 }
 
 speedtest_curl_partial_timeout_valid() {
@@ -4489,7 +4517,7 @@ speedtest_counter_stop_current() {
   SPEEDTEST_COUNTER_TOOL=""
 }
 
-speedtest_tcp_info_snapshot() {
+speedtest_tcp_info_ss_snapshot() {
   local server_ip="$1" family_flag="${2:--4}" ss_output
   command -v ss >/dev/null 2>&1 || return 1
   ss_output=$(ss -tinp -n "$family_flag" state established 2>/dev/null || true)
@@ -4524,13 +4552,20 @@ speedtest_tcp_info_snapshot() {
   '
 }
 
+speedtest_tcp_info_preload_path() {
+  local preload="${SPEEDTEST_TCP_INFO_PRELOAD:-}"
+  [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] || return 1
+  [ -n "$preload" ] && [ -r "$preload" ] || return 1
+  printf '%s\n' "$preload"
+}
+
 speedtest_tcp_info_monitor_loop() {
   local server_ip="$1" output_file="$2" family_flag="${3:--4}" snapshot temp_file
   trap - EXIT INT TERM
   temp_file="${output_file}.tmp"
   set +e
   while :; do
-    snapshot=$(speedtest_tcp_info_snapshot "$server_ip" "$family_flag" 2>/dev/null || true)
+    snapshot=$(speedtest_tcp_info_ss_snapshot "$server_ip" "$family_flag" 2>/dev/null || true)
     if [ -n "$snapshot" ]; then
       printf '%s\n' "$snapshot" > "$temp_file" && mv -f "$temp_file" "$output_file"
     fi
@@ -4539,11 +4574,22 @@ speedtest_tcp_info_monitor_loop() {
 }
 
 speedtest_tcp_info_monitor_start() {
-  local server_ip="$1" output_file="$2" family_flag="${3:--4}"
+  local server_ip="$1" output_file="$2" family_flag="${3:--4}" preload
   SPEEDTEST_TCP_INFO_MONITOR_PID=""
+  SPEEDTEST_TCP_INFO_ACTIVE_MODE="none"
+  SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD=""
   [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] || return 1
-  command -v ss >/dev/null 2>&1 || return 1
   rm -f "$output_file" "${output_file}.tmp"
+
+  preload=$(speedtest_tcp_info_preload_path 2>/dev/null || true)
+  if [ -n "$preload" ]; then
+    SPEEDTEST_TCP_INFO_ACTIVE_MODE="getsockopt"
+    SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD="$preload"
+    return 0
+  fi
+
+  command -v ss >/dev/null 2>&1 || return 1
+  SPEEDTEST_TCP_INFO_ACTIVE_MODE="ss"
   speedtest_tcp_info_monitor_loop "$server_ip" "$output_file" "$family_flag" &
   SPEEDTEST_TCP_INFO_MONITOR_PID=$!
   return 0
@@ -4556,6 +4602,124 @@ speedtest_tcp_info_monitor_stop() {
     wait "$pid" 2>/dev/null || true
   fi
   SPEEDTEST_TCP_INFO_MONITOR_PID=""
+}
+
+speedtest_retrans_trace_program() {
+  local script_path="$1"
+  [ -r "$script_path" ] || return 1
+  cat "$script_path"
+}
+
+speedtest_retrans_trace_launch() {
+  local output_file="$1" program="$2" use_btf="$3"
+  rm -f "$SPEEDTEST_RETRANS_TRACE_FILE" "$SPEEDTEST_RETRANS_TRACE_ERR"
+  if [ "$use_btf" -eq 1 ] && [ -r "$SPEEDTEST_BPFTRACE_BTF" ]; then
+    BPFTRACE_BTF="$SPEEDTEST_BPFTRACE_BTF" bpftrace -q -e "$program" \
+      > "$SPEEDTEST_RETRANS_TRACE_FILE" 2> "$SPEEDTEST_RETRANS_TRACE_ERR" &
+  else
+    bpftrace -q -e "$program" \
+      > "$SPEEDTEST_RETRANS_TRACE_FILE" 2> "$SPEEDTEST_RETRANS_TRACE_ERR" &
+  fi
+  SPEEDTEST_RETRANS_TRACE_PID=$!
+  # Allow bpftrace to load the program before curl starts.  A failed attach
+  # exits immediately and is treated as unavailable below.
+  sleep 0.1
+  if ! kill -0 "$SPEEDTEST_RETRANS_TRACE_PID" 2>/dev/null; then
+    wait "$SPEEDTEST_RETRANS_TRACE_PID" 2>/dev/null || true
+    SPEEDTEST_RETRANS_TRACE_PID=""
+    return 1
+  fi
+  if [ -s "$SPEEDTEST_RETRANS_TRACE_ERR" ]; then
+    kill -KILL "$SPEEDTEST_RETRANS_TRACE_PID" 2>/dev/null || true
+    wait "$SPEEDTEST_RETRANS_TRACE_PID" 2>/dev/null || true
+    SPEEDTEST_RETRANS_TRACE_PID=""
+    return 1
+  fi
+  SPEEDTEST_RETRANS_TRACE_READY=1
+  return 0
+}
+
+speedtest_retrans_trace_start() {
+  local output_file="$1" program
+  SPEEDTEST_RETRANS_TRACE_PID=""
+  SPEEDTEST_RETRANS_TRACE_FILE="${output_file}.retrans-trace"
+  SPEEDTEST_RETRANS_TRACE_ERR="${SPEEDTEST_RETRANS_TRACE_FILE}.err"
+  SPEEDTEST_RETRANS_TRACE_READY=0
+  SPEEDTEST_RETRANS_TRACE_KEY=""
+  [ "${SPEEDTEST_RETRANS_TRACE_ENABLED:-1}" = "1" ] || return 1
+  [ "${SPEEDTEST_RETRANS_TRACE_DISABLED:-0}" -eq 0 ] || return 1
+  command -v bpftrace >/dev/null 2>&1 || return 1
+  program=$(speedtest_retrans_trace_program "$SPEEDTEST_RETRANS_TRACE_SCRIPT" 2>/dev/null || true)
+  if [ -n "$program" ] && speedtest_retrans_trace_launch "$output_file" "$program" 1; then
+    SPEEDTEST_RETRANS_TRACE_KEY="seq"
+    return 0
+  fi
+  program=$(speedtest_retrans_trace_program "$SPEEDTEST_RETRANS_TRACE_FALLBACK_SCRIPT" 2>/dev/null || true)
+  if [ -n "$program" ] && speedtest_retrans_trace_launch "$output_file" "$program" 0; then
+    SPEEDTEST_RETRANS_TRACE_KEY="skb"
+    return 0
+  fi
+  SPEEDTEST_RETRANS_TRACE_READY=0
+  SPEEDTEST_RETRANS_TRACE_DISABLED=1
+  return 1
+}
+
+speedtest_retrans_trace_stop() {
+  local pid="${SPEEDTEST_RETRANS_TRACE_PID:-}" status=0 attempt
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then
+    kill -INT "$pid" 2>/dev/null || true
+    for attempt in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      for attempt in $(seq 1 10); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+      done
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || status=$?
+    [ "$status" -eq 0 ] || [ "$status" -eq 130 ] || {
+      SPEEDTEST_RETRANS_TRACE_READY=0
+    }
+  fi
+  SPEEDTEST_RETRANS_TRACE_PID=""
+}
+
+speedtest_retrans_trace_count_ipv4() {
+  local trace_file="$1" server_ip="$2" a b c d key="${SPEEDTEST_RETRANS_TRACE_KEY:-skb}"
+  [ -s "$trace_file" ] || {
+    printf '0\n'
+    return 0
+  }
+  IFS=. read -r a b c d <<< "$server_ip"
+  [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ &&
+     "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || {
+    printf -- '-\n'
+    return 0
+  }
+  awk -F'|' -v a="$a" -v b="$b" -v c="$c" -v d="$d" -v key="$key" '
+    $1 == 2 && $2 == a && $3 == b && $4 == c && $5 == d {
+      if (key == "seq" && $18 ~ /^0x[0-9a-fA-F]+$/ &&
+          $19 ~ /^[0-9]+$/ && $20 ~ /^[0-9]+$/ &&
+          $18 != "0x0" && $19 != $20) {
+        unique[$18 ":" $19 ":" $20] = 1
+      } else if (key != "seq" && $18 ~ /^0x[0-9a-fA-F]+$/ &&
+                 $19 ~ /^0x[0-9a-fA-F]+$/ &&
+                 $18 != "0x0" && $19 != "0x0") {
+        unique[$18 ":" $19] = 1
+      }
+    }
+    END {
+      count = 0
+      for (key in unique) count++
+      print count + 0
+    }
+  ' "$trace_file"
 }
 
 speedtest_counter_start() {
@@ -4657,6 +4821,8 @@ speedtest_write_probe_meta() {
   local nstat_retrans="${9:--}" tcp_info_available="${10:-0}" tcp_info_retrans="${11:--}"
   local tcp_info_data_segs_out="${12:--}" tcp_info_segs_out="${13:--}" tcp_info_bytes_retrans="${14:--}"
   local tcp_info_ratio_denominator="${15:--}" tcp_info_ratio="${16:--}" retrans_source="${17:-nstat}"
+  local trace_available="${18:-0}" trace_unique_retrans="${19:--}" trace_ratio_denominator="${20:--}"
+  local trace_ratio="${21:--}" tcp_info_mode="${22:-none}" trace_key="${23:-skbaddr+skaddr}"
   {
     printf 'probe_type=%s\n' "$probe_type"
     printf 'server_ip=%s\n' "$server_ip"
@@ -4674,6 +4840,12 @@ speedtest_write_probe_meta() {
     printf 'tcp_info_bytes_retrans=%s\n' "$tcp_info_bytes_retrans"
     printf 'tcp_info_ratio_denominator=%s\n' "$tcp_info_ratio_denominator"
     printf 'tcp_info_ratio=%s\n' "$tcp_info_ratio"
+    printf 'tcp_info_mode=%s\n' "$tcp_info_mode"
+    printf 'retrans_trace_available=%s\n' "$trace_available"
+    printf 'retrans_trace_unique=%s\n' "$trace_unique_retrans"
+    printf 'retrans_trace_ratio_denominator=%s\n' "$trace_ratio_denominator"
+    printf 'retrans_trace_ratio=%s\n' "$trace_ratio"
+    printf 'retrans_trace_key=%s\n' "$trace_key"
     printf 'target_host=%s\n' "$(speedtest_tos_bucket_host "$SPEEDTEST_TOS_REGION" 2>/dev/null || true)"
     printf 'pin_method=curl--resolve\n'
     printf 'region=%s\n' "$SPEEDTEST_TOS_REGION"
@@ -4889,10 +5061,12 @@ speedtest_run_probe() {
   local tcp_info_file tcp_info_available=0 tcp_info_retrans=0
   local tcp_info_data_segs_out=0 tcp_info_segs_out=0 tcp_info_bytes_retrans=0 tcp_info_ratio="-"
   local tcp_info_ratio_denominator=0 retrans_source="nstat"
+  local tcp_info_mode="none" trace_unique_retrans=0 trace_ratio="-" trace_available=0
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
   local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
   local reported_connect_ms reported_tls_ms
+  local tcp_info_preload="" preload_value
   local -a curl_args
 
   host=$(speedtest_tos_bucket_host "$SPEEDTEST_TOS_REGION" 2>/dev/null || true)
@@ -4946,6 +5120,22 @@ speedtest_run_probe() {
   before=$(speedtest_retrans_count)
   tcp_info_file="${output_file}.tcpinfo"
   speedtest_tcp_info_monitor_start "$server_ip" "$tcp_info_file" "-4" || true
+  tcp_info_mode="${SPEEDTEST_TCP_INFO_ACTIVE_MODE:-none}"
+  tcp_info_preload="${SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD:-}"
+  if [ "$tcp_info_mode" = "getsockopt" ] && [ -n "$tcp_info_preload" ]; then
+    preload_value="$tcp_info_preload"
+    [ -n "${LD_PRELOAD:-}" ] && preload_value="$preload_value:$LD_PRELOAD"
+    curl_args=(
+      env
+      "LD_PRELOAD=$preload_value"
+      "TCPQUALITY_TCP_INFO_FILE=$tcp_info_file"
+      "TCPQUALITY_TCP_INFO_TARGET=$server_ip"
+      "${curl_args[@]}"
+    )
+  fi
+  if speedtest_retrans_trace_start "$output_file"; then
+    trace_available=1
+  fi
   set +e
   if [ "$probe_type" = "upload" ]; then
     (
@@ -4966,6 +5156,10 @@ speedtest_run_probe() {
   exit_code=$?
   set -e
   speedtest_tcp_info_monitor_stop
+  speedtest_retrans_trace_stop
+  if [ "$trace_available" -ne 1 ] || [ "${SPEEDTEST_RETRANS_TRACE_READY:-0}" -ne 1 ]; then
+    trace_available=0
+  fi
   if [ -s "$tcp_info_file" ]; then
     IFS='|' read -r tcp_info_retrans tcp_info_data_segs_out tcp_info_segs_out tcp_info_bytes_retrans < "$tcp_info_file" || true
     if [[ "$tcp_info_retrans" =~ ^[0-9]+$ ]] &&
@@ -4989,6 +5183,20 @@ speedtest_run_probe() {
       }')
     fi
   fi
+  if [ "$trace_available" -eq 1 ]; then
+    trace_unique_retrans=$(speedtest_retrans_trace_count_ipv4 "$SPEEDTEST_RETRANS_TRACE_FILE" "$server_ip" 2>/dev/null || true)
+    if [[ "$trace_unique_retrans" =~ ^[0-9]+$ ]] && [ "$tcp_info_available" -eq 1 ]; then
+      trace_ratio_denominator=$(awk -v data="$tcp_info_data_segs_out" -v retrans="$tcp_info_retrans" 'BEGIN {
+        if (data !~ /^[0-9]+$/ || retrans !~ /^[0-9]+$/ || data <= 0) print 0;
+        else {
+          value = data - retrans;
+          if (value <= 0) value = data;
+          print value;
+        }
+      }')
+      trace_ratio=$(speedtest_unique_retrans_percent "$trace_unique_retrans" "$tcp_info_data_segs_out" "$tcp_info_retrans")
+    fi
+  fi
   if [ "$counter_enabled" -eq 1 ]; then
     end_bytes=$(speedtest_counter_bytes)
     end_packets=$(speedtest_counter_packets)
@@ -5006,8 +5214,17 @@ speedtest_run_probe() {
   [ "$nstat_retrans" -ge 0 ] || nstat_retrans=0
   retrans="$nstat_retrans"
   if [ "$tcp_info_available" -eq 1 ]; then
-    retrans="$tcp_info_retrans"
-    retrans_source="tcp_info"
+    if [ "$trace_available" -eq 1 ] && [ "$trace_ratio" != "-" ]; then
+      retrans="$trace_ratio"
+      if [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ]; then
+        retrans_source="ebpf_seq"
+      else
+        retrans_source="ebpf_skb"
+      fi
+    else
+      retrans="$tcp_info_ratio"
+      retrans_source="tcp_info_${tcp_info_mode}"
+    fi
   elif [ "$probe_type" = "upload" ]; then
     if [ "$counter_enabled" -eq 1 ] &&
        [[ "$start_packets" =~ ^[0-9]+$ ]] && [[ "$end_packets" =~ ^[0-9]+$ ]]; then
@@ -5104,9 +5321,12 @@ speedtest_run_probe() {
   fi
   speedtest_write_probe_meta "$output_file" "$probe_type" "$server_ip" "$exit_code" "${result:-failed}" "${parsed:-failed}" "$reported_connect_ms" "$reported_tls_ms" \
     "$nstat_retrans" "$tcp_info_available" "$tcp_info_retrans" "$tcp_info_data_segs_out" \
-    "$tcp_info_segs_out" "$tcp_info_bytes_retrans" "$tcp_info_ratio_denominator" "$tcp_info_ratio" "$retrans_source"
+    "$tcp_info_segs_out" "$tcp_info_bytes_retrans" "$tcp_info_ratio_denominator" "$tcp_info_ratio" "$retrans_source" \
+    "$trace_available" "$trace_unique_retrans" "$trace_ratio_denominator" "$trace_ratio" "$tcp_info_mode" \
+    "$( [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ] && printf 'skaddr+seq+end_seq' || printf 'skaddr+skbaddr' )"
   rm -f "$raw_file"
-  [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -f "$tcp_info_file" "${tcp_info_file}.tmp"
+  [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -f "$tcp_info_file" "${tcp_info_file}.tmp" \
+    "$SPEEDTEST_RETRANS_TRACE_FILE" "$SPEEDTEST_RETRANS_TRACE_ERR"
   display_connect_ms="$reported_connect_ms"
   display_tls_ms="$reported_tls_ms"
   # CSV/SVG 的现有兼容层会将连接/TLS字段除以 2；连接耗时保持旧兼容口径，
@@ -5670,10 +5890,17 @@ collect_speedtest_results() {
     fi
     echo -e "${DIM}[debug] 固定 IP: 电信 $SPEEDTEST_TOS_CT_IP / 联通 $SPEEDTEST_TOS_CU_IP / 移动 $SPEEDTEST_TOS_CM_IP${NC}" >&2
     echo -e "${DIM}[debug] 传输方式: curl --resolve（保留 TOS Host/SNI）${NC}" >&2
-    if [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] && command -v ss >/dev/null 2>&1; then
-      echo -e "${DIM}[debug] 重传统计: 目标连接 TCP_INFO（ss retrans:X/Y），不可用时回退 nstat${NC}" >&2
+    if [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] && [ -r "${SPEEDTEST_TCP_INFO_PRELOAD:-}" ]; then
+      echo -e "${DIM}[debug] 重传统计: curl 目标 socket getsockopt(TCP_INFO)，可选 eBPF 序列去重；不可用时回退 ss/nstat${NC}" >&2
+    elif [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] && command -v ss >/dev/null 2>&1; then
+      echo -e "${DIM}[debug] 重传统计: 目标连接 TCP_INFO（ss retrans:X/Y），可选 eBPF 序列去重；不可用时回退 nstat${NC}" >&2
     else
       echo -e "${DIM}[debug] 重传统计: nstat 回退（目标连接 TCP_INFO 不可用）${NC}" >&2
+    fi
+    if [ "${SPEEDTEST_RETRANS_TRACE_ENABLED:-1}" = "1" ] && command -v bpftrace >/dev/null 2>&1; then
+      echo -e "${DIM}[debug] 重传去重: bpftrace tcp_retransmit_skb，优先按 TCP seq/end_seq 去重，BTF 不可用时按 skb 身份回退${NC}" >&2
+    else
+      echo -e "${DIM}[debug] 重传去重: eBPF 不可用，使用 TCP_INFO/nstat 原始重传事件${NC}" >&2
     fi
   fi
   if request_rank_session; then

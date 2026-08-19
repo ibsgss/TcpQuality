@@ -906,13 +906,13 @@ install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
     if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
        env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute; do command -v "$cmd" >/dev/null || exit 1; done'; then
+         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt'; then
       echo "[√] 预构建 rootfs 依赖已就绪"
       return 0
     fi
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod nmap ncurses-bin sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod nmap ncurses-bin bpftrace sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
       >"$apt_log" 2>&1; then
       echo "[X] Debian rootfs 依赖安装失败" >&2
       echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
@@ -1009,6 +1009,9 @@ if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
 fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
+  TCPQUALITY_TCP_INFO TCPQUALITY_TCP_INFO_PRELOAD TCPQUALITY_RETRANS_TRACE \
+  TCPQUALITY_RETRANS_TRACE_SCRIPT TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT \
+  TCPQUALITY_BPFTRACE_BTF \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
   http_proxy https_proxy no_proxy all_proxy; do
   if [ "${!env_name+x}" = x ]; then

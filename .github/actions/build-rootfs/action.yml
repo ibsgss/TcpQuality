@@ -22,17 +22,36 @@ runs:
         set -Eeuo pipefail
         rm -rf build-context rootfs dist
         mkdir -p build-context rootfs dist
+        cp tcpquality-tcpinfo.c build-context/tcpquality-tcpinfo.c
+        cp tcpquality-retrans-seq.bt build-context/tcpquality-retrans-seq.bt
+        cp tcpquality-retrans-skb.bt build-context/tcpquality-retrans-skb.bt
         cat > build-context/Dockerfile <<'EOF'
+        FROM debian:bookworm-slim AS tcpinfo-build
+        RUN export DEBIAN_FRONTEND=noninteractive \
+            && apt-get update -qq \
+            && apt-get install -y -qq --no-install-recommends gcc libc6-dev binutils \
+            && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+        COPY tcpquality-tcpinfo.c /tmp/tcpquality-tcpinfo.c
+        RUN gcc -O2 -fPIC -shared -Wl,-z,now \
+              -o /tmp/libtcpquality-tcpinfo.so /tmp/tcpquality-tcpinfo.c -ldl -pthread \
+            && strip --strip-unneeded /tmp/libtcpquality-tcpinfo.so
+
         FROM debian:bookworm-slim
         ARG TCPQUALITY_ROOTFS_RELEASE=rootfs-unknown
         RUN export DEBIAN_FRONTEND=noninteractive \
             && apt-get update -qq \
             && apt-get install -y -qq --no-install-recommends \
               bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 \
-              iproute2 iptables iputils-ping jq kmod nmap ncurses-bin sed tar \
-              traceroute tzdata \
+              iproute2 iptables iputils-ping jq kmod nmap ncurses-bin \
+              bpftrace sed tar traceroute tzdata \
             && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
             && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
+        COPY --from=tcpinfo-build /tmp/libtcpquality-tcpinfo.so /usr/local/lib/libtcpquality-tcpinfo.so
+        COPY tcpquality-retrans-seq.bt /usr/local/libexec/tcpquality-retrans-seq.bt
+        COPY tcpquality-retrans-skb.bt /usr/local/libexec/tcpquality-retrans-skb.bt
+        RUN chmod 0644 /usr/local/lib/libtcpquality-tcpinfo.so \
+              /usr/local/libexec/tcpquality-retrans-seq.bt \
+              /usr/local/libexec/tcpquality-retrans-skb.bt
         EOF
         docker buildx build \
           --platform "linux/${TARGET_ARCH}" \
@@ -80,6 +99,10 @@ runs:
           for command_name in bash curl dig ip iptables nping ping sed tar traceroute; do
             command -v "$command_name" >/dev/null
           done
+          test -r /usr/local/lib/libtcpquality-tcpinfo.so
+          test -r /usr/local/libexec/tcpquality-retrans-seq.bt
+          test -r /usr/local/libexec/tcpquality-retrans-skb.bt
+          command -v bpftrace >/dev/null
           nping --version >/dev/null
           nexttrace-tiny -V >/dev/null
         '
