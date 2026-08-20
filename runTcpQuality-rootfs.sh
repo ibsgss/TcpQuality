@@ -563,10 +563,9 @@ parse_rootfs_manifest() {
 }
 
 download_prebuilt_debian_from() {
-  local source="$1" base asset_base manifest manifest_url manifest_version archive metadata file checksum expected_size actual_size cache_buster
+  local source="$1" base asset_base manifest manifest_url manifest_version archive tar_options metadata file checksum expected_size actual_size cache_buster
   base=$(rootfs_source_base "$source") || return 1
   manifest="$TEMP_ROOT_PARENT/rootfs-manifest-${source}.json"
-  archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
   echo "[i] 尝试 ${source} 预构建 rootfs: ${ROOTFS_RELEASE_TAG}"
   cache_buster="$(date +%s)-$$"
   manifest_url="$base/rootfs-manifest.json?refresh=$cache_buster"
@@ -579,7 +578,14 @@ download_prebuilt_debian_from() {
   [ -n "$metadata" ] || return 1
   IFS='|' read -r file checksum expected_size <<< "$metadata"
   case "$file" in
-    tcpquality-rootfs-*.tar.gz) ;;
+    tcpquality-rootfs-*.tar.gz)
+      archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
+      tar_options=-xzf
+      ;;
+    tcpquality-rootfs-*.tar.xz)
+      archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.xz"
+      tar_options=-xJf
+      ;;
     *) return 1 ;;
   esac
   echo "[i] 下载 rootfs: $asset_base/$file"
@@ -598,7 +604,7 @@ download_prebuilt_debian_from() {
   fi
   rm -rf -- "$ROOTFS_DIR"
   mkdir -p "$ROOTFS_DIR"
-  if ! tar -xzf "$archive" -C "$ROOTFS_DIR"; then
+  if ! tar "$tar_options" "$archive" -C "$ROOTFS_DIR"; then
     rm -rf -- "$ROOTFS_DIR"
     mkdir -p "$ROOTFS_DIR"
     return 1
