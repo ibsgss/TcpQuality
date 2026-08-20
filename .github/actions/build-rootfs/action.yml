@@ -77,7 +77,7 @@ runs:
         install -m 0755 "$nexttrace_asset" rootfs/usr/local/bin/nexttrace-tiny
         printf '%s\n' "$nexttrace_tag" > rootfs/etc/tcpquality-nexttrace-release
         tar --numeric-owner --xattrs --acls \
-          -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
+          -C rootfs -cJf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz" .
 
     - name: Validate rootfs
       shell: bash
@@ -86,9 +86,9 @@ runs:
         RELEASE_MARKER: ${{ inputs.release-marker }}
       run: |
         set -Eeuo pipefail
-        archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz"
+        archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz"
         test -s "$archive"
-        tar -tzf "$archive" > /tmp/rootfs-files.txt
+        tar -tJf "$archive" > /tmp/rootfs-files.txt
         grep -qx './etc/os-release' /tmp/rootfs-files.txt
         grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
         grep -qx './etc/tcpquality-nexttrace-release' /tmp/rootfs-files.txt
@@ -108,6 +108,6 @@ runs:
         '
         (
           cd dist
-          sha256sum "tcpquality-rootfs-${TARGET_ARCH}.tar.gz" \
-            | tee "tcpquality-rootfs-${TARGET_ARCH}.tar.gz.sha256"
+          sha256sum "tcpquality-rootfs-${TARGET_ARCH}.tar.xz" \
+            | tee "tcpquality-rootfs-${TARGET_ARCH}.tar.xz.sha256"
         )

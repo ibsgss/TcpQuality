@@ -109,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rootfs-${{ matrix.arch }}
-          path: dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
+          path: dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz
           if-no-files-found: error
           retention-days: 7
 
@@ -139,12 +139,12 @@ jobs:
             exit 1
           fi
           for arch in amd64 arm64; do
-            file="dist/tcpquality-rootfs-${arch}.tar.gz"
+            file="dist/tcpquality-rootfs-${arch}.tar.xz"
             test -s "$file"
             sha256sum "$file"
           done
-          amd64_file=tcpquality-rootfs-amd64.tar.gz
-          arm64_file=tcpquality-rootfs-arm64.tar.gz
+          amd64_file=tcpquality-rootfs-amd64.tar.xz
+          arm64_file=tcpquality-rootfs-arm64.tar.xz
           amd64_sha=$(sha256sum "dist/$amd64_file" | awk '{print $1}')
           arm64_sha=$(sha256sum "dist/$arm64_file" | awk '{print $1}')
           amd64_size=$(stat -c '%s' "dist/$amd64_file")
@@ -178,8 +178,8 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" \
             dist/rootfs-manifest.json \
-            dist/tcpquality-rootfs-amd64.tar.gz \
-            dist/tcpquality-rootfs-arm64.tar.gz \
+            dist/tcpquality-rootfs-amd64.tar.xz \
+            dist/tcpquality-rootfs-arm64.tar.xz \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
@@ -194,16 +194,16 @@ jobs:
           git push --force origin "refs/tags/$ALIAS_TAG"
           if gh release view "$ALIAS_TAG" >/dev/null 2>&1; then
             gh release upload "$ALIAS_TAG" --clobber \
-              dist/tcpquality-rootfs-amd64.tar.gz \
-              dist/tcpquality-rootfs-arm64.tar.gz
+              dist/tcpquality-rootfs-amd64.tar.xz \
+              dist/tcpquality-rootfs-arm64.tar.xz
             gh release upload "$ALIAS_TAG" --clobber dist/rootfs-manifest.json
             gh release edit "$ALIAS_TAG" \
               --title "$ALIAS_TAG" \
               --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
           else
             gh release create "$ALIAS_TAG" \
-              dist/tcpquality-rootfs-amd64.tar.gz \
-              dist/tcpquality-rootfs-arm64.tar.gz \
+              dist/tcpquality-rootfs-amd64.tar.xz \
+              dist/tcpquality-rootfs-arm64.tar.xz \
               dist/rootfs-manifest.json \
               --title "$ALIAS_TAG" \
               --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
