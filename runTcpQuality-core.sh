@@ -4452,6 +4452,15 @@ speedtest_curl_partial_timeout_valid() {
   }'
 }
 
+speedtest_curl_partial_http_valid() {
+  local http_code="$1" elapsed="$2" bytes="$3"
+  [ "$http_code" = "413" ] || return 1
+  [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ] || return 1
+  awk -v elapsed="$elapsed" 'BEGIN {
+    if (elapsed !~ /^[0-9]+([.][0-9]+)?$/ || elapsed <= 0) exit 1
+  }'
+}
+
 speedtest_curl_average_rate() {
   local bytes="$1" elapsed="$2"
   awk -v bytes="$bytes" -v elapsed="$elapsed" 'BEGIN {
@@ -5510,7 +5519,7 @@ speedtest_applecdn_curl_download() {
 
 speedtest_applecdn_curl_upload() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" ratio_mode="${4:-0}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
-  local before after retrans speed latency partial_timeout=0
+  local before after retrans speed latency partial_timeout=0 partial_http=0
   local counter_enabled=0 start_packets="-" end_packets="-" packet_delta direction_failed=0
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
@@ -5562,13 +5571,23 @@ speedtest_applecdn_curl_upload() {
     partial_timeout=1
     curl_speed=$(speedtest_curl_average_rate "${bytes:-0}" "$total")
   fi
+  if [ "$ratio_mode" = "1" ] &&
+     speedtest_curl_partial_http_valid "$http_code" "$total" "${bytes:-0}"; then
+    partial_http=1
+    # Apple CDN may reject the remaining body with 413 after accepting a
+    # substantial prefix. Keep that measured prefix as a valid throughput
+    # sample instead of reporting a false direction failure.
+    curl_speed=$(speedtest_curl_average_rate "${bytes:-0}" "$total")
+  fi
   speed=$(speedtest_applecdn_calc_mbps "${curl_speed:-0}")
   latency=$(speedtest_applecdn_seconds_to_ms "${appconnect:-0}")
   [ "$latency" = "-" ] && latency=$(speedtest_applecdn_seconds_to_ms "${starttransfer:-0}")
   if [ "$speed" = "failed" ]; then
     direction_failed=1
   elif [ "$ratio_mode" = "1" ]; then
-    if [ "$exit_code" -eq 0 ]; then
+    if [ "$partial_http" -eq 1 ]; then
+      :
+    elif [ "$exit_code" -eq 0 ]; then
       if ! [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         direction_failed=1
       fi
@@ -5594,6 +5613,11 @@ speedtest_applecdn_curl_upload() {
     printf 'time_connect=%s\n' "${connect:-}"
     printf 'time_appconnect=%s\n' "${appconnect:-}"
     printf 'time_starttransfer=%s\n' "${starttransfer:-}"
+    if [ "$partial_http" -eq 1 ]; then
+      printf 'result_mode=partial_http_413\n'
+    else
+      printf 'result_mode=complete\n'
+    fi
   } > "${output_file}.meta.txt" 2>/dev/null || true
   printf '%s\n' "$meta" > "$output_file" 2>/dev/null || true
 }
@@ -5634,7 +5658,8 @@ speedtest_collect_applecdn() {
 speedtest_collect_applecdn6() {
   local node label candidates candidate workdir result_file
   local download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
-  local node_value selected_ip
+  local node_value partial_node_value candidate_value selected_ip
+  local candidate_valid_count partial_valid_count
   local values=()
   speedtest_applecdn6_tests_enabled || return 0
   load_remote_applecdn6_nodes || true
@@ -5643,7 +5668,9 @@ speedtest_collect_applecdn6() {
     label="${node%%|*}"
     candidates="${node#*|}"
     node_value=""
+    partial_node_value=""
     selected_ip=""
+    partial_valid_count=0
     while IFS= read -r candidate; do
       [ -n "$candidate" ] || continue
       workdir=$(mktemp -d "$RESULT_DIR/speedtest-applecdn6.XXXXXX")
@@ -5653,14 +5680,27 @@ speedtest_collect_applecdn6() {
 
       [ "$download" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "download" "$candidate" "$label" "$result_file.download"
       [ "$upload" = "failed" ] && speedtest_record_failure_debug "IPv6" "$label" "upload" "$candidate" "$label" "$result_file.upload"
-      if speedtest_result_valid "$upload" || speedtest_result_valid "$download"; then
-        node_value="$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$candidate|$label|$upload_connect|$upload_tls|$download_connect|$download_tls"
+      candidate_value="$(speedtest_format_mbps "$upload")|$upload_retrans|$(speedtest_format_mbps "$download")|$candidate|$label|$upload_connect|$upload_tls|$download_connect|$download_tls"
+      candidate_valid_count=0
+      speedtest_result_valid "$upload" && candidate_valid_count=$((candidate_valid_count + 1))
+      speedtest_result_valid "$download" && candidate_valid_count=$((candidate_valid_count + 1))
+      if [ "$candidate_valid_count" -eq 2 ]; then
+        # Prefer a node that completed both directions. Do not stop at the
+        # first node merely because its other direction happened to work.
+        node_value="$candidate_value"
         selected_ip="$candidate"
+        [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
+        break
+      elif [ "$candidate_valid_count" -gt "$partial_valid_count" ]; then
+        partial_node_value="$candidate_value"
+        partial_valid_count="$candidate_valid_count"
       fi
       [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -rf "$workdir"
-      [ -n "$node_value" ] && break
     done < <(printf '%s\n' "$candidates" | tr '|' '\n')
 
+    if [ -z "$node_value" ] && [ -n "$partial_node_value" ]; then
+      node_value="$partial_node_value"
+    fi
     if [ -z "$node_value" ]; then
       selected_ip="${candidates%%|*}"
       node_value="failed|failed|failed|$selected_ip|$label|-|-|-|-"
@@ -6263,11 +6303,19 @@ show_speedtest_results() {
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
       printf '  '
       upload_tls_text=$(speedtest_direction_latency_text "$upload_tls" "$upload")
-      tls_color=$(speedtest_latency_color "$upload_tls")
+      if speedtest_metric_failed "$upload"; then
+        tls_color="$RED"
+      else
+        tls_color=$(speedtest_latency_color "$upload_tls")
+      fi
       printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
       printf '  '
       download_tls_text=$(speedtest_direction_latency_text "$download_tls" "$download")
-      tls_color=$(speedtest_latency_color "$download_tls")
+      if speedtest_metric_failed "$download"; then
+        tls_color="$RED"
+      else
+        tls_color=$(speedtest_latency_color "$download_tls")
+      fi
       printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
       printf '\n'
     done
