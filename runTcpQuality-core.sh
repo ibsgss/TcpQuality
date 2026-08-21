@@ -4083,6 +4083,7 @@ SPEEDTEST_TCP_INFO_ENABLED="${TCPQUALITY_TCP_INFO:-1}"
 SPEEDTEST_TCP_INFO_MONITOR_PID=""
 SPEEDTEST_TCP_INFO_ACTIVE_MODE="none"
 SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD=""
+SPEEDTEST_TCP_INFO_FAILURE_REASON=""
 SPEEDTEST_RETRANS_TRACE_ENABLED="${TCPQUALITY_RETRANS_TRACE:-1}"
 SPEEDTEST_RETRANS_TRACE_PID=""
 SPEEDTEST_RETRANS_TRACE_FILE=""
@@ -4554,8 +4555,19 @@ speedtest_tcp_info_ss_snapshot() {
 
 speedtest_tcp_info_preload_path() {
   local preload="${SPEEDTEST_TCP_INFO_PRELOAD:-}"
-  [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] || return 1
-  [ -n "$preload" ] && [ -r "$preload" ] || return 1
+  SPEEDTEST_TCP_INFO_FAILURE_REASON=""
+  if [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" != "1" ]; then
+    SPEEDTEST_TCP_INFO_FAILURE_REASON="disabled"
+    return 1
+  fi
+  if [ -z "$preload" ]; then
+    SPEEDTEST_TCP_INFO_FAILURE_REASON="preload_path_empty"
+    return 1
+  fi
+  if [ ! -r "$preload" ]; then
+    SPEEDTEST_TCP_INFO_FAILURE_REASON="preload_missing:$preload"
+    return 1
+  fi
   printf '%s\n' "$preload"
 }
 
@@ -4578,7 +4590,11 @@ speedtest_tcp_info_monitor_start() {
   SPEEDTEST_TCP_INFO_MONITOR_PID=""
   SPEEDTEST_TCP_INFO_ACTIVE_MODE="none"
   SPEEDTEST_TCP_INFO_ACTIVE_PRELOAD=""
-  [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" = "1" ] || return 1
+  SPEEDTEST_TCP_INFO_FAILURE_REASON=""
+  if [ "${SPEEDTEST_TCP_INFO_ENABLED:-1}" != "1" ]; then
+    SPEEDTEST_TCP_INFO_FAILURE_REASON="disabled"
+    return 1
+  fi
   rm -f "$output_file" "${output_file}.tmp"
 
   preload=$(speedtest_tcp_info_preload_path 2>/dev/null || true)
@@ -4588,7 +4604,10 @@ speedtest_tcp_info_monitor_start() {
     return 0
   fi
 
-  command -v ss >/dev/null 2>&1 || return 1
+  if ! command -v ss >/dev/null 2>&1; then
+    SPEEDTEST_TCP_INFO_FAILURE_REASON="ss_unavailable"
+    return 1
+  fi
   SPEEDTEST_TCP_INFO_ACTIVE_MODE="ss"
   speedtest_tcp_info_monitor_loop "$server_ip" "$output_file" "$family_flag" &
   SPEEDTEST_TCP_INFO_MONITOR_PID=$!
@@ -4823,7 +4842,7 @@ speedtest_write_probe_meta() {
   local tcp_info_ratio_denominator="${15:--}" tcp_info_ratio="${16:--}" retrans_source="${17:-nstat}"
   local trace_available="${18:-0}" trace_unique_retrans="${19:--}" trace_ratio_denominator="${20:--}"
   local trace_ratio="${21:--}" tcp_info_mode="${22:-none}" trace_key="${23:-skbaddr+skaddr}"
-  local trace_valid="${24:-0}"
+  local trace_valid="${24:-0}" tcp_info_reason="${25:-unknown}"
   {
     printf 'probe_type=%s\n' "$probe_type"
     printf 'server_ip=%s\n' "$server_ip"
@@ -4842,6 +4861,7 @@ speedtest_write_probe_meta() {
     printf 'tcp_info_ratio_denominator=%s\n' "$tcp_info_ratio_denominator"
     printf 'tcp_info_ratio=%s\n' "$tcp_info_ratio"
     printf 'tcp_info_mode=%s\n' "$tcp_info_mode"
+    printf 'tcp_info_reason=%s\n' "$tcp_info_reason"
     printf 'retrans_trace_available=%s\n' "$trace_available"
     printf 'retrans_trace_valid=%s\n' "$trace_valid"
     printf 'retrans_trace_unique=%s\n' "$trace_unique_retrans"
@@ -5063,7 +5083,7 @@ speedtest_run_probe() {
   local tcp_info_file tcp_info_available=0 tcp_info_retrans=0
   local tcp_info_data_segs_out=0 tcp_info_segs_out=0 tcp_info_bytes_retrans=0 tcp_info_ratio="-"
   local tcp_info_ratio_denominator=0 retrans_source="nstat"
-  local tcp_info_mode="none" trace_unique_retrans=0 trace_ratio="-" trace_available=0 trace_valid=0
+  local tcp_info_mode="none" tcp_info_reason="unknown" trace_unique_retrans=0 trace_ratio="-" trace_available=0 trace_valid=0
   local http_code bytes_download speed_download bytes_upload speed_upload
   local dns_time connect_time appconnect_time pretransfer_time starttransfer_time total_time remote_ip
   local dns_ms build_ms send_ms wait_ms total_ms rate_bytes_per_second rate_mb display_connect_ms display_tls_ms
@@ -5185,6 +5205,15 @@ speedtest_run_probe() {
       }')
     fi
   fi
+  if [ "$tcp_info_available" -eq 1 ]; then
+    tcp_info_reason="ok"
+  elif [ "$tcp_info_mode" = "getsockopt" ]; then
+    tcp_info_reason="getsockopt_no_valid_snapshot"
+  elif [ "$tcp_info_mode" = "ss" ]; then
+    tcp_info_reason="ss_no_valid_snapshot"
+  else
+    tcp_info_reason="${SPEEDTEST_TCP_INFO_FAILURE_REASON:-monitor_not_started}"
+  fi
   if [ "$trace_available" -eq 1 ]; then
     trace_unique_retrans=$(speedtest_retrans_trace_count_ipv4 "$SPEEDTEST_RETRANS_TRACE_FILE" "$server_ip" 2>/dev/null || true)
     if [[ "$trace_unique_retrans" =~ ^[0-9]+$ ]] && [ "$tcp_info_available" -eq 1 ]; then
@@ -5238,14 +5267,11 @@ speedtest_run_probe() {
       retrans="$tcp_info_ratio"
       retrans_source="tcp_info_${tcp_info_mode}"
     fi
-  elif [ "$probe_type" = "upload" ]; then
-    if [ "$counter_enabled" -eq 1 ] &&
-       [[ "$start_packets" =~ ^[0-9]+$ ]] && [[ "$end_packets" =~ ^[0-9]+$ ]]; then
-      packet_delta=$((end_packets - start_packets))
-      retrans=$(speedtest_retrans_percent "$nstat_retrans" "$packet_delta")
-    else
-      retrans="-"
-    fi
+  else
+    # nstat is host-global and cannot be attributed to this connection. Never
+    # turn it into a percentage when the connection-level sample is missing.
+    retrans="-"
+    retrans_source="tcp_info_unavailable"
   fi
 
   meta=$(cat "$raw_file" 2>/dev/null || true)
@@ -5337,7 +5363,7 @@ speedtest_run_probe() {
     "$tcp_info_segs_out" "$tcp_info_bytes_retrans" "$tcp_info_ratio_denominator" "$tcp_info_ratio" "$retrans_source" \
     "$trace_available" "$trace_unique_retrans" "$trace_ratio_denominator" "$trace_ratio" "$tcp_info_mode" \
     "$( [ "$SPEEDTEST_RETRANS_TRACE_KEY" = "seq" ] && printf 'skaddr+seq+end_seq' || printf 'skaddr+skbaddr' )" \
-    "$trace_valid"
+    "$trace_valid" "$tcp_info_reason"
   rm -f "$raw_file"
   [ "${DEBUG_MODE:-0}" -eq 1 ] || rm -f "$tcp_info_file" "${tcp_info_file}.tmp" \
     "$SPEEDTEST_RETRANS_TRACE_FILE" "$SPEEDTEST_RETRANS_TRACE_ERR"

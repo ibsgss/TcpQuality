@@ -30,7 +30,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
       - name: Validate Bash syntax
-        run: bash -n runTcpQuality.sh runTcpQuality-rootfs.sh
+        run: bash -n runTcpQuality.sh runTcpQuality-rootfs.sh runTcpQuality-core.sh
 
   build:
     name: Build test artifact (${{ matrix.arch }})

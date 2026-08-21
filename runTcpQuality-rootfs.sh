@@ -21,6 +21,15 @@ ROOTFS_SOURCE="${TCPQUALITY_ROOTFS_SOURCE:-}"
 ROOTFS_SOURCE_ORDER="${TCPQUALITY_ROOTFS_SOURCE_ORDER:-github ibsgss}"
 ROOTFS_GITHUB_REPOSITORY="${TCPQUALITY_ROOTFS_GITHUB_REPOSITORY:-ibsgss/TcpQuality}"
 ROOTFS_IBSGSS_BASE="${TCPQUALITY_ROOTFS_IBSGSS_BASE:-https://tcpquality.ibsgss.uk/rootfs/releases}"
+if [ -z "${TCPQUALITY_RAW_BASE:-}" ]; then
+  case "$ROOTFS_RELEASE_TAG" in
+    v1beta|v1beta.latest) TCPQUALITY_RAW_BASE="https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta" ;;
+    *) TCPQUALITY_RAW_BASE="https://raw.githubusercontent.com/ibsgss/TcpQuality/main" ;;
+  esac
+fi
+TCPQUALITY_TCP_INFO_SOURCE="${TCPQUALITY_TCP_INFO_SOURCE:-}"
+TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE:-}"
+TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE:-}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
@@ -487,8 +496,24 @@ download_nexttrace_guest() {
     chroot "$ROOTFS_DIR" /usr/local/bin/nexttrace-tiny -V >/dev/null 2>&1
 }
 
+rootfs_archive_supported() {
+  case "$1" in
+    *.tar.xz)
+      if command -v xz >/dev/null 2>&1; then
+        return 0
+      fi
+      echo "[!] 跳过 .tar.xz rootfs：宿主机缺少 xz 解压器，将回退官方 Debian OCI" >&2
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 download_extract() {
   local url="$1" archive="$2" checksum="${3:-}"
+  rootfs_archive_supported "$archive" || die "解压 .tar.xz 需要宿主机安装 xz-utils"
   echo "[i] 下载 rootfs: $url"
   if [ -z "$checksum" ]; then
     echo "[!] 自定义 rootfs 未提供 SHA256，仅适合可信下载源" >&2
@@ -577,6 +602,7 @@ download_prebuilt_debian_from() {
   metadata=$(parse_rootfs_manifest "$manifest" "$DEBIAN_ARCH") || return 1
   [ -n "$metadata" ] || return 1
   IFS='|' read -r file checksum expected_size <<< "$metadata"
+  rootfs_archive_supported "$file" || return 1
   case "$file" in
     tcpquality-rootfs-*.tar.gz)
       archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"
@@ -944,6 +970,105 @@ install_guest_deps() {
   fi
 }
 
+speedtest_args_requested() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --speedtest|--only-speedtest|--speedtest-staged|--only-speedtest-staged|--all)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+resolve_tcpquality_asset() {
+  local env_name="$1" file_name="$2" cache_file="$3" configured candidate
+  configured="${!env_name:-}"
+  if [ -n "$configured" ] && [ -r "$configured" ]; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  candidate="$SCRIPT_DIR/$file_name"
+  if [ -r "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+    "${TCPQUALITY_RAW_BASE%/}/$file_name" -o "$cache_file"; then
+    printf '%s\n' "$cache_file"
+    return 0
+  fi
+  return 1
+}
+
+ensure_guest_tcp_info_support() {
+  local tcp_info_source seq_source skb_source tcp_info_guest_source
+  if [ "$DISTRO" != debian ]; then
+    echo "[X] 连接级 TCP_INFO preload 目前只支持 Debian rootfs" >&2
+    return 1
+  fi
+
+  if [ -r "$ROOTFS_DIR/usr/local/lib/libtcpquality-tcpinfo.so" ] &&
+     [ -r "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-seq.bt" ] &&
+     [ -r "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-skb.bt" ]; then
+    echo "[√] TCP_INFO preload 和 eBPF 重传脚本已就绪"
+    return 0
+  fi
+
+  tcp_info_source=$(resolve_tcpquality_asset TCPQUALITY_TCP_INFO_SOURCE \
+    tcpquality-tcpinfo.c "$RUNTIME_DIR/tcpquality-tcpinfo.c") || {
+    echo "[X] 无法获取 tcpquality-tcpinfo.c，无法启用连接级 TCP_INFO" >&2
+    return 1
+  }
+  seq_source=$(resolve_tcpquality_asset TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE \
+    tcpquality-retrans-seq.bt "$RUNTIME_DIR/tcpquality-retrans-seq.bt" || true)
+  skb_source=$(resolve_tcpquality_asset TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE \
+    tcpquality-retrans-skb.bt "$RUNTIME_DIR/tcpquality-retrans-skb.bt" || true)
+
+  tcp_info_guest_source="$GUEST_TMP_HOST/tcpquality-tcpinfo.c"
+  cp -L "$tcp_info_source" "$tcp_info_guest_source"
+  echo "[i] OCI/debootstrap rootfs 缺少 TCP_INFO 支持，正在 guest 内编译 preload 库"
+  if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb \
+    chroot "$ROOTFS_DIR" /bin/bash -c \
+    'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+     apt-get update -qq
+     apt-get install -y -qq --no-install-recommends gcc libc6-dev binutils
+     mkdir -p /usr/local/lib /usr/local/libexec
+     gcc -O2 -fPIC -shared -Wl,-z,now \
+       -o /usr/local/lib/libtcpquality-tcpinfo.so /tmp/tcpquality-tcpinfo.c \
+       -ldl -pthread
+     strip --strip-unneeded /usr/local/lib/libtcpquality-tcpinfo.so
+     chmod 0644 /usr/local/lib/libtcpquality-tcpinfo.so'; then
+    echo "[X] guest 内编译 libtcpquality-tcpinfo.so 失败" >&2
+    return 1
+  fi
+
+  mkdir -p "$ROOTFS_DIR/usr/local/libexec"
+  if [ -n "$seq_source" ]; then
+    cp -L "$seq_source" "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-seq.bt"
+    chmod 0644 "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-seq.bt"
+  fi
+  if [ -n "$skb_source" ]; then
+    cp -L "$skb_source" "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-skb.bt"
+    chmod 0644 "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-skb.bt"
+  fi
+
+  if [ ! -r "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-seq.bt" ] ||
+     [ ! -r "$ROOTFS_DIR/usr/local/libexec/tcpquality-retrans-skb.bt" ]; then
+    echo "[!] 未找到 eBPF 重传脚本，继续使用 TCP_INFO（eBPF 去重将跳过）" >&2
+  fi
+  if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb \
+    chroot "$ROOTFS_DIR" /bin/bash -c \
+    'test -r /usr/local/lib/libtcpquality-tcpinfo.so &&
+     LD_PRELOAD=/usr/local/lib/libtcpquality-tcpinfo.so /bin/true'; then
+    echo "[X] TCP_INFO preload 库安装验证失败" >&2
+    return 1
+  fi
+  rm -f -- "$tcp_info_guest_source"
+  echo "[√] TCP_INFO preload 已准备: /usr/local/lib/libtcpquality-tcpinfo.so"
+}
+
 prepare_guest_files() {
   local nexttrace_path arg
   mkdir -p "$ROOTFS_DIR/root" "$ROOTFS_DIR/usr/local/bin"
@@ -990,6 +1115,9 @@ case "$OUTPUT_DIR/" in
 esac
 mount_guest
 install_guest_deps || exit 1
+if speedtest_args_requested "$@"; then
+  ensure_guest_tcp_info_support || die "无法准备连接级 TCP_INFO 支持，已停止测速以避免生成伪造重传率"
+fi
 prepare_guest_files "$@"
 echo "[i] 进入临时 ${DISTRO} rootfs；退出后自动清理"
 if [ "$KEEP_ROOTFS" -eq 1 ]; then

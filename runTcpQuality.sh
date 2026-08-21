@@ -22,6 +22,7 @@ case "$RAW_BASE" in
     ;;
 esac
 RAW_BASE="${RAW_BASE%/}"
+export TCPQUALITY_RAW_BASE="$RAW_BASE"
 if [ -z "${TCPQUALITY_ROOTFS_SOURCE_ORDER:-}" ]; then
   case "$RAW_BASE" in
     *tcpquality.ibsgss.uk*)
@@ -185,6 +186,12 @@ ROOTFS_EXTRA_ARGS+=(--distro "$ROOTFS_DISTRO")
 
 if [ -f "$LOCAL_ROOTFS" ] && [ -f "$LOCAL_CORE" ]; then
   export TCPQUALITY_CORE_SCRIPT="$LOCAL_CORE"
+  [ -r "$SCRIPT_DIR/tcpquality-tcpinfo.c" ] &&
+    export TCPQUALITY_TCP_INFO_SOURCE="$SCRIPT_DIR/tcpquality-tcpinfo.c"
+  [ -r "$SCRIPT_DIR/tcpquality-retrans-seq.bt" ] &&
+    export TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE="$SCRIPT_DIR/tcpquality-retrans-seq.bt"
+  [ -r "$SCRIPT_DIR/tcpquality-retrans-skb.bt" ] &&
+    export TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE="$SCRIPT_DIR/tcpquality-retrans-skb.bt"
   run_rootfs "$LOCAL_ROOTFS" "${ROOTFS_EXTRA_ARGS[@]}"
 fi
 
