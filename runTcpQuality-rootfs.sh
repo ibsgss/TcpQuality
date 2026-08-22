@@ -128,7 +128,7 @@ configure_interactive_args() {
     ALLOW_SPEEDTEST=1
   fi
 
-  answer=$(prompt_answer "上传并参与速度排名？（回车默认 'y'）[y/n]：" "y")
+  answer=$(prompt_answer "上传并生成在线报告链接？（回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" && upload_rank=0
 
   if [ "$run_route" -eq 0 ]; then
