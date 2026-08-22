@@ -1177,7 +1177,7 @@ esac
 mount_guest
 install_guest_deps || exit 1
 if speedtest_args_requested "$@"; then
-  ensure_guest_tcp_info_support || die "无法准备连接级 TCP_INFO 支持，已停止测速以避免生成伪造重传率"
+  ensure_guest_tcp_info_support || die "无法准备连接级 TCP_INFO 支持，已停止测速"
 fi
 prepare_guest_files "$@"
 echo "[i] 进入临时 ${DISTRO} rootfs；退出后自动清理"
