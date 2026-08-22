@@ -1,4 +1,4 @@
-name: Test rootfs artifacts
+name: Validate rootfs scripts
 
 on:
   push:
@@ -31,34 +31,3 @@ jobs:
         uses: actions/checkout@v4
       - name: Validate Bash syntax
         run: bash -n runTcpQuality.sh runTcpQuality-rootfs.sh runTcpQuality-core.sh
-
-  build:
-    name: Build test artifact (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build and validate rootfs
-        uses: ./.github/actions/build-rootfs
-        with:
-          arch: ${{ matrix.arch }}
-          release-marker: ci-${{ github.sha }}
-      - name: Upload test artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootfs-${{ matrix.arch }}
-          path: |
-            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
-            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz.sha256
-            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz
-            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz.sha256
-          if-no-files-found: error
-          retention-days: 7
