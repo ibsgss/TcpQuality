@@ -44,7 +44,13 @@ runs:
               bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 \
               iproute2 iptables iputils-ping jq kmod nmap ncurses-bin \
               bpftrace sed tar traceroute tzdata \
-            && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+            && apt-get clean \
+            && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+              /var/log/apt/* /var/log/dpkg.log /var/cache/debconf/* \
+              /tmp/* /var/tmp/* \
+            && find /usr/share/doc -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+            && find /usr/share/man -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
+            && find /usr/share/info -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
             && printf '%s\n' "$TCPQUALITY_ROOTFS_RELEASE" > /etc/tcpquality-rootfs-release
         COPY --from=tcpinfo-build /tmp/libtcpquality-tcpinfo.so /usr/local/lib/libtcpquality-tcpinfo.so
         COPY tcpquality-retrans-seq.bt /usr/local/libexec/tcpquality-retrans-seq.bt
@@ -79,7 +85,7 @@ runs:
         tar --numeric-owner --xattrs --acls \
           -C rootfs -cJf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz" .
         tar --numeric-owner --xattrs --acls \
-          -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
+          -C rootfs -I 'gzip -9' -cf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
 
     - name: Validate rootfs
       shell: bash
