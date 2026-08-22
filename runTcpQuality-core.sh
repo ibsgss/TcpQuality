@@ -4545,6 +4545,18 @@ speedtest_tcp_info_ss_snapshot() {
       }
       return 0
     }
+    function retrans_value(line, i, token, fields, count) {
+      count = split(line, fields, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) {
+        if (fields[i] ~ /^retrans:[0-9]+\/[0-9]+$/) {
+          token = fields[i]
+          sub(/^retrans:[0-9]+\//, "", token)
+          return token + 0
+        }
+      }
+      # ss may omit retrans:0/0 when this connection has not retransmitted.
+      return 0
+    }
     $1 == "ESTAB" {
       if (target_is_v6) {
         waiting = (index($0, "[" target "]:443") > 0)
@@ -4553,14 +4565,9 @@ speedtest_tcp_info_ss_snapshot() {
       }
       next
     }
-    waiting && $0 ~ /retrans:[0-9]+\/[0-9]+/ {
-      total_retrans = 0
-      if (match($0, /retrans:[0-9]+\/[0-9]+/)) {
-        token = substr($0, RSTART, RLENGTH)
-        sub(/^retrans:[0-9]+\//, "", token)
-        total_retrans = token + 0
-      }
-      printf "%d|%d|%d|%d\n", total_retrans, \
+    waiting && ($0 ~ /(^|[[:space:]])data_segs_out:[0-9]+([[:space:]]|$)/ ||
+                $0 ~ /(^|[[:space:]])segs_out:[0-9]+([[:space:]]|$)/) {
+      printf "%d|%d|%d|%d\n", retrans_value($0), \
         field_value($0, "data_segs_out"), \
         field_value($0, "segs_out"), \
         field_value($0, "bytes_retrans")
@@ -5488,30 +5495,39 @@ speedtest_applecdn_curl_download() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" strict_mode="${4:-0}" timeout meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency partial_timeout=0
   local direction_failed=0
-  local target_specific=0 tcp_info_file="" tcp_info_final="" tcp_info_monitor_started=0 tcp_info_snapshot_value
+  local target_specific=1 tcp_info_file="" tcp_info_final="" tcp_info_monitor_started=0 tcp_info_snapshot_value
   local tcp_info_metrics tcp_info_ratio="-" tcp_info_retrans="-" tcp_info_data_segs_out="-" tcp_info_segs_out="-" tcp_info_bytes_retrans="-"
   local retrans_source="nstat"
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
+  # Apple CDN retransmissions must be attributed to this connection. Pin
+  # both address families to one resolved endpoint before starting ss.
   if [ "$ip_flag" = "-6" ]; then
-    target_specific=1
     if [ -z "$fixed_ip" ]; then
       fixed_ip=$(resolve_first_public_ipv6 "$SPEEDTEST_APPLECDN_HOST" 2>/dev/null || true)
     fi
-  fi
-  [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
-  if [ "$target_specific" -eq 1 ] && is_valid_ipv6 "$fixed_ip"; then
-    tcp_info_file="${output_file}.tcpinfo"
-    tcp_info_final="${tcp_info_file}.final"
-    if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-6" 1; then
-      tcp_info_monitor_started=1
+    [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
+    if is_valid_ipv6 "$fixed_ip"; then
+      tcp_info_file="${output_file}.tcpinfo"
+      tcp_info_final="${tcp_info_file}.final"
+      if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-6" 1; then
+        tcp_info_monitor_started=1
+      fi
+    fi
+  else
+    if [ -z "$fixed_ip" ]; then
+      fixed_ip=$(resolve_first_public_ipv4 "$SPEEDTEST_APPLECDN_HOST" 2>/dev/null || true)
+    fi
+    [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:$fixed_ip")
+    if is_public_ipv4 "$fixed_ip"; then
+      tcp_info_file="${output_file}.tcpinfo"
+      tcp_info_final="${tcp_info_file}.final"
+      if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-4" 1; then
+        tcp_info_monitor_started=1
+      fi
     fi
   fi
-  if [ "$target_specific" -eq 0 ]; then
-    before=$(speedtest_retrans_count)
-  else
-    before=0
-  fi
+  before=0
   set +e
   meta=$(curl "$ip_flag" -sS -L \
     --connect-timeout 5 --max-time "$timeout" \
@@ -5526,7 +5542,7 @@ speedtest_applecdn_curl_download() {
   exit_code=$?
   set -e
   if [ "$tcp_info_monitor_started" -eq 1 ]; then
-    tcp_info_snapshot_value=$(speedtest_tcp_info_ss_snapshot "$fixed_ip" "-6" 2>/dev/null || true)
+    tcp_info_snapshot_value=$(speedtest_tcp_info_ss_snapshot "$fixed_ip" "$ip_flag" 2>/dev/null || true)
     if [ -n "$tcp_info_snapshot_value" ]; then
       printf '%s\n' "$tcp_info_snapshot_value" > "$tcp_info_final" 2>/dev/null || true
     fi
@@ -5608,35 +5624,44 @@ speedtest_applecdn_curl_upload() {
   local output_file="$1" ip_flag="$2" fixed_ip="${3:-}" ratio_mode="${4:-0}" timeout max_mb meta exit_code http_code bytes total curl_speed connect appconnect starttransfer remote_ip
   local before after retrans speed latency partial_timeout=0 partial_http=0
   local counter_enabled=0 start_packets="-" end_packets="-" packet_delta direction_failed=0
-  local target_specific=0 tcp_info_file="" tcp_info_final="" tcp_info_monitor_started=0 tcp_info_snapshot_value
+  local target_specific=1 tcp_info_file="" tcp_info_final="" tcp_info_monitor_started=0 tcp_info_snapshot_value
   local tcp_info_metrics tcp_info_ratio="-" tcp_info_retrans="-" tcp_info_data_segs_out="-" tcp_info_segs_out="-" tcp_info_bytes_retrans="-"
   local retrans_source="nstat"
   local -a resolve_args=()
   timeout=$(speedtest_applecdn_timeout)
   max_mb=$(speedtest_applecdn_max_mb)
+  # Apple CDN retransmissions must be attributed to this connection. Pin
+  # both address families to one resolved endpoint before starting ss.
   if [ "$ip_flag" = "-6" ]; then
-    target_specific=1
     if [ -z "$fixed_ip" ]; then
       fixed_ip=$(resolve_first_public_ipv6 "$SPEEDTEST_APPLECDN_HOST" 2>/dev/null || true)
     fi
-  fi
-  [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
-  if [ "$target_specific" -eq 1 ] && is_valid_ipv6 "$fixed_ip"; then
-    tcp_info_file="${output_file}.tcpinfo"
-    tcp_info_final="${tcp_info_file}.final"
-    if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-6" 1; then
-      tcp_info_monitor_started=1
+    [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:[$fixed_ip]")
+    if is_valid_ipv6 "$fixed_ip"; then
+      tcp_info_file="${output_file}.tcpinfo"
+      tcp_info_final="${tcp_info_file}.final"
+      if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-6" 1; then
+        tcp_info_monitor_started=1
+      fi
+    fi
+  else
+    if [ -z "$fixed_ip" ]; then
+      fixed_ip=$(resolve_first_public_ipv4 "$SPEEDTEST_APPLECDN_HOST" 2>/dev/null || true)
+    fi
+    [ -n "$fixed_ip" ] && resolve_args=(--resolve "$SPEEDTEST_APPLECDN_HOST:443:$fixed_ip")
+    if is_public_ipv4 "$fixed_ip"; then
+      tcp_info_file="${output_file}.tcpinfo"
+      tcp_info_final="${tcp_info_file}.final"
+      if speedtest_tcp_info_monitor_start "$fixed_ip" "$tcp_info_file" "-4" 1; then
+        tcp_info_monitor_started=1
+      fi
     fi
   fi
   if [ "$ratio_mode" = "1" ] && [ "$target_specific" -eq 0 ] && [ -n "$fixed_ip" ] && speedtest_counter_start upload "$fixed_ip"; then
     counter_enabled=1
     start_packets=$(speedtest_counter_packets)
   fi
-  if [ "$target_specific" -eq 0 ]; then
-    before=$(speedtest_retrans_count)
-  else
-    before=0
-  fi
+  before=0
   set +e
   meta=$(
     dd if=/dev/zero bs=1M count="$max_mb" 2>/dev/null | \
@@ -5657,7 +5682,7 @@ speedtest_applecdn_curl_upload() {
   exit_code=$?
   set -e
   if [ "$tcp_info_monitor_started" -eq 1 ]; then
-    tcp_info_snapshot_value=$(speedtest_tcp_info_ss_snapshot "$fixed_ip" "-6" 2>/dev/null || true)
+    tcp_info_snapshot_value=$(speedtest_tcp_info_ss_snapshot "$fixed_ip" "$ip_flag" 2>/dev/null || true)
     if [ -n "$tcp_info_snapshot_value" ]; then
       printf '%s\n' "$tcp_info_snapshot_value" > "$tcp_info_final" 2>/dev/null || true
     fi
