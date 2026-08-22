@@ -2,7 +2,7 @@ name: Build rootfs release
 
 on:
   push:
-    branches: [v1beta]
+    branches: [main, v1beta]
     paths:
       - .github/actions/build-rootfs/action.yml
       - .github/workflows/rootfs-release.yml

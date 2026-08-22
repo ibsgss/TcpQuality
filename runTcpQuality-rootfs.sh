@@ -1035,7 +1035,8 @@ speedtest_args_requested() {
 }
 
 resolve_tcpquality_asset() {
-  local env_name="$1" file_name="$2" cache_file="$3" configured candidate
+  local env_name="$1" file_name="$2" cache_file="$3" configured candidate raw_base upstream_base
+  local -a raw_bases=()
   configured="${!env_name:-}"
   if [ -n "$configured" ] && [ -r "$configured" ]; then
     printf '%s\n' "$configured"
@@ -1046,11 +1047,19 @@ resolve_tcpquality_asset() {
     printf '%s\n' "$candidate"
     return 0
   fi
-  if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
-    "${TCPQUALITY_RAW_BASE%/}/$file_name" -o "$cache_file"; then
-    printf '%s\n' "$cache_file"
-    return 0
+  raw_base="${TCPQUALITY_RAW_BASE:-}"
+  [ -n "$raw_base" ] && raw_bases+=("${raw_base%/}")
+  upstream_base="${TCPQUALITY_ASSET_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/main}"
+  if [ -n "$upstream_base" ] && [ "${upstream_base%/}" != "${raw_base%/}" ]; then
+    raw_bases+=("${upstream_base%/}")
   fi
+  for raw_base in "${raw_bases[@]}"; do
+    if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+      "$raw_base/$file_name" -o "$cache_file"; then
+      printf '%s\n' "$cache_file"
+      return 0
+    fi
+  done
   return 1
 }
 
