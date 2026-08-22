@@ -4565,6 +4565,16 @@ speedtest_tcp_info_ss_snapshot() {
       }
       next
     }
+    # `ss ... state established` omits the state column on some iproute2
+    # versions, leaving Recv-Q/Send-Q as fields 1/2. Handle that form too.
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      if (target_is_v6) {
+        waiting = (index($0, "[" target "]:443") > 0)
+      } else {
+        waiting = (index($0, target ":443") > 0)
+      }
+      next
+    }
     waiting && ($0 ~ /(^|[[:space:]])data_segs_out:[0-9]+([[:space:]]|$)/ ||
                 $0 ~ /(^|[[:space:]])segs_out:[0-9]+([[:space:]]|$)/) {
       printf "%d|%d|%d|%d\n", retrans_value($0), \
