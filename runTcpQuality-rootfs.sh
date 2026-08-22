@@ -502,7 +502,7 @@ rootfs_archive_supported() {
       if command -v xz >/dev/null 2>&1; then
         return 0
       fi
-      echo "[!] 跳过 .tar.xz rootfs：宿主机缺少 xz 解压器，将回退官方 Debian OCI" >&2
+      echo "[!] 跳过 .tar.xz rootfs：宿主机缺少 xz 解压器" >&2
       return 1
       ;;
     *)
@@ -554,6 +554,12 @@ rootfs_source_base() {
   esac
 }
 
+rootfs_asset_available() {
+  local url="$1"
+  curl -fsSLI --retry 2 --connect-timeout 10 --max-time 45 \
+    "$url" >/dev/null 2>&1
+}
+
 parse_rootfs_manifest_version() {
   local manifest="$1"
   awk '
@@ -574,21 +580,34 @@ parse_rootfs_manifest() {
     inside && /"file"[[:space:]]*:/ {
       line=$0; sub(/^.*"file"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); file=line
     }
+    inside && /"fallbackFile"[[:space:]]*:/ {
+      line=$0; sub(/^.*"fallbackFile"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); fallback_file=line
+    }
     inside && /"sha256"[[:space:]]*:/ {
       line=$0; sub(/^.*"sha256"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); sha=line
+    }
+    inside && /"fallbackSha256"[[:space:]]*:/ {
+      line=$0; sub(/^.*"fallbackSha256"[[:space:]]*:[[:space:]]*"/, "", line); sub(/".*$/, "", line); fallback_sha=line
     }
     inside && /"size"[[:space:]]*:/ {
       line=$0; sub(/^.*"size"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9].*$/, "", line); size=line
     }
+    inside && /"fallbackSize"[[:space:]]*:/ {
+      line=$0; sub(/^.*"fallbackSize"[[:space:]]*:[[:space:]]*/, "", line); sub(/[^0-9].*$/, "", line); fallback_size=line
+    }
     inside && /^([[:space:]]*)}/ {
-      if (file != "" && length(sha) == 64 && sha !~ /[^0-9a-fA-F]/ && size ~ /^[0-9]+$/) print file "|" tolower(sha) "|" size
+      if (file != "" && length(sha) == 64 && sha !~ /[^0-9a-fA-F]/ && size ~ /^[0-9]+$/) {
+        print file "|" tolower(sha) "|" size "|" fallback_file "|" tolower(fallback_sha) "|" fallback_size
+      }
       exit
     }
   ' "$manifest"
 }
 
 download_prebuilt_debian_from() {
-  local source="$1" base asset_base manifest manifest_url manifest_version archive tar_options metadata file checksum expected_size actual_size cache_buster
+  local source="$1" base asset_base manifest manifest_url manifest_version archive tar_options metadata
+  local preferred_file preferred_checksum preferred_size fallback_file fallback_checksum fallback_size
+  local file checksum expected_size actual_size cache_buster
   base=$(rootfs_source_base "$source") || return 1
   manifest="$TEMP_ROOT_PARENT/rootfs-manifest-${source}.json"
   echo "[i] 尝试 ${source} 预构建 rootfs: ${ROOTFS_RELEASE_TAG}"
@@ -601,8 +620,41 @@ download_prebuilt_debian_from() {
   asset_base=$(rootfs_source_base "$source" "$manifest_version") || return 1
   metadata=$(parse_rootfs_manifest "$manifest" "$DEBIAN_ARCH") || return 1
   [ -n "$metadata" ] || return 1
-  IFS='|' read -r file checksum expected_size <<< "$metadata"
-  rootfs_archive_supported "$file" || return 1
+  IFS='|' read -r preferred_file preferred_checksum preferred_size \
+    fallback_file fallback_checksum fallback_size <<< "$metadata"
+
+  file=""
+  checksum=""
+  expected_size=""
+  if [[ "$preferred_file" == *.tar.xz ]]; then
+    if rootfs_archive_supported "$preferred_file" &&
+       rootfs_asset_available "$asset_base/$preferred_file"; then
+      file="$preferred_file"
+      checksum="$preferred_checksum"
+      expected_size="$preferred_size"
+    elif [[ "$fallback_file" == *.tar.gz ]] &&
+         [[ "$fallback_checksum" =~ ^[0-9a-fA-F]{64}$ ]] &&
+         [[ "$fallback_size" =~ ^[0-9]+$ ]]; then
+      echo "[i] ${source} 的 .tar.xz 不可用，跳过该压缩包，直接使用 .tar.gz"
+      file="$fallback_file"
+      checksum="$fallback_checksum"
+      expected_size="$fallback_size"
+    else
+      return 1
+    fi
+  elif [[ "$fallback_file" == *.tar.xz ]] &&
+       rootfs_archive_supported "$fallback_file" &&
+       rootfs_asset_available "$asset_base/$fallback_file"; then
+    file="$fallback_file"
+    checksum="$fallback_checksum"
+    expected_size="$fallback_size"
+  elif [[ "$preferred_file" == *.tar.gz ]]; then
+    file="$preferred_file"
+    checksum="$preferred_checksum"
+    expected_size="$preferred_size"
+  else
+    return 1
+  fi
   case "$file" in
     tcpquality-rootfs-*.tar.gz)
       archive="$TEMP_ROOT_PARENT/debian-rootfs-${source}.tar.gz"

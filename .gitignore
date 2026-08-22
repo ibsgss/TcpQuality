@@ -10,3 +10,12 @@ compose.yaml
 server/
 zstatic_nping_*.csv
 cloudflare-dns-node-plan.md
+
+# Rootfs Action build output
+build-context/
+rootfs/
+dist/
+*.tar.gz
+*.tar.xz
+*.tar.gz.sha256
+*.tar.xz.sha256

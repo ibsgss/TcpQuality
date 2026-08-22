@@ -78,6 +78,8 @@ runs:
         printf '%s\n' "$nexttrace_tag" > rootfs/etc/tcpquality-nexttrace-release
         tar --numeric-owner --xattrs --acls \
           -C rootfs -cJf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz" .
+        tar --numeric-owner --xattrs --acls \
+          -C rootfs -czf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.gz" .
 
     - name: Validate rootfs
       shell: bash
@@ -86,13 +88,19 @@ runs:
         RELEASE_MARKER: ${{ inputs.release-marker }}
       run: |
         set -Eeuo pipefail
-        archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz"
-        test -s "$archive"
-        tar -tJf "$archive" > /tmp/rootfs-files.txt
-        grep -qx './etc/os-release' /tmp/rootfs-files.txt
-        grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
-        grep -qx './etc/tcpquality-nexttrace-release' /tmp/rootfs-files.txt
-        grep -qx './usr/local/bin/nexttrace-tiny' /tmp/rootfs-files.txt
+        for format in gz xz; do
+          archive="dist/tcpquality-rootfs-${TARGET_ARCH}.tar.${format}"
+          test -s "$archive"
+          if [ "$format" = gz ]; then
+            tar -tzf "$archive" > /tmp/rootfs-files.txt
+          else
+            tar -tJf "$archive" > /tmp/rootfs-files.txt
+          fi
+          grep -qx './etc/os-release' /tmp/rootfs-files.txt
+          grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
+          grep -qx './etc/tcpquality-nexttrace-release' /tmp/rootfs-files.txt
+          grep -qx './usr/local/bin/nexttrace-tiny' /tmp/rootfs-files.txt
+        done
         test "$(cat rootfs/etc/tcpquality-rootfs-release)" = "$RELEASE_MARKER"
         sudo chroot rootfs /bin/bash -lc '
           set -Eeuo pipefail
@@ -108,6 +116,8 @@ runs:
         '
         (
           cd dist
+          sha256sum "tcpquality-rootfs-${TARGET_ARCH}.tar.gz" \
+            | tee "tcpquality-rootfs-${TARGET_ARCH}.tar.gz.sha256"
           sha256sum "tcpquality-rootfs-${TARGET_ARCH}.tar.xz" \
             | tee "tcpquality-rootfs-${TARGET_ARCH}.tar.xz.sha256"
         )

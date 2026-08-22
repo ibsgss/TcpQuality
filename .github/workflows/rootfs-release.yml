@@ -109,7 +109,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rootfs-${{ matrix.arch }}
-          path: dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz
+          path: |
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.gz.sha256
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz
+            dist/tcpquality-rootfs-${{ matrix.arch }}.tar.xz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -139,29 +143,57 @@ jobs:
             exit 1
           fi
           for arch in amd64 arm64; do
-            file="dist/tcpquality-rootfs-${arch}.tar.xz"
-            test -s "$file"
-            sha256sum "$file"
+            for format in gz xz; do
+              file="dist/tcpquality-rootfs-${arch}.tar.${format}"
+              test -s "$file"
+              sha256sum "$file"
+            done
           done
-          amd64_file=tcpquality-rootfs-amd64.tar.xz
-          arm64_file=tcpquality-rootfs-arm64.tar.xz
-          amd64_sha=$(sha256sum "dist/$amd64_file" | awk '{print $1}')
-          arm64_sha=$(sha256sum "dist/$arm64_file" | awk '{print $1}')
-          amd64_size=$(stat -c '%s' "dist/$amd64_file")
-          arm64_size=$(stat -c '%s' "dist/$arm64_file")
+          amd64_xz_file=tcpquality-rootfs-amd64.tar.xz
+          amd64_gz_file=tcpquality-rootfs-amd64.tar.gz
+          arm64_xz_file=tcpquality-rootfs-arm64.tar.xz
+          arm64_gz_file=tcpquality-rootfs-arm64.tar.gz
+          amd64_xz_sha=$(sha256sum "dist/$amd64_xz_file" | awk '{print $1}')
+          amd64_gz_sha=$(sha256sum "dist/$amd64_gz_file" | awk '{print $1}')
+          arm64_xz_sha=$(sha256sum "dist/$arm64_xz_file" | awk '{print $1}')
+          arm64_gz_sha=$(sha256sum "dist/$arm64_gz_file" | awk '{print $1}')
+          amd64_xz_size=$(stat -c '%s' "dist/$amd64_xz_file")
+          amd64_gz_size=$(stat -c '%s' "dist/$amd64_gz_file")
+          arm64_xz_size=$(stat -c '%s' "dist/$arm64_xz_file")
+          arm64_gz_size=$(stat -c '%s' "dist/$arm64_gz_file")
           jq -n \
             --arg version "$RELEASE_TAG" \
-            --arg amd64_file "$amd64_file" \
-            --arg amd64_sha "$amd64_sha" \
-            --argjson amd64_size "$amd64_size" \
-            --arg arm64_file "$arm64_file" \
-            --arg arm64_sha "$arm64_sha" \
-            --argjson arm64_size "$arm64_size" \
+            --arg amd64_file "$amd64_xz_file" \
+            --arg amd64_sha "$amd64_xz_sha" \
+            --argjson amd64_size "$amd64_xz_size" \
+            --arg amd64_fallback_file "$amd64_gz_file" \
+            --arg amd64_fallback_sha "$amd64_gz_sha" \
+            --argjson amd64_fallback_size "$amd64_gz_size" \
+            --arg arm64_file "$arm64_xz_file" \
+            --arg arm64_sha "$arm64_xz_sha" \
+            --argjson arm64_size "$arm64_xz_size" \
+            --arg arm64_fallback_file "$arm64_gz_file" \
+            --arg arm64_fallback_sha "$arm64_gz_sha" \
+            --argjson arm64_fallback_size "$arm64_gz_size" \
             '{
               version: $version,
               architectures: {
-                amd64: {file: $amd64_file, sha256: $amd64_sha, size: $amd64_size},
-                arm64: {file: $arm64_file, sha256: $arm64_sha, size: $arm64_size}
+                amd64: {
+                  file: $amd64_file,
+                  sha256: $amd64_sha,
+                  size: $amd64_size,
+                  fallbackFile: $amd64_fallback_file,
+                  fallbackSha256: $amd64_fallback_sha,
+                  fallbackSize: $amd64_fallback_size
+                },
+                arm64: {
+                  file: $arm64_file,
+                  sha256: $arm64_sha,
+                  size: $arm64_size,
+                  fallbackFile: $arm64_fallback_file,
+                  fallbackSha256: $arm64_fallback_sha,
+                  fallbackSize: $arm64_fallback_size
+                }
               }
             }' > dist/rootfs-manifest.json
           cat dist/rootfs-manifest.json
@@ -178,7 +210,9 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" \
             dist/rootfs-manifest.json \
+            dist/tcpquality-rootfs-amd64.tar.gz \
             dist/tcpquality-rootfs-amd64.tar.xz \
+            dist/tcpquality-rootfs-arm64.tar.gz \
             dist/tcpquality-rootfs-arm64.tar.xz \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
@@ -194,6 +228,8 @@ jobs:
           git push --force origin "refs/tags/$ALIAS_TAG"
           if gh release view "$ALIAS_TAG" >/dev/null 2>&1; then
             gh release upload "$ALIAS_TAG" --clobber \
+              dist/tcpquality-rootfs-amd64.tar.gz \
+              dist/tcpquality-rootfs-arm64.tar.gz \
               dist/tcpquality-rootfs-amd64.tar.xz \
               dist/tcpquality-rootfs-arm64.tar.xz
             gh release upload "$ALIAS_TAG" --clobber dist/rootfs-manifest.json
@@ -202,7 +238,9 @@ jobs:
               --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
           else
             gh release create "$ALIAS_TAG" \
+              dist/tcpquality-rootfs-amd64.tar.gz \
               dist/tcpquality-rootfs-amd64.tar.xz \
+              dist/tcpquality-rootfs-arm64.tar.gz \
               dist/tcpquality-rootfs-arm64.tar.xz \
               dist/rootfs-manifest.json \
               --title "$ALIAS_TAG" \
