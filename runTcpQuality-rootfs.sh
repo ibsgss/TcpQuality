@@ -30,12 +30,17 @@ fi
 TCPQUALITY_TCP_INFO_SOURCE="${TCPQUALITY_TCP_INFO_SOURCE:-}"
 TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE:-}"
 TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE:-}"
+TCPQUALITY_IPQUALITY_SCRIPT_SOURCE="${TCPQUALITY_IPQUALITY_SCRIPT_SOURCE:-}"
+TCPQUALITY_IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
+TCPQUALITY_ENV_FILE="${TCPQUALITY_ENV_FILE:-}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
 NEXTTRACE_DOWNLOAD_TIMEOUT="${TCPQUALITY_NEXTTRACE_DOWNLOAD_TIMEOUT:-600}"
 DEBUG_MODE=0
 MIN_ROOTFS_FREE_KB=$((700 * 1024))
+IPQUALITY_REQUESTED=0
+IPQUALITY_ENV_GUEST=""
 
 usage() {
   cat <<'EOF'
@@ -105,7 +110,7 @@ answer_is_no() {
 }
 
 configure_interactive_args() {
-  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0 upload_rank=1
+  local answer run_route=0 run_edu=0 run_intl=0 run_speedtest=0 run_ipquality=0 upload_rank=1
   local -a selected_args=()
 
   print_interactive_intro
@@ -128,11 +133,15 @@ configure_interactive_args() {
     ALLOW_SPEEDTEST=1
   fi
 
+  answer=$(prompt_answer "运行IP质量测试？（回车默认 'y'）[y/n]：" "y")
+  answer_is_no "$answer" || run_ipquality=1
+
   answer=$(prompt_answer "上传并生成在线报告链接？（回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" && upload_rank=0
 
   if [ "$run_route" -eq 0 ]; then
-    if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] && [ "$run_speedtest" -eq 0 ]; then
+    if [ "$run_edu" -eq 0 ] && [ "$run_intl" -eq 0 ] &&
+       [ "$run_speedtest" -eq 0 ] && [ "$run_ipquality" -eq 0 ]; then
       die "未选择任何测试项目"
     fi
   fi
@@ -151,10 +160,16 @@ configure_interactive_args() {
       selected_args+=("--speedtest")
     fi
   fi
+  [ "$run_ipquality" -eq 1 ] && selected_args+=("--ip-quality")
 
   if [ "$run_route" -eq 1 ] && [ "$run_edu" -eq 1 ] &&
      [ "$run_intl" -eq 1 ] && [ "$run_speedtest" -eq 1 ]; then
     selected_args=("--all")
+    if [ "$run_ipquality" -eq 1 ]; then
+      selected_args+=("--ip-quality")
+    else
+      selected_args+=("--no-ip-quality")
+    fi
   fi
 
   [ "$upload_rank" -eq 0 ] && selected_args+=("--no-rank-upload")
@@ -265,6 +280,9 @@ if [ "$#" -gt 0 ]; then
   printf "\n"
 else
   echo "[i] 主脚本参数: 默认三网回程测试"
+fi
+if ip_quality_args_requested "$@"; then
+  IPQUALITY_REQUESTED=1
 fi
 
 for arg in "$@"; do
@@ -969,6 +987,13 @@ mount_guest() {
     mount -o bind "$GUEST_TMP_HOST" "$ROOTFS_DIR/tmp"
   MOUNTED+=("$ROOTFS_DIR/tmp")
 
+  if [ "$IPQUALITY_REQUESTED" -eq 1 ]; then
+    mkdir -p "$TCPQUALITY_IPQUALITY_CACHE_DIR" "$ROOTFS_DIR/tmp/ipquality-cache"
+    mount --bind "$TCPQUALITY_IPQUALITY_CACHE_DIR" "$ROOTFS_DIR/tmp/ipquality-cache" 2>/dev/null ||
+      mount -o bind "$TCPQUALITY_IPQUALITY_CACHE_DIR" "$ROOTFS_DIR/tmp/ipquality-cache"
+    MOUNTED+=("$ROOTFS_DIR/tmp/ipquality-cache")
+  fi
+
   if [ -d /lib/modules ]; then
     mkdir -p "$ROOTFS_DIR/lib/modules"
     mount --bind /lib/modules "$ROOTFS_DIR/lib/modules" 2>/dev/null ||
@@ -1032,6 +1057,17 @@ speedtest_args_requested() {
     esac
   done
   return 1
+}
+
+ip_quality_args_requested() {
+  local arg requested=0
+  for arg in "$@"; do
+    case "$arg" in
+      --ip-quality|--all) requested=1 ;;
+      --no-ip-quality) requested=0 ;;
+    esac
+  done
+  [ "$requested" -eq 1 ]
 }
 
 resolve_tcpquality_asset() {
@@ -1131,10 +1167,32 @@ ensure_guest_tcp_info_support() {
 }
 
 prepare_guest_files() {
-  local nexttrace_path arg
+  local nexttrace_path arg ipquality_path env_candidate
   mkdir -p "$ROOTFS_DIR/root" "$ROOTFS_DIR/usr/local/bin"
   cp "$TARGET_SCRIPT" "$ROOTFS_DIR/root/runTcpQuality.sh"
   chmod 0755 "$ROOTFS_DIR/root/runTcpQuality.sh"
+
+  if [ "$IPQUALITY_REQUESTED" -eq 1 ]; then
+    ipquality_path=$(resolve_tcpquality_asset TCPQUALITY_IPQUALITY_SCRIPT_SOURCE \
+      runIpQuality.sh "$RUNTIME_DIR/runIpQuality.sh") || {
+      echo "[X] 无法获取 runIpQuality.sh，无法运行 IP 质量检测" >&2
+      return 1
+    }
+    cp -L "$ipquality_path" "$ROOTFS_DIR/root/runIpQuality.sh"
+    chmod 0755 "$ROOTFS_DIR/root/runIpQuality.sh"
+
+    for env_candidate in \
+      "${TCPQUALITY_ENV_FILE:-}" \
+      "$PWD/.env" \
+      "$SCRIPT_DIR/.env"; do
+      if [ -n "$env_candidate" ] && [ -r "$env_candidate" ]; then
+        cp -L "$env_candidate" "$ROOTFS_DIR/root/.env"
+        chmod 0600 "$ROOTFS_DIR/root/.env"
+        IPQUALITY_ENV_GUEST=/root/.env
+        break
+      fi
+    done
+  fi
 
   for arg in "$@"; do
     if [ "$arg" = "--only-speedtest" ]; then
@@ -1202,11 +1260,19 @@ guest_env=(
 if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
   guest_env+=(TCPQUALITY_INCLUDE_DEFAULT_ROUTE=1)
 fi
+if [ "$IPQUALITY_REQUESTED" -eq 1 ]; then
+  guest_env+=(TCPQUALITY_IPQUALITY_CACHE_DIR=/tmp/ipquality-cache)
+  [ -n "$IPQUALITY_ENV_GUEST" ] && guest_env+=("TCPQUALITY_ENV_FILE=$IPQUALITY_ENV_GUEST")
+fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
   TCPQUALITY_TCP_INFO TCPQUALITY_TCP_INFO_PRELOAD TCPQUALITY_RETRANS_TRACE \
   TCPQUALITY_RETRANS_TRACE_SCRIPT TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT \
-  TCPQUALITY_BPFTRACE_BTF \
+  TCPQUALITY_BPFTRACE_BTF TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS \
+  MAXMIND_ASN_DB MAXMIND_COUNTRY_DB MAXMIND_CITY_DB MAXMIND_NODE_DIR \
+  IPQUALITY_API_BASE IPQUALITY_PAID_LOOKUP \
+  SCAMALYTICS_USERNAME SCAMALYTICS_API_KEY SCAMALYTICS_API_ENDPOINT \
+  SCAMALYTICS_API_TIMEOUT_SECONDS AI_PROBE_TIMEOUT_SECONDS \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
   http_proxy https_proxy no_proxy all_proxy; do
   if [ "${!env_name+x}" = x ]; then
