@@ -1820,50 +1820,118 @@ run_ai_checks() {
   check_ai_claude
 }
 
-mmdblookup_json() {
-  local database="$1" ip="$2" raw
+mmdblookup_scalar_json() {
+  local database="$1" ip="$2" raw value
+  shift 2
   [ -r "$database" ] || {
-    printf '{}'
+    printf 'null'
     return 0
   }
-  raw=$(mmdblookup --file "$database" --ip "$ip" 2>/dev/null || true)
-  if printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    printf '%s' "$raw" | jq -c '.'
+
+  # mmdblookup 输出的是带类型注释、且不带逗号的 JSON-like 文本，不能直接交给
+  # jq 解析。按字段读取时每次只返回一个标量，去掉类型注释后就是合法 JSON。
+  raw=$(mmdblookup --file "$database" --ip "$ip" "$@" 2>/dev/null || true)
+  value=$(printf '%s\n' "$raw" | awk '
+    /^[[:space:]]*$/ { next }
+    {
+      sub(/^[[:space:]]+/, "")
+      sub(/[[:space:]]+<[^>]+>[[:space:]]*$/, "")
+      print
+      exit
+    }
+  ')
+  if [ -n "$value" ] && printf '%s' "$value" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "$value"
   else
-    printf '{}'
+    printf 'null'
   fi
 }
 
 lookup_maxmind_mmdblookup() {
-  local ip="$1" asn country city
+  local ip="$1"
+  local asn_number asn_organization
+  local city_zh city_en subdivision_zh subdivision_en
+  local country_code country_zh country_en registered_code registered_zh registered_en
+  local continent_code continent_zh continent_en latitude longitude time_zone
   command -v mmdblookup >/dev/null 2>&1 || return 1
   [ -r "$MAXMIND_ASN_DB" ] || [ -r "$MAXMIND_COUNTRY_DB" ] || [ -r "$MAXMIND_CITY_DB" ] || return 1
 
-  asn=$(mmdblookup_json "$MAXMIND_ASN_DB" "$ip")
-  country=$(mmdblookup_json "$MAXMIND_COUNTRY_DB" "$ip")
-  city=$(mmdblookup_json "$MAXMIND_CITY_DB" "$ip")
+  asn_number=$(mmdblookup_scalar_json "$MAXMIND_ASN_DB" "$ip" autonomous_system_number)
+  asn_organization=$(mmdblookup_scalar_json "$MAXMIND_ASN_DB" "$ip" autonomous_system_organization)
+
+  city_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" city names zh-CN)
+  city_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" city names en)
+  subdivision_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" subdivisions 0 names zh-CN)
+  subdivision_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" subdivisions 0 names en)
+
+  country_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country iso_code)
+  [ "$country_code" != "null" ] || country_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country iso_code)
+  country_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country names zh-CN)
+  [ "$country_zh" != "null" ] || country_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country names zh-CN)
+  country_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country names en)
+  [ "$country_en" != "null" ] || country_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country names en)
+
+  registered_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country iso_code)
+  [ "$registered_code" != "null" ] || registered_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country iso_code)
+  registered_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country names zh-CN)
+  [ "$registered_zh" != "null" ] || registered_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country names zh-CN)
+  registered_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country names en)
+  [ "$registered_en" != "null" ] || registered_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country names en)
+
+  continent_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent code)
+  [ "$continent_code" != "null" ] || continent_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent code)
+  continent_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent names zh-CN)
+  [ "$continent_zh" != "null" ] || continent_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent names zh-CN)
+  continent_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent names en)
+  [ "$continent_en" != "null" ] || continent_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent names en)
+
+  latitude=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location latitude)
+  longitude=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location longitude)
+  time_zone=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location time_zone)
+
   jq -cn \
-    --argjson asn "$asn" \
-    --argjson country "$country" \
-    --argjson city "$city" '
-    def name: (.names["zh-CN"] // .names.en // .iso_code // "");
+    --argjson asnNumber "$asn_number" \
+    --argjson asnOrganization "$asn_organization" \
+    --argjson cityZh "$city_zh" \
+    --argjson cityEn "$city_en" \
+    --argjson subdivisionZh "$subdivision_zh" \
+    --argjson subdivisionEn "$subdivision_en" \
+    --argjson countryCode "$country_code" \
+    --argjson countryZh "$country_zh" \
+    --argjson countryEn "$country_en" \
+    --argjson registeredCode "$registered_code" \
+    --argjson registeredZh "$registered_zh" \
+    --argjson registeredEn "$registered_en" \
+    --argjson continentCode "$continent_code" \
+    --argjson continentZh "$continent_zh" \
+    --argjson continentEn "$continent_en" \
+    --argjson latitude "$latitude" \
+    --argjson longitude "$longitude" \
+    --argjson timeZone "$time_zone" '
+    def text($value):
+      if $value == null then "" else ($value | tostring) end;
+    def first_text($first; $second; $fallback):
+      if $first != null and $first != "" then text($first)
+      elif $second != null and $second != "" then text($second)
+      else text($fallback)
+      end;
     {
       asn: {
-        number: ($asn.autonomous_system_number // ""),
-        organization: ($asn.autonomous_system_organization // "")
+        number: text($asnNumber),
+        organization: text($asnOrganization)
       },
       geo: {
-        city: (($city.city // {}) | name),
-        subdivision: (((($city.subdivisions // [])[0] // {}) | name)),
-        countryCode: ((($city.country // $country.country // {}) | .iso_code) // ""),
-        countryName: ((($city.country // $country.country // {}) | name)),
-        registeredCountryCode: ((($city.registered_country // $country.registered_country // {}) | .iso_code) // ""),
-        registeredCountryName: ((($city.registered_country // $country.registered_country // {}) | name)),
-        continentCode: ((($city.continent // $country.continent // {}) | .code) // ""),
-        continentName: ((($city.continent // $country.continent // {}) | name)),
-        latitude: ($city.location.latitude // ""),
-        longitude: ($city.location.longitude // ""),
-        timeZone: ($city.location.time_zone // "")
+        city: first_text($cityZh; $cityEn; null),
+        subdivision: first_text($subdivisionZh; $subdivisionEn; null),
+        countryCode: text($countryCode),
+        countryName: first_text($countryZh; $countryEn; $countryCode),
+        registeredCountryCode: text($registeredCode),
+        registeredCountryName: first_text($registeredZh; $registeredEn; $registeredCode),
+        continentCode: text($continentCode),
+        continentName: first_text($continentZh; $continentEn; $continentCode),
+        latitude: (if $latitude == null then "" else $latitude end),
+        longitude: (if $longitude == null then "" else $longitude end),
+        timeZone: text($timeZone)
       }
     }'
 }
