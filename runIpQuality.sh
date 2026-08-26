@@ -2531,54 +2531,53 @@ lookup_active_neighbors() {
 }
 
 report_basic_rows() {
-  local ip="$1" registered
-  registered=$(basic_get maxmind registered)
+  local ip="$1"
   report_database_line '数据库' 'MaxMind' 'IP2Location' 'IPinfo' 'DB-IP'
   report_line 'ASN' \
     "$(basic_get maxmind asn)" \
-    "$(basic_get maxmind asn)" \
-    "$(basic_get maxmind asn)" \
-    "$(basic_get maxmind asn)"
+    "$(basic_get ip2location asn)" \
+    "$(basic_get ipinfo asn)" \
+    "$(basic_get dbip asn)"
   report_line '组织' \
     "$(basic_get maxmind organization)" \
-    "$(basic_get maxmind organization)" \
-    "$(basic_get maxmind organization)" \
-    "$(basic_get maxmind organization)"
+    "$(basic_get ip2location organization)" \
+    "$(basic_get ipinfo organization)" \
+    "$(basic_get dbip organization)"
   report_line '坐标' \
     "$(basic_get maxmind coordinates)" \
-    "$(basic_get maxmind coordinates)" \
-    "$(basic_get maxmind coordinates)" \
-    "$(basic_get maxmind coordinates)"
+    "$(basic_get ip2location coordinates)" \
+    "$(basic_get ipinfo coordinates)" \
+    "$(basic_get dbip coordinates)"
   report_line '城市' \
     "$(basic_get maxmind city)" \
-    "$(basic_get maxmind city)" \
-    "$(basic_get maxmind city)" \
-    "$(basic_get maxmind city)"
+    "$(basic_get ip2location city)" \
+    "$(basic_get ipinfo city)" \
+    "$(basic_get dbip city)"
   report_line '洲际' \
     "$(basic_get maxmind continent)" \
-    "$(basic_get maxmind continent)" \
-    "$(basic_get maxmind continent)" \
-    "$(basic_get maxmind continent)"
+    "$(basic_get ip2location continent)" \
+    "$(basic_get ipinfo continent)" \
+    "$(basic_get dbip continent)"
   report_line '时区' \
     "$(basic_get maxmind timezone)" \
-    "$(basic_get maxmind timezone)" \
-    "$(basic_get maxmind timezone)" \
-    "$(basic_get maxmind timezone)"
+    "$(basic_get ip2location timezone)" \
+    "$(basic_get ipinfo timezone)" \
+    "$(basic_get dbip timezone)"
   report_line '注册地' \
     "$(basic_get maxmind registered)" \
-    "$(basic_get maxmind registered)" \
-    "$(basic_get maxmind registered)" \
-    "$(basic_get maxmind registered)"
+    "$(basic_get ip2location registered)" \
+    "$(basic_get ipinfo registered)" \
+    "$(basic_get dbip registered)"
   report_line '使用地' \
     "$(basic_get maxmind location)" \
     "$(basic_get ip2location location)" \
     "$(basic_get ipinfo location)" \
     "$(basic_get dbip location)"
   report_type_line 'IP类型' \
-    "$(basic_ip_type "$registered" "$(basic_get maxmind location)")" \
-    "$(basic_ip_type "$registered" "$(basic_get ip2location location)")" \
-    "$(basic_ip_type "$registered" "$(basic_get ipinfo location)")" \
-    "$(basic_ip_type "$registered" "$(basic_get dbip location)")"
+    "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
+    "$(basic_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
+    "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
+    "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")"
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
   fi
@@ -2685,32 +2684,52 @@ active_neighbor_json() {
 }
 
 write_report_json() {
-  local ip="$1" file="${REPORT_JSON_FILE:-}" family registered active_json
+  local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
   [ -n "$file" ] || return 0
   family=4
   [[ "$ip" == *:* ]] && family=6
-  registered=$(basic_get maxmind registered)
   active_json=$(active_neighbor_json)
 
   jq -cn \
     --arg ip "$ip" \
     --arg maskedIp "$(mask_ip "$ip")" \
     --arg family "IPv${family}" \
-    --arg asn "$(basic_get maxmind asn)" \
-    --arg organization "$(basic_get maxmind organization)" \
-    --arg coordinates "$(basic_get maxmind coordinates)" \
-    --arg city "$(basic_get maxmind city)" \
-    --arg continent "$(basic_get maxmind continent)" \
-    --arg timezone "$(basic_get maxmind timezone)" \
-    --arg registered "$registered" \
+    --arg maxmindAsn "$(basic_get maxmind asn)" \
+    --arg ip2Asn "$(basic_get ip2location asn)" \
+    --arg ipinfoAsn "$(basic_get ipinfo asn)" \
+    --arg dbipAsn "$(basic_get dbip asn)" \
+    --arg maxmindOrganization "$(basic_get maxmind organization)" \
+    --arg ip2Organization "$(basic_get ip2location organization)" \
+    --arg ipinfoOrganization "$(basic_get ipinfo organization)" \
+    --arg dbipOrganization "$(basic_get dbip organization)" \
+    --arg maxmindCoordinates "$(basic_get maxmind coordinates)" \
+    --arg ip2Coordinates "$(basic_get ip2location coordinates)" \
+    --arg ipinfoCoordinates "$(basic_get ipinfo coordinates)" \
+    --arg dbipCoordinates "$(basic_get dbip coordinates)" \
+    --arg maxmindCity "$(basic_get maxmind city)" \
+    --arg ip2City "$(basic_get ip2location city)" \
+    --arg ipinfoCity "$(basic_get ipinfo city)" \
+    --arg dbipCity "$(basic_get dbip city)" \
+    --arg maxmindContinent "$(basic_get maxmind continent)" \
+    --arg ip2Continent "$(basic_get ip2location continent)" \
+    --arg ipinfoContinent "$(basic_get ipinfo continent)" \
+    --arg dbipContinent "$(basic_get dbip continent)" \
+    --arg maxmindTimezone "$(basic_get maxmind timezone)" \
+    --arg ip2Timezone "$(basic_get ip2location timezone)" \
+    --arg ipinfoTimezone "$(basic_get ipinfo timezone)" \
+    --arg dbipTimezone "$(basic_get dbip timezone)" \
+    --arg maxmindRegistered "$(basic_get maxmind registered)" \
+    --arg ip2Registered "$(basic_get ip2location registered)" \
+    --arg ipinfoRegistered "$(basic_get ipinfo registered)" \
+    --arg dbipRegistered "$(basic_get dbip registered)" \
     --arg maxmindLocation "$(basic_get maxmind location)" \
     --arg ip2Location "$(basic_get ip2location location)" \
     --arg ipinfoLocation "$(basic_get ipinfo location)" \
     --arg dbipLocation "$(basic_get dbip location)" \
-    --arg maxmindIpType "$(basic_ip_type "$registered" "$(basic_get maxmind location)")" \
-    --arg ip2IpType "$(basic_ip_type "$registered" "$(basic_get ip2location location)")" \
-    --arg ipinfoIpType "$(basic_ip_type "$registered" "$(basic_get ipinfo location)")" \
-    --arg dbipIpType "$(basic_ip_type "$registered" "$(basic_get dbip location)")" \
+    --arg maxmindIpType "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
+    --arg ip2IpType "$(basic_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
+    --arg ipinfoIpType "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
+    --arg dbipIpType "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")" \
     --arg maxmindUsage "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
     --arg ip2Usage "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     --arg ipinfoUsage "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
@@ -2753,13 +2772,13 @@ write_report_json() {
       basic: {
         columns: ["MaxMind", "IP2Location", "IPinfo", "DB-IP"],
         rows: [
-          {"label": "ASN", "values": [$asn, $asn, $asn, $asn]},
-          {"label": "组织", "values": [$organization, $organization, $organization, $organization]},
-          {"label": "坐标", "values": [$coordinates, $coordinates, $coordinates, $coordinates]},
-          {"label": "城市", "values": [$city, $city, $city, $city]},
-          {"label": "洲际", "values": [$continent, $continent, $continent, $continent]},
-          {"label": "时区", "values": [$timezone, $timezone, $timezone, $timezone]},
-          {"label": "注册地", "values": [$registered, $registered, $registered, $registered]},
+          {"label": "ASN", "values": [$maxmindAsn, $ip2Asn, $ipinfoAsn, $dbipAsn]},
+          {"label": "组织", "values": [$maxmindOrganization, $ip2Organization, $ipinfoOrganization, $dbipOrganization]},
+          {"label": "坐标", "values": [$maxmindCoordinates, $ip2Coordinates, $ipinfoCoordinates, $dbipCoordinates]},
+          {"label": "城市", "values": [$maxmindCity, $ip2City, $ipinfoCity, $dbipCity]},
+          {"label": "洲际", "values": [$maxmindContinent, $ip2Continent, $ipinfoContinent, $dbipContinent]},
+          {"label": "时区", "values": [$maxmindTimezone, $ip2Timezone, $ipinfoTimezone, $dbipTimezone]},
+          {"label": "注册地", "values": [$maxmindRegistered, $ip2Registered, $ipinfoRegistered, $dbipRegistered]},
           {"label": "使用地", "values": [$maxmindLocation, $ip2Location, $ipinfoLocation, $dbipLocation]},
           {"label": "IP类型", "values": [$maxmindIpType, $ip2IpType, $ipinfoIpType, $dbipIpType]},
           {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
