@@ -7,6 +7,7 @@
 set -Eeuo pipefail
 
 export TCPQUALITY_RAW_BASE="${TCPQUALITY_RAW_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta}"
+export TCPQUALITY_IPQUALITY_ASSET_BASE="${TCPQUALITY_IPQUALITY_ASSET_BASE:-$TCPQUALITY_RAW_BASE}"
 # Beta rootfs must remain isolated from main's stable v1.latest channel.
 export TCPQUALITY_ROOTFS_RELEASE_TAG="${TCPQUALITY_ROOTFS_RELEASE_TAG:-v1beta.latest}"
 ENTRY_BASE="${TCPQUALITY_ENTRY_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/main}"

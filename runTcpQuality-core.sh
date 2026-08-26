@@ -4104,25 +4104,51 @@ run_international_mode() {
 
 # ===================== 国内单线程测速 =====================
 resolve_ip_quality_script() {
-  local configured raw_base cache_file
+  local configured raw_base cache_file candidate already
+  local -a raw_bases=()
   configured="${IPQUALITY_SCRIPT:-}"
   if [ -n "$configured" ] && [ -r "$configured" ]; then
     printf '%s\n' "$configured"
     return 0
   fi
 
-  raw_base="${TCPQUALITY_IPQUALITY_ASSET_BASE:-${TCPQUALITY_RAW_BASE:-https://raw.githubusercontent.com/ibsgss/TcpQuality/main}}"
+  configured="${TCPQUALITY_IPQUALITY_SCRIPT_SOURCE:-}"
+  if [ -n "$configured" ] && [ -r "$configured" ]; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+
+  for candidate in \
+    "${TCPQUALITY_IPQUALITY_ASSET_BASE:-}" \
+    "${TCPQUALITY_RAW_BASE:-}" \
+    "${TCPQUALITY_ASSET_BASE:-}" \
+    "https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta"; do
+    [ -n "$candidate" ] || continue
+    candidate="${candidate%/}"
+    already=0
+    for raw_base in "${raw_bases[@]}"; do
+      if [ "$raw_base" = "$candidate" ]; then
+        already=1
+        break
+      fi
+    done
+    [ "$already" -eq 0 ] && raw_bases+=("$candidate")
+  done
+
   cache_file="${IPQUALITY_SCRIPT_TEMP:-}"
   if [ -z "$cache_file" ]; then
     cache_file=$(mktemp "${TMPDIR:-/tmp}/tcpquality-ipquality-script.XXXXXX") || return 1
     IPQUALITY_SCRIPT_TEMP="$cache_file"
   fi
-  if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
-    "${raw_base%/}/runIpQuality.sh" -o "$cache_file"; then
-    chmod 0755 "$cache_file"
-    printf '%s\n' "$cache_file"
-    return 0
-  fi
+
+  for raw_base in "${raw_bases[@]}"; do
+    if curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+      "$raw_base/runIpQuality.sh" -o "$cache_file"; then
+      chmod 0755 "$cache_file"
+      printf '%s\n' "$cache_file"
+      return 0
+    fi
+  done
   return 1
 }
 
