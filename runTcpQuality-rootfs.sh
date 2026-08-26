@@ -32,6 +32,9 @@ TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_SCRIPT_SOURCE
 TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE="${TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT_SOURCE:-}"
 TCPQUALITY_IPQUALITY_SCRIPT_SOURCE="${TCPQUALITY_IPQUALITY_SCRIPT_SOURCE:-}"
 TCPQUALITY_IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
+MAXMIND_ASN_DB="${MAXMIND_ASN_DB:-/data/GeoLite2-ASN.mmdb}"
+MAXMIND_COUNTRY_DB="${MAXMIND_COUNTRY_DB:-/data/GeoLite2-Country.mmdb}"
+MAXMIND_CITY_DB="${MAXMIND_CITY_DB:-/data/GeoLite2-City.mmdb}"
 TCPQUALITY_ENV_FILE="${TCPQUALITY_ENV_FILE:-}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -197,6 +200,17 @@ has_debug_arg() {
     [ "$arg" = "--debug" ] && return 0
   done
   return 1
+}
+
+ip_quality_args_requested() {
+  local arg requested=0
+  for arg in "$@"; do
+    case "$arg" in
+      --ip-quality|--all) requested=1 ;;
+      --no-ip-quality) requested=0 ;;
+    esac
+  done
+  [ "$requested" -eq 1 ]
 }
 
 while [ "$#" -gt 0 ]; do
@@ -951,6 +965,50 @@ prepare_rootfs() {
   validate_rootfs
 }
 
+bind_maxmind_database() {
+  local host_path="$1" relative guest_path parent_rel
+  [ -r "$host_path" ] || return 0
+  case "$host_path" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  relative="${host_path#/}"
+  [ -n "$relative" ] || return 0
+  parent_rel=$(dirname -- "$relative")
+  assert_rootfs_path_safe 0 "$parent_rel" || return 1
+  guest_path="$ROOTFS_DIR/$relative"
+  mkdir -p "$(dirname -- "$guest_path")" || return 1
+  [ -L "$guest_path" ] && return 1
+  if [ -e "$guest_path" ]; then
+    [ -f "$guest_path" ] || return 1
+  else
+    : > "$guest_path" || return 1
+  fi
+  if mount --bind "$host_path" "$guest_path" 2>/dev/null ||
+     mount -o bind "$host_path" "$guest_path" 2>/dev/null; then
+    mount -o remount,bind,ro "$guest_path" >/dev/null 2>&1 || true
+    MOUNTED+=("$guest_path")
+    return 0
+  fi
+  return 1
+}
+
+mount_maxmind_databases() {
+  local env_name host_path mounted=0
+  for env_name in MAXMIND_ASN_DB MAXMIND_COUNTRY_DB MAXMIND_CITY_DB; do
+    host_path="${!env_name:-}"
+    [ -r "$host_path" ] || continue
+    if bind_maxmind_database "$host_path"; then
+      mounted=$((mounted + 1))
+    else
+      echo "[!] 无法将 $env_name 绑定到 rootfs，MaxMind 该数据库将跳过" >&2
+    fi
+  done
+  if [ "$mounted" -gt 0 ]; then
+    echo "[√] 已将 $mounted 个 MaxMind 离线库绑定到 rootfs"
+  fi
+}
+
 mount_guest() {
   RUNTIME_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tcpquality-runtime.XXXXXX")
   GUEST_TMP_HOST="$RUNTIME_DIR/guest-tmp"
@@ -992,6 +1050,7 @@ mount_guest() {
     mount --bind "$TCPQUALITY_IPQUALITY_CACHE_DIR" "$ROOTFS_DIR/tmp/ipquality-cache" 2>/dev/null ||
       mount -o bind "$TCPQUALITY_IPQUALITY_CACHE_DIR" "$ROOTFS_DIR/tmp/ipquality-cache"
     MOUNTED+=("$ROOTFS_DIR/tmp/ipquality-cache")
+    mount_maxmind_databases
   fi
 
   if [ -d /lib/modules ]; then
@@ -1015,13 +1074,14 @@ install_guest_deps() {
   if [ "$DISTRO" = debian ]; then
     if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
        env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt'; then
+         'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt' &&
+       { [ "$IPQUALITY_REQUESTED" -eq 0 ] || env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c 'command -v mmdblookup >/dev/null 2>&1'; }; then
       echo "[√] 预构建 rootfs 依赖已就绪"
       return 0
     fi
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod nmap ncurses-bin bpftrace sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod mmdb-bin nmap ncurses-bin bpftrace sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
       >"$apt_log" 2>&1; then
       echo "[X] Debian rootfs 依赖安装失败" >&2
       echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
@@ -1034,7 +1094,7 @@ install_guest_deps() {
   else
     local apk_log="$GUEST_TMP_HOST/alpine-rootfs-apk.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
-      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod ncurses nmap-nping sed tar traceroute tzdata' \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod libmaxminddb ncurses nmap-nping sed tar traceroute tzdata' \
       >"$apk_log" 2>&1; then
       echo "[X] Alpine rootfs 依赖安装失败" >&2
       echo "[i] apk 日志已保留: $apk_log" >&2
@@ -1057,17 +1117,6 @@ speedtest_args_requested() {
     esac
   done
   return 1
-}
-
-ip_quality_args_requested() {
-  local arg requested=0
-  for arg in "$@"; do
-    case "$arg" in
-      --ip-quality|--all) requested=1 ;;
-      --no-ip-quality) requested=0 ;;
-    esac
-  done
-  [ "$requested" -eq 1 ]
 }
 
 resolve_tcpquality_asset() {

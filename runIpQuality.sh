@@ -54,6 +54,7 @@ SCAMALYTICS_API_TIMEOUT_SECONDS="${SCAMALYTICS_API_TIMEOUT_SECONDS:-12}"
 # 数据库结果缓存 45 天；可用环境变量覆盖，端口和 AI 检测不进入缓存。
 IPQUALITY_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS:-3888000}"
 IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
+IPQUALITY_RISK_CACHE_DIR="${TCPQUALITY_IPQUALITY_RISK_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/maxmind-risk}"
 [[ "$IPQUALITY_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPQUALITY_CACHE_TTL_SECONDS=3888000
 INVALID_STATUS="无效"
 
@@ -620,22 +621,44 @@ declare -a IPQUALITY_CACHE_VARIABLES=(
   ACTIVE_NEIGHBOR_ACTIVE ACTIVE_NEIGHBOR_TOTAL
 )
 
-cache_file_for_ip() {
-  local ip="$1" hash=""
+cache_hash_for_key() {
+  local key="$1" hash=""
   if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$ip" | sha256sum | awk '{print $1}')
+    hash=$(printf '%s' "$key" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$ip" | shasum -a 256 | awk '{print $1}')
+    hash=$(printf '%s' "$key" | shasum -a 256 | awk '{print $1}')
   else
-    hash=$(printf '%s' "$ip" | cksum | awk '{print $1}')
+    hash=$(printf '%s' "$key" | cksum | awk '{print $1}')
   fi
   [ -n "$hash" ] || return 1
+  printf '%s' "$hash"
+}
+
+cache_file_for_ip() {
+  local hash
+  hash=$(cache_hash_for_key "$1") || return 1
   printf '%s/%s.cache' "${IPQUALITY_CACHE_DIR%/}" "$hash"
+}
+
+maxmind_risk_cache_key() {
+  local ip="$1"
+  if [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    printf '%s.%s.%s.0/24' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+}
+
+maxmind_risk_cache_file_for_ip() {
+  local key hash
+  key=$(maxmind_risk_cache_key "$1") || return 1
+  hash=$(cache_hash_for_key "$key") || return 1
+  printf '%s/%s.cache' "${IPQUALITY_RISK_CACHE_DIR%/}" "$hash"
 }
 
 cache_context_signature() {
   local context hash
-  context="maxmind|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics|${SCAMALYTICS_USERNAME}|${SCAMALYTICS_API_ENDPOINT}|${SCAMALYTICS_API_KEY}"
+  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics|${SCAMALYTICS_USERNAME}|${SCAMALYTICS_API_ENDPOINT}|${SCAMALYTICS_API_KEY}"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -720,6 +743,79 @@ save_database_cache() {
     for variable in "${IPQUALITY_CACHE_VARIABLES[@]}"; do
       declare -p "$variable" | sed 's/^declare /declare -g /'
     done
+  } > "$temp_file" || {
+    rm -f -- "$temp_file"
+    return 0
+  }
+  chmod 600 "$temp_file" 2>/dev/null || true
+  mv -f -- "$temp_file" "$cache_file" 2>/dev/null || rm -f -- "$temp_file"
+}
+
+maxmind_risk_cache_signature() {
+  local context hash
+  context="maxmind-risk|${IPQUALITY_API_BASE}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$context" | shasum -a 256 | awk '{print $1}')
+  else
+    hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
+  fi
+  printf '%s' "$hash"
+}
+
+load_maxmind_risk_cache() {
+  local ip="$1" cache_file now saved_at age cache_signature cache_key score
+  cache_key=$(maxmind_risk_cache_key "$ip" 2>/dev/null || true)
+  [ -n "$cache_key" ] || return 1
+  cache_file=$(maxmind_risk_cache_file_for_ip "$ip" 2>/dev/null || true)
+  [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
+  [ -L "$cache_file" ] && return 1
+
+  saved_at=$(sed -n 's/^RISK_CACHE_SAVED_AT=//p' "$cache_file" | sed -n '1p')
+  saved_at=${saved_at//[^0-9]/}
+  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  age=$((now - saved_at))
+  [ "$age" -ge 0 ] || age=0
+  [ "$age" -le "$IPQUALITY_CACHE_TTL_SECONDS" ] || return 1
+
+  cache_signature=$(maxmind_risk_cache_signature)
+  unset RISK_CACHE_VERSION RISK_CACHE_PREFIX RISK_CACHE_SAVED_AT RISK_CACHE_SIGNATURE RISK_CACHE_SCORE
+  . "$cache_file" 2>/dev/null || return 1
+  score="${RISK_CACHE_SCORE:-}"
+  if [ "${RISK_CACHE_VERSION:-}" != "1" ] ||
+     [ "${RISK_CACHE_PREFIX:-}" != "$cache_key" ] ||
+     [ "${RISK_CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
+     ! [[ "${RISK_CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]] ||
+     ! risk_score_valid "$score"; then
+    return 1
+  fi
+
+  MAXMIND_RISK_SCORE="$score"
+  MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$score")
+  return 0
+}
+
+save_maxmind_risk_cache() {
+  local ip="$1" cache_key cache_file temp_file saved_at cache_signature score
+  score="${MAXMIND_RISK_SCORE:-}"
+  risk_score_valid "$score" || return 0
+  cache_key=$(maxmind_risk_cache_key "$ip" 2>/dev/null || true)
+  [ -n "$cache_key" ] || return 0
+  cache_file=$(maxmind_risk_cache_file_for_ip "$ip" 2>/dev/null || true)
+  [ -n "$cache_file" ] || return 0
+  mkdir -p "$IPQUALITY_RISK_CACHE_DIR" 2>/dev/null || return 0
+  chmod 700 "$IPQUALITY_RISK_CACHE_DIR" 2>/dev/null || true
+  temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
+  saved_at=$(date +%s)
+  cache_signature=$(maxmind_risk_cache_signature)
+  {
+    printf 'RISK_CACHE_VERSION=1\n'
+    printf 'RISK_CACHE_PREFIX=%q\n' "$cache_key"
+    printf 'RISK_CACHE_SAVED_AT=%q\n' "$saved_at"
+    printf 'RISK_CACHE_SIGNATURE=%q\n' "$cache_signature"
+    printf 'RISK_CACHE_SCORE=%q\n' "$score"
   } > "$temp_file" || {
     rm -f -- "$temp_file"
     return 0
@@ -1724,37 +1820,77 @@ run_ai_checks() {
   check_ai_claude
 }
 
-lookup_maxmind_json() {
-  local ip="$1"
-  [ -r "$MAXMIND_ASN_DB" ] || return 1
-  [ -d "$MAXMIND_NODE_DIR/node_modules/maxmind" ] || return 1
+mmdblookup_json() {
+  local database="$1" ip="$2" raw
+  [ -r "$database" ] || {
+    printf '{}'
+    return 0
+  }
+  raw=$(mmdblookup --file "$database" --ip "$ip" 2>/dev/null || true)
+  if printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    printf '%s' "$raw" | jq -c '.'
+  else
+    printf '{}'
+  fi
+}
 
-  (
-    cd "$MAXMIND_NODE_DIR" || exit 1
-    export MAXMIND_ASN_DB
-    if [ -r "$MAXMIND_COUNTRY_DB" ]; then
-      export MAXMIND_COUNTRY_DB
-    else
-      unset MAXMIND_COUNTRY_DB
-    fi
-    if [ -r "$MAXMIND_CITY_DB" ]; then
-      export MAXMIND_CITY_DB
-    else
-      unset MAXMIND_CITY_DB
-    fi
-    export MAXMIND_LOOKUP_IP="$ip"
-    node --input-type=module <<'NODE'
+lookup_maxmind_mmdblookup() {
+  local ip="$1" asn country city
+  command -v mmdblookup >/dev/null 2>&1 || return 1
+  [ -r "$MAXMIND_ASN_DB" ] || [ -r "$MAXMIND_COUNTRY_DB" ] || [ -r "$MAXMIND_CITY_DB" ] || return 1
+
+  asn=$(mmdblookup_json "$MAXMIND_ASN_DB" "$ip")
+  country=$(mmdblookup_json "$MAXMIND_COUNTRY_DB" "$ip")
+  city=$(mmdblookup_json "$MAXMIND_CITY_DB" "$ip")
+  jq -cn \
+    --argjson asn "$asn" \
+    --argjson country "$country" \
+    --argjson city "$city" '
+    def name: (.names["zh-CN"] // .names.en // .iso_code // "");
+    {
+      asn: {
+        number: ($asn.autonomous_system_number // ""),
+        organization: ($asn.autonomous_system_organization // "")
+      },
+      geo: {
+        city: (($city.city // {}) | name),
+        subdivision: (((($city.subdivisions // [])[0] // {}) | name)),
+        countryCode: ((($city.country // $country.country // {}) | .iso_code) // ""),
+        countryName: ((($city.country // $country.country // {}) | name)),
+        registeredCountryCode: ((($city.registered_country // $country.registered_country // {}) | .iso_code) // ""),
+        registeredCountryName: ((($city.registered_country // $country.registered_country // {}) | name)),
+        continentCode: ((($city.continent // $country.continent // {}) | .code) // ""),
+        continentName: ((($city.continent // $country.continent // {}) | name)),
+        latitude: ($city.location.latitude // ""),
+        longitude: ($city.location.longitude // ""),
+        timeZone: ($city.location.time_zone // "")
+      }
+    }'
+}
+
+lookup_maxmind_json() {
+  local ip="$1" response=""
+  [ -r "$MAXMIND_ASN_DB" ] || [ -r "$MAXMIND_COUNTRY_DB" ] || [ -r "$MAXMIND_CITY_DB" ] || return 1
+
+  if command -v node >/dev/null 2>&1 && [ -d "$MAXMIND_NODE_DIR/node_modules/maxmind" ]; then
+    response=$(
+      cd "$MAXMIND_NODE_DIR" || exit 1
+      if [ -r "$MAXMIND_ASN_DB" ]; then export MAXMIND_ASN_DB; else unset MAXMIND_ASN_DB; fi
+      if [ -r "$MAXMIND_COUNTRY_DB" ]; then export MAXMIND_COUNTRY_DB; else unset MAXMIND_COUNTRY_DB; fi
+      if [ -r "$MAXMIND_CITY_DB" ]; then export MAXMIND_CITY_DB; else unset MAXMIND_CITY_DB; fi
+      export MAXMIND_LOOKUP_IP="$ip"
+      node --input-type=module <<'NODE'
 import { open } from "maxmind";
 
 const ip = process.env.MAXMIND_LOOKUP_IP;
 const name = (value) => value?.names?.["zh-CN"] || value?.names?.en || value?.iso_code || "";
 const openOptional = (path) => path ? open(path) : Promise.resolve(null);
 const [asnReader, countryReader, cityReader] = await Promise.all([
-  open(process.env.MAXMIND_ASN_DB),
+  openOptional(process.env.MAXMIND_ASN_DB),
   openOptional(process.env.MAXMIND_COUNTRY_DB),
   openOptional(process.env.MAXMIND_CITY_DB),
 ]);
-const asn = asnReader.get(ip) || {};
+const asn = asnReader?.get(ip) || {};
 const countryData = countryReader?.get(ip) || {};
 const cityData = cityReader?.get(ip) || {};
 const country = cityData.country || countryData.country || {};
@@ -1783,7 +1919,14 @@ console.log(JSON.stringify({
   },
 }));
 NODE
-  )
+    ) || true
+    if [ -n "$response" ] && printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      printf '%s' "$response"
+      return 0
+    fi
+  fi
+
+  lookup_maxmind_mmdblookup "$ip"
 }
 
 lookup_maxmind() {
@@ -2851,8 +2994,17 @@ run_one() {
     if [[ "$ip" != *:* ]]; then
       lookup_active_neighbors "$ip"
     fi
+  fi
+
+  # MaxMind Enterprise 的 IP risk 作为 /24 属性缓存：同一 /24 内的其它
+  # IP 仍保留各自的基础信息，但风险分数统一沿用该网段首次成功查询的值。
+  if ! load_maxmind_risk_cache "$ip"; then
+    save_maxmind_risk_cache "$ip"
+  fi
+  if [ "$DATABASE_CACHE_HIT" -eq 0 ]; then
     save_database_cache "$ip"
   fi
+
   run_ai_checks
   print_type_report "$ip"
   write_report_json "$ip"
