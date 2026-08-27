@@ -159,7 +159,7 @@ fetch_json() {
 }
 
 fetch_json_post() {
-  local url="$1" body="$2" token="${3:-}"
+  local url="$1" body="$2" token="${3:-}" family="${4:-}"
   local args=(
     -sSL
     --connect-timeout 5
@@ -169,6 +169,10 @@ fetch_json_post() {
     -H 'user-agent: TcpQuality-IPQuality/0.1'
     --data-raw "$body"
   )
+  case "$family" in
+    4) args+=(-4) ;;
+    6) args+=(-6) ;;
+  esac
   if [ -n "$token" ]; then
     args+=(-H "authorization: Bearer ${token}")
   fi
@@ -684,7 +688,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics-local-v1"
+  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics-local-v2|dbip-ip-v2"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -2122,13 +2126,15 @@ lookup_ipquality_paid() {
     return 0
   fi
 
-  local base response error challenge_id nonce difficulty target_ip solution
+  local base response error challenge_id nonce difficulty target_ip solution family=4
   local token token_response lookup_response usage_raw company_raw risk_score
+  [[ "$ip" == *:* ]] && family=6
   base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
   [ -n "$base" ] || return 0
 
   response=$(fetch_json_post "$base/ipquality/challenge" \
-    "$(jq -nc --arg ip "$ip" --arg provider "$provider" '{ip:$ip,provider:$provider}')" || true)
+    "$(jq -nc --arg ip "$ip" --arg provider "$provider" '{ip:$ip,provider:$provider}')" \
+    "" "$family" || true)
   if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
     if [ "$provider" = "maxmind" ]; then
       MAXMIND_USAGE_TYPE="$INVALID_STATUS"
@@ -2200,7 +2206,7 @@ lookup_ipquality_paid() {
 
   token_response=$(fetch_json_post "$base/ipquality/token" \
     "$(jq -nc --arg challengeId "$challenge_id" --arg solution "$solution" '{challengeId:$challengeId,solution:$solution}')" \
-    || true)
+    "" "$family" || true)
   token=$(jq_first_string "$token_response" '.token')
   if [ -z "$token" ]; then
     error=$(jq_first_string "$token_response" '.error')
@@ -2221,7 +2227,7 @@ lookup_ipquality_paid() {
     return 0
   fi
 
-  lookup_response=$(fetch_json_post "$base/ipquality/lookup" '{}' "$token" || true)
+  lookup_response=$(fetch_json_post "$base/ipquality/lookup" '{}' "$token" "$family" || true)
   if ! printf '%s' "$lookup_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
     if [ "$provider" = "maxmind" ]; then
       MAXMIND_USAGE_TYPE="$INVALID_STATUS"
@@ -2521,21 +2527,29 @@ fetch_dbip_self_json() {
     "https://api.db-ip.com/v2/${api_key}/self?convertCurrencies" 2>/dev/null || true
 }
 
+fetch_dbip_free_json() {
+  local ip="$1" family=4
+  [[ "$ip" == *:* ]] && family=6
+  curl "-$family" -sSL --connect-timeout 5 --max-time 12 \
+    -H 'accept: application/json' \
+    -H 'user-agent: TcpQuality-IPQuality/0.1' \
+    "https://api.db-ip.com/v2/free/${ip}" 2>/dev/null || true
+}
+
 lookup_dbip() {
-  local page api_key response error coordinates country_code country_name region city location continent
+  local page api_key response error coordinates country_code country_name registered region city location continent
   page=$(fetch_dbip_core_page || true)
   api_key=$(dbip_page_api_key "$page")
-  if [ -z "$api_key" ]; then
-    DBIP_USAGE_TYPE="$INVALID_STATUS"
-    basic_mark_provider dbip "$INVALID_STATUS"
-    return 0
+  response=""
+  if [ -n "$api_key" ]; then
+    response=$(fetch_dbip_self_json "$api_key")
+    if ! printf '%s' "$response" | jq -e --arg ip "$ip" \
+      'type == "object" and .ipAddress == $ip and (.errorCode == null)' >/dev/null 2>&1; then
+      response=""
+    fi
   fi
-
-  response=$(fetch_dbip_self_json "$api_key")
   if [ -z "$response" ]; then
-    DBIP_USAGE_TYPE="$INVALID_STATUS"
-    basic_mark_provider dbip "$INVALID_STATUS"
-    return 0
+    response=$(fetch_dbip_free_json "$ip")
   fi
 
   if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -2602,6 +2616,20 @@ lookup_dbip() {
   coordinates=$(jq_first_string "$response" 'select(.latitude != null and .longitude != null) | "\(.latitude),\(.longitude)"')
   country_code=$(jq_first_string "$response" '.countryCode')
   country_name=$(jq_first_string "$response" '.countryName')
+  registered=$(jq_first_string "$response" '
+    [
+      .registeredCountry,
+      .registered_country,
+      .registrationCountry,
+      .registration_country,
+      .network.registeredCountry,
+      .network.registered_country,
+      .data.registeredCountry,
+      .data.registered_country
+    ][]
+    | select(. != null and (type == "string" or type == "number"))
+    | tostring
+  ')
   region=$(jq_first_string "$response" '.stateProv')
   city=$(jq_first_string "$response" '.city')
   location=""
@@ -2617,6 +2645,7 @@ lookup_dbip() {
   basic_set dbip coordinates "$coordinates"
   basic_set dbip map "$(map_url_from_coordinates "$coordinates")"
   basic_set dbip city "$(if [ -n "$region" ] && [ -n "$city" ]; then printf '%s, %s' "$region" "$city"; else printf '%s%s' "$region" "$city"; fi)"
+  basic_set dbip registered "$(normalize_country_location "$registered")"
   continent=$(jq_first_string "$response" 'if .continentCode != null and .continentName != null then "[\(.continentCode)]\(.continentName)" elif .continentName != null then .continentName else empty end')
   [ -n "$continent" ] || continent=$(continent_from_country_value "$country_code")
   basic_set dbip continent "$continent"
