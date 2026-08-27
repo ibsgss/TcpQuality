@@ -1023,7 +1023,9 @@ report_color_prefix() {
   local color="$1" background
   if report_color_has_background "$color"; then
     background=$(report_background_color "$color")
-    printf '%s%s' "$background" "$color"
+    # The font sequence contains SGR 0, which resets an already selected
+    # background.  Set the font first and the background second.
+    printf '%s%s' "$color" "$background"
   else
     printf '%s' "$color"
   fi
@@ -1194,7 +1196,8 @@ report_risk_cell() {
   # 红黄绿风险值同时使用对应底纹，底纹覆盖整个固定风险值单元格，
   # 其他状态仅保留字体颜色。
   if report_color_has_background "$color"; then
-    printf '%s%s' "$(report_background_color "$color")" "$color"
+    # Set the background after the font; C_GREEN/C_YELLOW/C_RED include SGR 0.
+    printf '%s%s' "$color" "$(report_background_color "$color")"
     report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
