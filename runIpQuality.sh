@@ -2522,6 +2522,10 @@ lookup_ipquality_paid() {
     *) return 0 ;;
   esac
 
+  # 只要进入实际查询，就先清掉上一轮的 provider 状态；这样未配置、
+  # key 失效、未命中或响应不完整时，不会把旧的成功结果重新写入缓存。
+  ipquality_set_failure "$provider"
+
   local base response error challenge_id nonce difficulty target_ip solution family=4
   local token token_response lookup_response usage_raw company_raw risk_score risk_level risk_raw
   [[ "$ip" == *:* ]] && family=6
@@ -2538,7 +2542,6 @@ lookup_ipquality_paid() {
   error=$(jq_first_string "$response" '.error')
   if [ -n "$error" ]; then
     case "$error" in
-      maxmind_not_configured|scamalytics_not_configured|ipapi_not_configured) return 0 ;;
       ip_cooldown|challenge_rate_limited)
         ipquality_set_failure "$provider" "冷却" "$error"
         ;;
@@ -2583,9 +2586,6 @@ lookup_ipquality_paid() {
   fi
   error=$(jq_first_string "$lookup_response" '.error')
   if [ -n "$error" ]; then
-    case "$error" in
-      maxmind_not_configured|scamalytics_not_configured|ipapi_not_configured) return 0 ;;
-    esac
     ipquality_set_failure "$provider" "$INVALID_STATUS" "$error"
     return 0
   fi
@@ -3370,6 +3370,7 @@ run_one() {
   elif [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
     # 没有可复用的 risk 时，不能仅复用 MaxMind 的类型结果，否则 risk
     # 查询失败会被间接缓存。
+    cache_group_reset maxmind_paid
     MAXMIND_PAID_CACHE_HIT=0
   fi
 
