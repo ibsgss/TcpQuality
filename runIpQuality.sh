@@ -17,15 +17,15 @@ IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
 INVALID_STATUS="无效"
 
 C_CYAN=$'\033[36m'
-# Use the bright/intense form of the same ANSI 8-color foreground.  The
-# normal 41/43/42 backgrounds are the same color family; bold intensity keeps
-# the red/yellow/green text legible on those backgrounds.
-C_GREEN=$'\033[1;32m'
-C_YELLOW=$'\033[1;33m'
-C_RED=$'\033[1;31m'
-C_BG_RED=$'\033[41m'
-C_BG_YELLOW=$'\033[43m'
-C_BG_GREEN=$'\033[42m'
+# Keep the foreground as the normal ANSI 8-color red/yellow/green, and use
+# dark ANSI 8-bit (256-color) backgrounds so the same-color text remains
+# readable instead of being covered by 41/43/42.
+C_GREEN=$'\033[0;32m'
+C_YELLOW=$'\033[0;33m'
+C_RED=$'\033[0;31m'
+C_BG_RED=$'\033[48;5;52m'
+C_BG_YELLOW=$'\033[48;5;58m'
+C_BG_GREEN=$'\033[48;5;22m'
 C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 C_NC=$'\033[0m'
