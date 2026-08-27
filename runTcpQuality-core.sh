@@ -56,6 +56,7 @@ bootstrap_nixos_environment() {
     nixpkgs#nmap
     nixpkgs#iperf3
     nixpkgs#jq
+    nixpkgs#python3
     nixpkgs#traceroute
   )
   if [ "$need_speedtest" -eq 1 ]; then
@@ -4193,6 +4194,7 @@ run_ip_quality_mode() {
   local report_time csv
   check_curl
   check_command jq jq jq jq jq jq jq jq
+  echo -e "  ${DIM}正在执行 IP 质量检测，请稍候...${NC}"
   run_ip_quality_test
   show_ip_quality_results
   [ "$IPQUALITY_AVAILABLE" -eq 1 ] || return 1

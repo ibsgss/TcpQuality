@@ -207,6 +207,41 @@ NODE
     return $?
   fi
 
+  if command -v python3 >/dev/null 2>&1; then
+    export IPQUALITY_POW_NONCE="$nonce"
+    export IPQUALITY_POW_TARGET="$target_ip"
+    export IPQUALITY_POW_DIFFICULTY="$difficulty"
+    export IPQUALITY_POW_MAX_ITERATIONS="$max_iterations"
+    python3 - <<'PY'
+import hashlib
+import os
+import sys
+
+nonce = os.environ.get("IPQUALITY_POW_NONCE", "")
+target = os.environ.get("IPQUALITY_POW_TARGET", "")
+difficulty = int(os.environ.get("IPQUALITY_POW_DIFFICULTY", "0"))
+max_iterations = int(os.environ.get("IPQUALITY_POW_MAX_ITERATIONS", "0"))
+full_nibbles, remaining_bits = divmod(difficulty, 4)
+prefix = "0" * full_nibbles
+
+for solution in range(max_iterations):
+    digest = hashlib.sha256(
+        f"{nonce}:{target}:{solution}".encode("utf-8")
+    ).hexdigest()
+    if not digest.startswith(prefix):
+        continue
+    if not remaining_bits:
+        print(solution, end="")
+        sys.exit(0)
+    nibble = int(digest[full_nibbles] if len(digest) > full_nibbles else "f", 16)
+    if nibble < (1 << (4 - remaining_bits)):
+        print(solution, end="")
+        sys.exit(0)
+sys.exit(1)
+PY
+    return $?
+  fi
+
   command -v sha256sum >/dev/null 2>&1 || return 1
   local full_nibbles=$((difficulty / 4))
   local remaining_bits=$((difficulty % 4))
