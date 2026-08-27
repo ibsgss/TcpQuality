@@ -439,6 +439,9 @@ IPAPI_COMPANY_TYPE="$INVALID_STATUS"
 IPAPI_RISK_RAW=""
 IPAPI_RISK_SCORE=""
 IPAPI_RISK_LEVEL="$INVALID_STATUS"
+IPQUALITY_LOOKUP_RESPONSE=""
+IPQUALITY_LOOKUP_TOKEN=""
+IPQUALITY_LOOKUP_ERROR=""
 
 AI_USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/151 Safari/537.36"
 AI_PROBE_TIMEOUT_SECONDS="${AI_PROBE_TIMEOUT_SECONDS:-8}"
@@ -1724,6 +1727,99 @@ ipquality_set_failure() {
   esac
 }
 
+ipquality_fetch_lookup() {
+  local provider="$1" ip="$2"
+  local base response error challenge_id nonce difficulty target_ip solution family=4
+  local token_response token lookup_response
+  IPQUALITY_LOOKUP_RESPONSE=""
+  IPQUALITY_LOOKUP_TOKEN=""
+  IPQUALITY_LOOKUP_ERROR=""
+  [[ "$ip" == *:* ]] && family=6
+  base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
+  if [ -z "$base" ]; then
+    IPQUALITY_LOOKUP_ERROR="endpoint_unavailable"
+    return 1
+  fi
+
+  response=$(fetch_json_post "$base/ipquality/challenge" \
+    "$(jq -nc --arg ip "$ip" --arg provider "$provider" '{ip:$ip,provider:$provider}')" \
+    "" "$family" || true)
+  if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    IPQUALITY_LOOKUP_ERROR="invalid_challenge_response"
+    return 1
+  fi
+  error=$(jq_first_string "$response" '.error')
+  if [ -n "$error" ]; then
+    IPQUALITY_LOOKUP_ERROR="$error"
+    return 1
+  fi
+
+  challenge_id=$(jq_first_string "$response" '.challengeId')
+  nonce=$(jq_first_string "$response" '.nonce')
+  difficulty=$(jq_first_string "$response" '.difficulty')
+  target_ip=$(jq_first_string "$response" '.targetIp')
+  if [ -z "$challenge_id" ] || [ -z "$nonce" ] || [ -z "$target_ip" ]; then
+    IPQUALITY_LOOKUP_ERROR="invalid_challenge_response"
+    return 1
+  fi
+  difficulty="${difficulty:-16}"
+  solution=$(solve_ipquality_pow "$nonce" "$target_ip" "$difficulty" || true)
+  if [ -z "$solution" ]; then
+    IPQUALITY_LOOKUP_ERROR="pow_failed"
+    return 1
+  fi
+
+  token_response=$(fetch_json_post "$base/ipquality/token" \
+    "$(jq -nc --arg challengeId "$challenge_id" --arg solution "$solution" '{challengeId:$challengeId,solution:$solution}')" \
+    "" "$family" || true)
+  token=$(jq_first_string "$token_response" '.token')
+  if [ -z "$token" ]; then
+    IPQUALITY_LOOKUP_ERROR="$(jq_first_string "$token_response" '.error')"
+    [ -n "$IPQUALITY_LOOKUP_ERROR" ] || IPQUALITY_LOOKUP_ERROR="token_failed"
+    return 1
+  fi
+
+  lookup_response=$(fetch_json_post "$base/ipquality/lookup" '{}' "$token" "$family" || true)
+  if ! printf '%s' "$lookup_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    IPQUALITY_LOOKUP_ERROR="invalid_lookup_response"
+    return 1
+  fi
+  error=$(jq_first_string "$lookup_response" '.error')
+  if [ -n "$error" ]; then
+    IPQUALITY_LOOKUP_ERROR="$error"
+    if [ "$error" = "client_result_required" ]; then
+      IPQUALITY_LOOKUP_TOKEN="$token"
+      return 2
+    fi
+    return 1
+  fi
+  IPQUALITY_LOOKUP_RESPONSE="$lookup_response"
+  return 0
+}
+
+ipquality_submit_client_result() {
+  local provider="$1" ip="$2" result="$3" family=4 base response error body
+  [ -n "$IPQUALITY_LOOKUP_TOKEN" ] || return 1
+  [ -n "$result" ] || return 1
+  [[ "$ip" == *:* ]] && family=6
+  base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
+  [ -n "$base" ] || return 1
+  body=$(jq -nc --argjson clientResult "$result" '{clientResult:$clientResult}' 2>/dev/null) || return 1
+  response=$(fetch_json_post "$base/ipquality/lookup" "$body" "$IPQUALITY_LOOKUP_TOKEN" "$family" || true)
+  if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    IPQUALITY_LOOKUP_ERROR="invalid_upload_response"
+    return 1
+  fi
+  error=$(jq_first_string "$response" '.error')
+  if [ -n "$error" ]; then
+    IPQUALITY_LOOKUP_ERROR="$error"
+    return 1
+  fi
+  IPQUALITY_LOOKUP_RESPONSE="$response"
+  IPQUALITY_LOOKUP_TOKEN=""
+  return 0
+}
+
 lookup_ipquality_paid() {
   local provider="$1" ip="$2"
   if [ "$provider" = "maxmind" ] && [ "$IPQUALITY_PAID_LOOKUP" != "1" ]; then
@@ -1966,7 +2062,7 @@ lookup_maxmind_paid() {
   lookup_ipquality_paid maxmind "$1"
 }
 
-lookup_ip2location() {
+lookup_ip2location_direct() {
   local ip="$1" response demo_text usage_section company_section fraud_score
   local country registered region city coordinates isp asn timezone
   response=$(fetch_ip2location_demo "$ip" || true)
@@ -2045,7 +2141,7 @@ lookup_ip2location() {
   fi
 }
 
-lookup_ipinfo() {
+lookup_ipinfo_direct() {
   local ip="$1" response coordinates country registered region city city_info location continent
   response=$(fetch_json "https://ipinfo.io/widget/demo/${ip}" || true)
   if [ -z "$response" ] || ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -2313,7 +2409,7 @@ compact_neighbor_count() {
   fi
 }
 
-lookup_active_neighbors() {
+lookup_active_neighbors_direct() {
   local ip="$1" prefix prefix_length prefix_total prefix_total_display index
   local subnet_prefix subnet_active prefix_active
   ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
@@ -2499,6 +2595,300 @@ active_neighbor_json() {
   printf '%s' "$result"
 }
 
+ipquality_client_provider_failure() {
+  local provider="$1"
+  case "$provider" in
+    ip2location)
+      IP2LOCATION_USAGE_RAW=""
+      IP2LOCATION_COMPANY_RAW=""
+      IP2LOCATION_USAGE_TYPE="$INVALID_STATUS"
+      IP2LOCATION_COMPANY_TYPE="$INVALID_STATUS"
+      IP2LOCATION_IP_TYPE=""
+      IP2LOCATION_RISK_SCORE=""
+      IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
+      basic_mark_provider ip2location "$INVALID_STATUS"
+      ;;
+    ipinfo)
+      IPINFO_USAGE_RAW=""
+      IPINFO_COMPANY_RAW=""
+      IPINFO_USAGE_TYPE="$INVALID_STATUS"
+      IPINFO_COMPANY_TYPE="$INVALID_STATUS"
+      basic_mark_provider ipinfo "$INVALID_STATUS"
+      ;;
+    active_neighbor)
+      ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
+      ACTIVE_NEIGHBOR_LABELS=()
+      ACTIVE_NEIGHBOR_SEGMENTS=()
+      ACTIVE_NEIGHBOR_ACTIVE=()
+      ACTIVE_NEIGHBOR_TOTAL=()
+      ;;
+  esac
+}
+
+ipquality_client_basic_value() {
+  local provider="$1" field="$2" value=""
+  case "$provider" in
+    ip2location) value="${BASIC_IP2LOCATION[$field]:-}" ;;
+    ipinfo) value="${BASIC_IPINFO[$field]:-}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+ipquality_client_result_json() {
+  local provider="$1" ip="$2" active_json
+  local asn organization coordinates map city registered continent timezone location
+  local usage_type usage_raw company_type company_raw risk_score risk_level ip_type
+
+  case "$provider" in
+    ip2location|ipinfo)
+      asn=$(ipquality_client_basic_value "$provider" asn)
+      organization=$(ipquality_client_basic_value "$provider" organization)
+      coordinates=$(ipquality_client_basic_value "$provider" coordinates)
+      map=$(ipquality_client_basic_value "$provider" map)
+      city=$(ipquality_client_basic_value "$provider" city)
+      registered=$(ipquality_client_basic_value "$provider" registered)
+      continent=$(ipquality_client_basic_value "$provider" continent)
+      timezone=$(ipquality_client_basic_value "$provider" timezone)
+      location=$(ipquality_client_basic_value "$provider" location)
+      if [ "$provider" = "ip2location" ]; then
+        usage_type="$IP2LOCATION_USAGE_TYPE"
+        usage_raw="$IP2LOCATION_USAGE_RAW"
+        company_type="$IP2LOCATION_COMPANY_TYPE"
+        company_raw="$IP2LOCATION_COMPANY_RAW"
+        risk_score="$IP2LOCATION_RISK_SCORE"
+        risk_level="$IP2LOCATION_RISK_LEVEL"
+        ip_type="$IP2LOCATION_IP_TYPE"
+      else
+        usage_type="$IPINFO_USAGE_TYPE"
+        usage_raw="$IPINFO_USAGE_RAW"
+        company_type="$IPINFO_COMPANY_TYPE"
+        company_raw="$IPINFO_COMPANY_RAW"
+        risk_score=""
+        risk_level="$INVALID_STATUS"
+        ip_type=""
+      fi
+      jq -cn \
+        --arg provider "$provider" \
+        --arg ip "$ip" \
+        --arg asn "$asn" \
+        --arg organization "$organization" \
+        --arg coordinates "$coordinates" \
+        --arg map "$map" \
+        --arg city "$city" \
+        --arg registered "$registered" \
+        --arg continent "$continent" \
+        --arg timezone "$timezone" \
+        --arg location "$location" \
+        --arg usageType "$usage_type" \
+        --arg usageTypeRaw "$usage_raw" \
+        --arg companyType "$company_type" \
+        --arg companyTypeRaw "$company_raw" \
+        --arg riskScore "$risk_score" \
+        --arg riskLevel "$risk_level" \
+        --arg ipType "$ip_type" \
+        '{
+          provider: $provider,
+          ip: $ip,
+          basic: {
+            asn: $asn,
+            organization: $organization,
+            coordinates: $coordinates,
+            map: $map,
+            city: $city,
+            registered: $registered,
+            continent: $continent,
+            timezone: $timezone,
+            location: $location
+          },
+          attributes: {
+            usageType: $usageType,
+            usageTypeRaw: $usageTypeRaw,
+            companyType: $companyType,
+            companyTypeRaw: $companyTypeRaw,
+            riskScore: $riskScore,
+            riskLevel: $riskLevel,
+            ipType: $ipType
+          }
+        }'
+      ;;
+    active_neighbor)
+      active_json=$(active_neighbor_json)
+      jq -cn \
+        --arg provider "$provider" \
+        --arg ip "$ip" \
+        --arg activeNeighbor "$ACTIVE_NEIGHBOR_VALUE" \
+        --argjson activeNeighbors "$active_json" \
+        '{
+          provider: $provider,
+          ip: $ip,
+          activeNeighbor: $activeNeighbor,
+          activeNeighbors: $activeNeighbors
+        }'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ipquality_apply_client_result() {
+  local provider="$1" response="$2" field value usage_type usage_raw company_type company_raw
+  local risk_score risk_level
+  if ! printf '%s' "$response" | jq -e --arg provider "$provider" '.provider == $provider' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  case "$provider" in
+    ip2location|ipinfo)
+      for field in "${BASIC_FIELDS[@]}"; do
+        value=$(jq_first_string "$response" ".basic.${field}")
+        basic_set "$provider" "$field" "$value"
+      done
+      usage_raw=$(jq_first_string "$response" '.attributes.usageTypeRaw')
+      usage_type=$(jq_first_string "$response" '.attributes.usageType')
+      company_raw=$(jq_first_string "$response" '.attributes.companyTypeRaw')
+      company_type=$(jq_first_string "$response" '.attributes.companyType')
+      if [ "$provider" = "ip2location" ]; then
+        IP2LOCATION_USAGE_RAW="$usage_raw"
+        IP2LOCATION_COMPANY_RAW="$company_raw"
+        if [ -n "$usage_type" ] && [ "$usage_type" != "$INVALID_STATUS" ] && [ "$usage_type" != "-" ]; then
+          IP2LOCATION_USAGE_TYPE="$usage_type"
+        elif [ -n "$usage_raw" ]; then
+          IP2LOCATION_USAGE_TYPE=$(ip2location_label "$usage_raw")
+        else
+          IP2LOCATION_USAGE_TYPE="$INVALID_STATUS"
+        fi
+        if [ -n "$company_type" ] && [ "$company_type" != "$INVALID_STATUS" ] && [ "$company_type" != "-" ]; then
+          IP2LOCATION_COMPANY_TYPE="$company_type"
+        elif [ -n "$company_raw" ]; then
+          IP2LOCATION_COMPANY_TYPE=$(ip2location_label "$company_raw")
+        else
+          IP2LOCATION_COMPANY_TYPE="$INVALID_STATUS"
+        fi
+        IP2LOCATION_IP_TYPE=$(jq_first_string "$response" '.attributes.ipType')
+        risk_score=$(jq_first_string "$response" '.attributes.riskScore')
+        risk_level=$(jq_first_string "$response" '.attributes.riskLevel')
+        if risk_score_valid "$risk_score"; then
+          IP2LOCATION_RISK_SCORE="$risk_score"
+          IP2LOCATION_RISK_LEVEL=$(risk_level_from_score ip2location "$risk_score")
+        elif [ -n "$risk_level" ] && [ "$risk_level" != "$INVALID_STATUS" ] && [ "$risk_level" != "-" ]; then
+          IP2LOCATION_RISK_SCORE=""
+          IP2LOCATION_RISK_LEVEL="$risk_level"
+        else
+          IP2LOCATION_RISK_SCORE=""
+          IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
+        fi
+      else
+        IPINFO_USAGE_RAW="$usage_raw"
+        IPINFO_COMPANY_RAW="$company_raw"
+        if [ -n "$usage_type" ] && [ "$usage_type" != "$INVALID_STATUS" ] && [ "$usage_type" != "-" ]; then
+          IPINFO_USAGE_TYPE="$usage_type"
+        elif [ -n "$usage_raw" ]; then
+          IPINFO_USAGE_TYPE=$(ipinfo_label "$usage_raw")
+        else
+          IPINFO_USAGE_TYPE="$INVALID_STATUS"
+        fi
+        if [ -n "$company_type" ] && [ "$company_type" != "$INVALID_STATUS" ] && [ "$company_type" != "-" ]; then
+          IPINFO_COMPANY_TYPE="$company_type"
+        elif [ -n "$company_raw" ]; then
+          IPINFO_COMPANY_TYPE=$(ipinfo_label "$company_raw")
+        else
+          IPINFO_COMPANY_TYPE="$INVALID_STATUS"
+        fi
+      fi
+      return 0
+      ;;
+    active_neighbor)
+      ACTIVE_NEIGHBOR_VALUE=$(jq_first_string "$response" '.activeNeighbor')
+      ACTIVE_NEIGHBOR_LABELS=()
+      ACTIVE_NEIGHBOR_SEGMENTS=()
+      ACTIVE_NEIGHBOR_ACTIVE=()
+      ACTIVE_NEIGHBOR_TOTAL=()
+      while IFS= read -r value; do
+        [ -n "$value" ] || continue
+        local label segment active total
+        label=$(jq_first_string "$value" '.label')
+        segment=$(jq_first_string "$value" '.segment')
+        active=$(jq_first_string "$value" '.active')
+        total=$(jq_first_string "$value" '.total')
+        [ -n "$label" ] && [ -n "$segment" ] || continue
+        [[ "$active" =~ ^[0-9]+$ ]] || continue
+        [[ "$total" =~ ^[0-9]+$ ]] || continue
+        ACTIVE_NEIGHBOR_LABELS+=("$label")
+        ACTIVE_NEIGHBOR_SEGMENTS+=("$segment")
+        ACTIVE_NEIGHBOR_ACTIVE+=("$active")
+        ACTIVE_NEIGHBOR_TOTAL+=("$total")
+      done < <(printf '%s' "$response" | jq -c '.activeNeighbors[]?' 2>/dev/null)
+      case "$ACTIVE_NEIGHBOR_VALUE" in
+        ""|"-"|"$INVALID_STATUS"|失败|未知|冷却) return 1 ;;
+      esac
+      [ "${#ACTIVE_NEIGHBOR_SEGMENTS[@]}" -gt 0 ] || return 1
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+lookup_ip2location() {
+  local ip="$1" result
+  ipquality_client_provider_failure ip2location
+  if ipquality_fetch_lookup ip2location "$ip"; then
+    if ipquality_apply_client_result ip2location "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+
+  lookup_ip2location_direct "$ip"
+  if [ -n "$IPQUALITY_LOOKUP_TOKEN" ]; then
+    result=$(ipquality_client_result_json ip2location "$ip" 2>/dev/null || true)
+    if [ -n "$result" ] &&
+       ipquality_submit_client_result ip2location "$ip" "$result" &&
+       ipquality_apply_client_result ip2location "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+}
+
+lookup_ipinfo() {
+  local ip="$1" result
+  ipquality_client_provider_failure ipinfo
+  if ipquality_fetch_lookup ipinfo "$ip"; then
+    if ipquality_apply_client_result ipinfo "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+
+  lookup_ipinfo_direct "$ip"
+  if [ -n "$IPQUALITY_LOOKUP_TOKEN" ]; then
+    result=$(ipquality_client_result_json ipinfo "$ip" 2>/dev/null || true)
+    if [ -n "$result" ] &&
+       ipquality_submit_client_result ipinfo "$ip" "$result" &&
+       ipquality_apply_client_result ipinfo "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+}
+
+lookup_active_neighbors() {
+  local ip="$1" result
+  ipquality_client_provider_failure active_neighbor
+  if ipquality_fetch_lookup active_neighbor "$ip"; then
+    if ipquality_apply_client_result active_neighbor "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+
+  lookup_active_neighbors_direct "$ip"
+  if [ -n "$IPQUALITY_LOOKUP_TOKEN" ]; then
+    result=$(ipquality_client_result_json active_neighbor "$ip" 2>/dev/null || true)
+    if [ -n "$result" ] &&
+       ipquality_submit_client_result active_neighbor "$ip" "$result" &&
+       ipquality_apply_client_result active_neighbor "$IPQUALITY_LOOKUP_RESPONSE"; then
+      return 0
+    fi
+  fi
+}
+
 write_report_json() {
   local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
   local basic_asn basic_organization basic_coordinates basic_city basic_continent
@@ -2639,8 +3029,9 @@ run_one() {
   local ip="$1"
   reset_results
 
-  # MaxMind 基础信息和在线 IP Quality 都由服务端通过 PoW 查询；客户端
-  # 不读取 MMDB，也不保留任何数据库结果缓存。
+  # MaxMind 基础信息和带 key 的 IP Quality 由服务端通过 PoW 查询；
+  # IP2Location、IPinfo、活跃邻居先查服务端缓存，未命中才由客户端直查并回传。
+  # 客户端不读取 MMDB，也不保留任何数据库结果缓存。
   lookup_maxmind "$ip"
   if [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
     lookup_maxmind_paid "$ip"
