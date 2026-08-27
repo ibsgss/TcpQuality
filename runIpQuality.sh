@@ -1026,9 +1026,8 @@ report_color_prefix() {
   local color="$1" background
   if report_color_has_background "$color"; then
     background=$(report_background_color "$color")
-    # Keep the title blue for colored IPQuality cells; the background does
-    # not reset the foreground.
-    printf '%s%s' "$C_CYAN" "$background"
+    # Use pure white text on the existing red/yellow/green backgrounds.
+    printf '%s%s' "$C_WHITE" "$background"
   else
     printf '%s' "$color"
   fi
@@ -1199,7 +1198,7 @@ report_risk_cell() {
   # 红黄绿风险值同时使用对应底纹，底纹覆盖整个固定风险值单元格，
   # 其他状态仅保留字体颜色。
   if report_color_has_background "$color"; then
-    printf '%s%s' "$C_CYAN" "$(report_background_color "$color")"
+    printf '%s%s' "$C_WHITE" "$(report_background_color "$color")"
     report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
@@ -1385,42 +1384,81 @@ report_port_line() {
 }
 
 resolve_tcp_targets() {
-  local family="$1" host="$2"
-  command -v getent >/dev/null 2>&1 || return 0
-  getent "ahostsv${family}" "$host" 2>/dev/null \
-    | awk '!seen[$1]++ { print $1 }'
+  local family="$1" host="$2" resolved=""
+
+  # Resolve the requested address family first.  Connecting to the resulting
+  # literal address means the probe does not depend on nc supporting -4/-6.
+  if command -v getent >/dev/null 2>&1; then
+    resolved=$(getent "ahostsv${family}" "$host" 2>/dev/null \
+      | awk '!seen[$1]++ { print $1 }' || true)
+  fi
+
+  # Alpine/minimal images may not contain getent, while dig is already part
+  # of the IPQuality runtime dependencies.
+  if [ -z "$resolved" ] && command -v dig >/dev/null 2>&1; then
+    if [ "$family" = "4" ]; then
+      resolved=$(dig +short +time=2 +tries=1 "$host" A 2>/dev/null \
+        | awk '/^[0-9]+(\.[0-9]+){3}$/ && !seen[$1]++ { print $1 }' || true)
+    else
+      resolved=$(dig +short +time=2 +tries=1 "$host" AAAA 2>/dev/null \
+        | awk '/:/ && !seen[$1]++ { print $1 }' || true)
+    fi
+  fi
+
+  printf '%s\n' "$resolved"
 }
 
 tcp_connect_target() {
-  local target="$1" port="$2"
+  local source_ip="$1" target="$2" port="$3"
   if command -v nc >/dev/null 2>&1; then
-    if nc -z -w 4 "$target" "$port" >/dev/null 2>&1; then
+    # Bind the tested public IP instead of relying on the implementation's
+    # family switch.  This is compatible with the nc invocation used by
+    # xykt/IPQuality and works for both IPv4 and IPv6 literals.
+    if [ -n "$source_ip" ] &&
+       nc -s "$source_ip" -z -w 4 "$target" "$port" >/dev/null 2>&1; then
       return 0
     fi
   fi
 
-  # 使用 Bash 原生 TCP 重试，避免把“已建立但没有应用层数据”的连接误判为失败。
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 bash -c ':</dev/tcp/$1/$2' _ "$target" "$port" >/dev/null 2>&1
+  # If this nc does not support -s (or cannot bind the address), use a real
+  # socket so the fallback still tests the exact source IP.  Do not bind a
+  # fixed source port; port 25 may already be occupied locally.
+  if command -v python3 >/dev/null 2>&1 && [ -n "$source_ip" ]; then
+    python3 - "$source_ip" "$target" "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+source_ip, target, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+family = socket.AF_INET6 if ":" in source_ip else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_STREAM)
+sock.settimeout(4)
+try:
+    if family == socket.AF_INET6:
+        sock.bind((source_ip, 0, 0, 0))
+        sock.connect((target, port, 0, 0))
+    else:
+        sock.bind((source_ip, 0))
+        sock.connect((target, port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
     return $?
   fi
 
+  # Do not fall back to an unbound connection: that could test a different
+  # local address and falsely report the requested IPv4/IPv6 path as open.
   return 1
 }
 
 tcp_port_probe() {
-  local family="$1" host="$2" port="$3" family_flag target
-  family_flag="-${family}"
-  if command -v nc >/dev/null 2>&1; then
-    if nc "$family_flag" -z -w 4 "$host" "$port" >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
+  local family="$1" source_ip="$2" host="$3" port="$4" target
 
-  # 某些 nc 实现不支持 -4/-6；先按地址族解析，再对 IP 字面量建连。
+  # 某些 nc 实现不支持 -4/-6；按地址族解析，再对 IP 字面量并绑定源 IP 建连。
   while IFS= read -r target; do
     [ -n "$target" ] || continue
-    if tcp_connect_target "$target" "$port"; then
+    if tcp_connect_target "$source_ip" "$target" "$port"; then
       return 0
     fi
   done < <(resolve_tcp_targets "$family" "$host")
@@ -1429,11 +1467,12 @@ tcp_port_probe() {
 }
 
 check_port_status() {
-  local family="$1" port="$2" target
+  local family="$1" source_ip="$2" port="$3" target
+  shift
   shift
   shift
   for target in "$@"; do
-    if tcp_port_probe "$family" "$target" "$port"; then
+    if tcp_port_probe "$family" "$source_ip" "$target" "$port"; then
       printf '%s' '可达'
       return 0
     fi
@@ -1442,10 +1481,10 @@ check_port_status() {
 }
 
 run_port_checks() {
-  local family="$1"
-  PORT_25_STATUS=$(check_port_status "$family" 25 "${PORT_25_TARGETS[@]}")
-  PORT_80_STATUS=$(check_port_status "$family" 80 "${PORT_80_TARGETS[@]}")
-  PORT_443_STATUS=$(check_port_status "$family" 443 "${PORT_443_TARGETS[@]}")
+  local family="$1" source_ip="$2"
+  PORT_25_STATUS=$(check_port_status "$family" "$source_ip" 25 "${PORT_25_TARGETS[@]}")
+  PORT_80_STATUS=$(check_port_status "$family" "$source_ip" 80 "${PORT_80_TARGETS[@]}")
+  PORT_443_STATUS=$(check_port_status "$family" "$source_ip" 443 "${PORT_443_TARGETS[@]}")
 }
 
 fetch_ai_page() {
@@ -3242,7 +3281,7 @@ main() {
       exit 1
     fi
     if [[ "$REQUESTED_IP" == *:* ]]; then requested_family=6; else requested_family=4; fi
-    run_port_checks "$requested_family"
+    run_port_checks "$requested_family" "$REQUESTED_IP"
     run_one "$REQUESTED_IP"
     print_port_report "$requested_family"
     return 0
@@ -3258,12 +3297,12 @@ main() {
     exit 1
   fi
   if [ -n "$ipv4" ]; then
-    run_port_checks 4
+    run_port_checks 4 "$ipv4"
     run_one "$ipv4"
     print_port_report 4
   fi
   if [ -n "$ipv6" ]; then
-    run_port_checks 6
+    run_port_checks 6 "$ipv6"
     run_one "$ipv6"
     print_port_report 6
   fi
