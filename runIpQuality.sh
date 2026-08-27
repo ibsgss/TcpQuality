@@ -12,34 +12,6 @@ REQUESTED_IP=""
 REQUESTED_FAMILY=""
 REPORT_JSON_FILE=""
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TCPQUALITY_ENV_FILE="${TCPQUALITY_ENV_FILE:-$SCRIPT_DIR/.env}"
-
-load_dotenv_var() {
-  local name="$1" env_file="$2" line value
-  [[ -v "$name" ]] && return 0
-  [ -r "$env_file" ] || return 0
-
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%$'\r'}"
-    case "$line" in
-      "$name"=*)
-        value="${line#*=}"
-        case "$value" in
-          \"*\") value="${value:1:${#value}-2}" ;;
-          \'*\') value="${value:1:${#value}-2}" ;;
-        esac
-        printf -v "$name" '%s' "$value"
-        export "$name"
-        return 0
-        ;;
-    esac
-  done < "$env_file"
-}
-
-# 只读取本地 .env 中与 Scamalytics 相关的变量，且保留已有环境变量优先级。
-load_dotenv_var SCAMALYTICS_USERNAME "$TCPQUALITY_ENV_FILE"
-load_dotenv_var SCAMALYTICS_API_KEY "$TCPQUALITY_ENV_FILE"
-load_dotenv_var SCAMALYTICS_API_ENDPOINT "$TCPQUALITY_ENV_FILE"
 
 MAXMIND_ASN_DB="${MAXMIND_ASN_DB:-/data/GeoLite2-ASN.mmdb}"
 MAXMIND_COUNTRY_DB="${MAXMIND_COUNTRY_DB:-/data/GeoLite2-Country.mmdb}"
@@ -47,14 +19,16 @@ MAXMIND_CITY_DB="${MAXMIND_CITY_DB:-/data/GeoLite2-City.mmdb}"
 MAXMIND_NODE_DIR="${MAXMIND_NODE_DIR:-$SCRIPT_DIR/server}"
 IPQUALITY_API_BASE="${IPQUALITY_API_BASE:-https://tcpquality.ibsgss.uk}"
 IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
-SCAMALYTICS_USERNAME="${SCAMALYTICS_USERNAME:-}"
-SCAMALYTICS_API_KEY="${SCAMALYTICS_API_KEY:-}"
-SCAMALYTICS_API_ENDPOINT="${SCAMALYTICS_API_ENDPOINT:-}"
-SCAMALYTICS_API_TIMEOUT_SECONDS="${SCAMALYTICS_API_TIMEOUT_SECONDS:-12}"
 # 数据库结果缓存 45 天；可用环境变量覆盖，端口和 AI 检测不进入缓存。
 IPQUALITY_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS:-3888000}"
 IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
 IPQUALITY_RISK_CACHE_DIR="${TCPQUALITY_IPQUALITY_RISK_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/maxmind-risk}"
+# IPv6 风险按常见的 /64 子网复用；可显式切换为 /48 或 /56。
+MAXMIND_RISK_IPV6_PREFIX="${TCPQUALITY_MAXMIND_RISK_IPV6_PREFIX:-64}"
+case "$MAXMIND_RISK_IPV6_PREFIX" in
+  48|56|64) ;;
+  *) MAXMIND_RISK_IPV6_PREFIX=64 ;;
+esac
 [[ "$IPQUALITY_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPQUALITY_CACHE_TTL_SECONDS=3888000
 INVALID_STATUS="无效"
 
@@ -644,9 +618,61 @@ maxmind_risk_cache_key() {
   local ip="$1"
   if [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     printf '%s.%s.%s.0/24' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  elif [[ "$ip" == *:* ]]; then
+    maxmind_ipv6_risk_cache_key "$ip"
   else
     return 1
   fi
+}
+
+maxmind_ipv6_risk_cache_key() {
+  local ip="${1,,}" left right zero_count part normalized partial
+  local -a left_parts=() right_parts=() parts=() normalized_parts=()
+  [[ "$ip" == *:* ]] || return 1
+
+  if [[ "$ip" == *::* ]]; then
+    left="${ip%%::*}"
+    right="${ip#*::}"
+    if [ -n "$left" ]; then
+      IFS=':' read -r -a left_parts <<< "$left"
+    fi
+    if [ -n "$right" ]; then
+      IFS=':' read -r -a right_parts <<< "$right"
+    fi
+    zero_count=$((8 - ${#left_parts[@]} - ${#right_parts[@]}))
+    [ "$zero_count" -ge 1 ] || return 1
+    parts=("${left_parts[@]}")
+    while [ "$zero_count" -gt 0 ]; do
+      parts+=(0)
+      zero_count=$((zero_count - 1))
+    done
+    parts+=("${right_parts[@]}")
+  else
+    IFS=':' read -r -a parts <<< "$ip"
+  fi
+
+  [ "${#parts[@]}" -eq 8 ] || return 1
+  for part in "${parts[@]}"; do
+    [[ "$part" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+    normalized=$(printf '%x' "$((16#$part))") || return 1
+    normalized_parts+=("$normalized")
+  done
+
+  case "$MAXMIND_RISK_IPV6_PREFIX" in
+    48)
+      printf '%s:%s:%s::/48' \
+        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}"
+      ;;
+    56)
+      partial=$(printf '%x' "$((16#${normalized_parts[3]} & 0xff00))") || return 1
+      printf '%s:%s:%s:%s::/56' \
+        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}" "$partial"
+      ;;
+    64)
+      printf '%s:%s:%s:%s::/64' \
+        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}" "${normalized_parts[3]}"
+      ;;
+  esac
 }
 
 maxmind_risk_cache_file_for_ip() {
@@ -658,7 +684,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics|${SCAMALYTICS_USERNAME}|${SCAMALYTICS_API_ENDPOINT}|${SCAMALYTICS_API_KEY}"
+  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics-local-v1"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -753,7 +779,7 @@ save_database_cache() {
 
 maxmind_risk_cache_signature() {
   local context hash
-  context="maxmind-risk|${IPQUALITY_API_BASE}"
+  context="maxmind-risk-v2|${IPQUALITY_API_BASE}|ipv6-prefix-${MAXMIND_RISK_IPV6_PREFIX}"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -978,6 +1004,55 @@ normalize_country_location() {
   else
     printf '[%s]' "$code"
   fi
+}
+
+country_continent_code() {
+  local code="${1^^}"
+  case "$code" in
+    AF|AM|AZ|BH|BD|BT|BN|KH|CN|CX|CC|CY|GE|HK|IN|ID|IR|IQ|IL|JP|JO|KZ|KW|KG|LA|LB|MO|MY|MV|MN|MM|NP|KP|OM|PK|PS|PH|QA|RU|SA|SG|KR|LK|SY|TW|TJ|TH|TL|TR|TM|AE|UZ|VN|YE)
+      printf 'AS'
+      ;;
+    AX|AL|AD|AT|BY|BE|BA|BG|HR|CZ|DK|EE|FO|FI|FR|DE|GI|GR|GG|HU|IS|IE|IM|IT|JE|XK|LV|LI|LT|LU|MT|MD|MC|ME|NL|MK|NO|PL|PT|RO|SM|RS|SK|SI|ES|SJ|SE|CH|UA|GB|VA)
+      printf 'EU'
+      ;;
+    DZ|AO|BJ|BW|BF|BI|CM|CV|CF|TD|KM|CG|CD|CI|DJ|EG|GQ|ER|SZ|ET|GA|GM|GH|GN|GW|KE|LS|LR|LY|MG|MW|ML|MR|MU|YT|MA|MZ|NA|NE|NG|RE|RW|SH|ST|SN|SC|SL|SO|ZA|SS|SD|TZ|TG|TN|UG|EH|ZM|ZW)
+      printf 'AF'
+      ;;
+    AQ|BV|GS|HM)
+      printf 'AN'
+      ;;
+    AI|AG|AW|BS|BB|BZ|BM|BQ|CA|KY|CR|CU|CW|DM|DO|SV|GL|GD|GP|GT|HT|HN|JM|MQ|MX|MS|NI|PA|PR|BL|KN|LC|MF|PM|VC|SX|TT|TC|US|UM|VI)
+      printf 'NA'
+      ;;
+    AR|BO|BR|CL|CO|EC|FK|GF|GY|PY|PE|SR|UY|VE)
+      printf 'SA'
+      ;;
+    AS|AU|CK|FJ|PF|GU|KI|MH|FM|NR|NC|NZ|NU|NF|MP|PW|PG|PN|WS|SB|TK|TO|TV|VU|WF)
+      printf 'OC'
+      ;;
+  esac
+}
+
+continent_zh_name() {
+  case "${1^^}" in
+    AF) printf '非洲' ;;
+    AN) printf '南极洲' ;;
+    AS) printf '亚洲' ;;
+    EU) printf '欧洲' ;;
+    NA) printf '北美洲' ;;
+    OC) printf '大洋洲' ;;
+    SA) printf '南美洲' ;;
+  esac
+}
+
+continent_from_country_value() {
+  local value="$1" code continent name
+  code=$(country_code_from_value "$value")
+  [ -n "$code" ] || return 0
+  continent=$(country_continent_code "$code")
+  [ -n "$continent" ] || return 0
+  name=$(continent_zh_name "$continent")
+  [ -n "$name" ] && printf '[%s]%s' "$continent" "$name" || printf '[%s]' "$continent"
 }
 
 basic_ip_type() {
@@ -2041,35 +2116,54 @@ lookup_maxmind() {
   MAXMIND_COMPANY_TYPE="无效"
 }
 
-lookup_maxmind_paid() {
-  local ip="$1"
-  [ "$IPQUALITY_PAID_LOOKUP" = "1" ] || return 0
+lookup_ipquality_paid() {
+  local provider="$1" ip="$2"
+  if [ "$provider" = "maxmind" ] && [ "$IPQUALITY_PAID_LOOKUP" != "1" ]; then
+    return 0
+  fi
+
   local base response error challenge_id nonce difficulty target_ip solution
   local token token_response lookup_response usage_raw company_raw risk_score
   base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
   [ -n "$base" ] || return 0
 
-  response=$(fetch_json_post "$base/ipquality/challenge" "$(jq -nc --arg ip "$ip" '{ip:$ip}')" || true)
+  response=$(fetch_json_post "$base/ipquality/challenge" \
+    "$(jq -nc --arg ip "$ip" --arg provider "$provider" '{ip:$ip,provider:$provider}')" || true)
   if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    if [ "$provider" = "maxmind" ]; then
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
     return 0
   fi
   error=$(jq_first_string "$response" '.error')
   if [ -n "$error" ]; then
     case "$error" in
-      maxmind_not_configured) return 0 ;;
+      maxmind_not_configured|scamalytics_not_configured) return 0 ;;
       ip_cooldown|challenge_rate_limited)
-        MAXMIND_USAGE_TYPE="冷却"
-        MAXMIND_COMPANY_TYPE="冷却"
-        MAXMIND_USAGE_RAW="$error"
-        MAXMIND_COMPANY_RAW="$error"
+        if [ "$provider" = "maxmind" ]; then
+          MAXMIND_USAGE_TYPE="冷却"
+          MAXMIND_COMPANY_TYPE="冷却"
+          MAXMIND_USAGE_RAW="$error"
+          MAXMIND_COMPANY_RAW="$error"
+        else
+          SCAMALYTICS_RISK_SCORE=""
+          SCAMALYTICS_RISK_LEVEL="冷却"
+        fi
         ;;
       *)
-        MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-        MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-        MAXMIND_USAGE_RAW="$error"
-        MAXMIND_COMPANY_RAW="$error"
+        if [ "$provider" = "maxmind" ]; then
+          MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+          MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+          MAXMIND_USAGE_RAW="$error"
+          MAXMIND_COMPANY_RAW="$error"
+        else
+          SCAMALYTICS_RISK_SCORE=""
+          SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+        fi
         ;;
     esac
     return 0
@@ -2080,17 +2174,27 @@ lookup_maxmind_paid() {
   difficulty=$(jq_first_string "$response" '.difficulty')
   target_ip=$(jq_first_string "$response" '.targetIp')
   if [ -z "$challenge_id" ] || [ -z "$nonce" ] || [ -z "$target_ip" ]; then
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    if [ "$provider" = "maxmind" ]; then
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
     return 0
   fi
   difficulty="${difficulty:-16}"
   solution=$(solve_ipquality_pow "$nonce" "$target_ip" "$difficulty" || true)
   if [ -z "$solution" ]; then
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    MAXMIND_USAGE_RAW="pow_failed"
-    MAXMIND_COMPANY_RAW="pow_failed"
+    if [ "$provider" = "maxmind" ]; then
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      MAXMIND_USAGE_RAW="pow_failed"
+      MAXMIND_COMPANY_RAW="pow_failed"
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
     return 0
   fi
 
@@ -2100,71 +2204,114 @@ lookup_maxmind_paid() {
   token=$(jq_first_string "$token_response" '.token')
   if [ -z "$token" ]; then
     error=$(jq_first_string "$token_response" '.error')
-    if [ "$error" = "ip_cooldown" ]; then
-      MAXMIND_USAGE_TYPE="冷却"
-      MAXMIND_COMPANY_TYPE="冷却"
+    if [ "$provider" = "maxmind" ]; then
+      if [ "$error" = "ip_cooldown" ]; then
+        MAXMIND_USAGE_TYPE="冷却"
+        MAXMIND_COMPANY_TYPE="冷却"
+      else
+        MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+        MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      fi
+      MAXMIND_USAGE_RAW="${error:-token_failed}"
+      MAXMIND_COMPANY_RAW="${error:-token_failed}"
     else
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL=$([ "$error" = "ip_cooldown" ] && printf '冷却' || printf '%s' "$INVALID_STATUS")
     fi
-    MAXMIND_USAGE_RAW="${error:-token_failed}"
-    MAXMIND_COMPANY_RAW="${error:-token_failed}"
     return 0
   fi
 
   lookup_response=$(fetch_json_post "$base/ipquality/lookup" '{}' "$token" || true)
   if ! printf '%s' "$lookup_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    if [ "$provider" = "maxmind" ]; then
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
     return 0
   fi
   error=$(jq_first_string "$lookup_response" '.error')
   if [ -n "$error" ]; then
-    if [ "$error" = "maxmind_not_configured" ]; then return 0; fi
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    MAXMIND_USAGE_RAW="$error"
-    MAXMIND_COMPANY_RAW="$error"
+    if [ "$error" = "maxmind_not_configured" ] || [ "$error" = "scamalytics_not_configured" ]; then
+      return 0
+    fi
+    if [ "$provider" = "maxmind" ]; then
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      MAXMIND_USAGE_RAW="$error"
+      MAXMIND_COMPANY_RAW="$error"
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
     return 0
   fi
 
-  usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
-  company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
-  MAXMIND_USAGE_RAW="$usage_raw"
-  MAXMIND_COMPANY_RAW="$company_raw"
-  if [ -n "$usage_raw" ]; then
-    MAXMIND_USAGE_TYPE=$(maxmind_label "$usage_raw")
-  else
-    MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-  fi
-  if [ -n "$company_raw" ]; then
-    MAXMIND_COMPANY_TYPE=$(maxmind_label "$company_raw")
-  else
-    MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-  fi
+  if [ "$provider" = "maxmind" ]; then
+    usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+    company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+    MAXMIND_USAGE_RAW="$usage_raw"
+    MAXMIND_COMPANY_RAW="$company_raw"
+    if [ -n "$usage_raw" ]; then
+      MAXMIND_USAGE_TYPE=$(maxmind_label "$usage_raw")
+    else
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+    fi
+    if [ -n "$company_raw" ]; then
+      MAXMIND_COMPANY_TYPE=$(maxmind_label "$company_raw")
+    else
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+    fi
 
-  risk_score=$(jq_first_string "$lookup_response" '
-    [
-      .attributes.riskScore,
-      .attributes.risk_score,
-      .attributes.ipRiskSnapshot,
-      .attributes.ip_risk_snapshot
-    ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  if risk_score_valid "$risk_score"; then
-    MAXMIND_RISK_SCORE="$risk_score"
-    MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$risk_score")
+    risk_score=$(jq_first_string "$lookup_response" '
+      [
+        .attributes.riskScore,
+        .attributes.risk_score,
+        .attributes.ipRiskSnapshot,
+        .attributes.ip_risk_snapshot
+      ][]
+      | select(. != null and (type == "string" or type == "number"))
+      | tostring
+    ')
+    if risk_score_valid "$risk_score"; then
+      MAXMIND_RISK_SCORE="$risk_score"
+      MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$risk_score")
+    else
+      MAXMIND_RISK_SCORE=""
+      MAXMIND_RISK_LEVEL="$INVALID_STATUS"
+    fi
   else
-    MAXMIND_RISK_SCORE=""
-    MAXMIND_RISK_LEVEL="$INVALID_STATUS"
+    risk_score=$(jq_first_string "$lookup_response" '
+      [
+        .attributes.riskScore,
+        .attributes.risk_score,
+        .riskScore,
+        .risk_score,
+        .score,
+        .fraud_score
+      ][]
+      | select(. != null and (type == "string" or type == "number"))
+      | tostring
+    ')
+    if risk_score_valid "$risk_score"; then
+      SCAMALYTICS_RISK_SCORE="$risk_score"
+      SCAMALYTICS_RISK_LEVEL=$(risk_level_from_score scamalytics "$risk_score")
+    else
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+    fi
   fi
+}
+
+lookup_maxmind_paid() {
+  lookup_ipquality_paid maxmind "$1"
 }
 
 lookup_ip2location() {
   local ip="$1" response demo_text usage_section company_section fraud_score
-  local country region city coordinates isp asn timezone
+  local country registered region city coordinates isp asn timezone
   response=$(fetch_ip2location_demo "$ip" || true)
   if [ -z "$response" ]; then
     IP2LOCATION_USAGE_TYPE="$INVALID_STATUS"
@@ -2187,6 +2334,7 @@ lookup_ip2location() {
   fi
 
   country=$(ip2location_country_value "$(ip2location_demo_value "$demo_text" "Country" "Region")")
+  registered=$(ip2location_country_value "$(ip2location_demo_value "$demo_text" "Registered Country" "Registered Region")")
   region=$(ip2location_demo_value "$demo_text" "Region" "City")
   city=$(ip2location_demo_value "$demo_text" "City" "Coordinates of City")
   coordinates=$(coordinates_from_text "$(ip2location_demo_value "$demo_text" "Coordinates of City" "ISP")")
@@ -2206,6 +2354,8 @@ lookup_ip2location() {
   basic_set ip2location coordinates "$coordinates"
   basic_set ip2location map "$(map_url_from_coordinates "$coordinates")"
   basic_set ip2location city "$city"
+  basic_set ip2location registered "$(normalize_country_location "$registered")"
+  basic_set ip2location continent "$(continent_from_country_value "$country")"
   basic_set ip2location timezone "$timezone"
   basic_set ip2location location "$(normalize_country_location "$country")"
 
@@ -2237,7 +2387,7 @@ lookup_ip2location() {
 }
 
 lookup_ipinfo() {
-  local ip="$1" response coordinates country region city city_info location
+  local ip="$1" response coordinates country registered region city city_info location continent
   response=$(fetch_json "https://ipinfo.io/widget/demo/${ip}" || true)
   if [ -z "$response" ] || ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
     IPINFO_USAGE_TYPE="$INVALID_STATUS"
@@ -2258,13 +2408,39 @@ lookup_ipinfo() {
   fi
   location=""
   if [ -n "$country" ]; then location=$(normalize_country_location "$country"); fi
+  registered=$(jq_first_string "$response" '
+    [
+      .data.registered_country,
+      .data.registeredCountry,
+      .data.registration_country,
+      .data.registrationCountry,
+      .registered_country,
+      .registeredCountry
+    ][]
+    | select(. != null and (type == "string" or type == "number"))
+    | tostring
+  ')
+  # IPinfo widget 没有独立的 registered_country；兼容其现有公开字段，只有在
+  # 真正的注册字段缺失时才使用 abuse 联系国家，并统一成国家显示格式。
+  [ -n "$registered" ] || registered=$(jq_first_string "$response" '.data.abuse.country')
+  continent=$(jq_first_string "$response" '
+    [
+      .data.continent.name,
+      .data.continent,
+      .continent.name,
+      .continent
+    ][]
+    | select(. != null and (type == "string" or type == "number"))
+    | tostring
+  ')
+  [ -n "$continent" ] || continent=$(continent_from_country_value "$country")
   basic_set ipinfo asn "$(jq_first_string "$response" '[.data.asn.asn, .data.org][] | select(. != null and (type == "string" or type == "number")) | tostring')"
   basic_set ipinfo organization "$(jq_first_string "$response" '[.data.company.name, .data.asn.name, .data.org][] | select(. != null and (type == "string" or type == "number")) | tostring')"
   basic_set ipinfo coordinates "$coordinates"
   basic_set ipinfo map "$(map_url_from_coordinates "$coordinates")"
   basic_set ipinfo city "$city_info"
-  basic_set ipinfo registered "$(jq_first_string "$response" '.data.abuse.country')"
-  basic_set ipinfo continent "$(jq_first_string "$response" '[.data.continent.name, .data.continent][] | select(. != null and (type == "string" or type == "number")) | tostring')"
+  basic_set ipinfo registered "$(normalize_country_location "$registered")"
+  basic_set ipinfo continent "$continent"
   basic_set ipinfo timezone "$(jq_first_string "$response" '.data.timezone')"
   basic_set ipinfo location "$location"
 
@@ -2301,82 +2477,8 @@ lookup_ipinfo() {
   fi
 }
 
-lookup_scamalytics_api() {
-  local ip="$1" endpoint url response score
-  [ -n "$SCAMALYTICS_USERNAME" ] || return 1
-  [ -n "$SCAMALYTICS_API_KEY" ] || return 1
-  [ -n "$SCAMALYTICS_API_ENDPOINT" ] || return 1
-
-  endpoint="${SCAMALYTICS_API_ENDPOINT%/}"
-  response=$(curl -fsSL --connect-timeout 5 \
-    --max-time "$SCAMALYTICS_API_TIMEOUT_SECONDS" \
-    -H 'accept: application/json' \
-    -H 'user-agent: TcpQuality-IPQuality/0.1' \
-    --get \
-    --data-urlencode "key=$SCAMALYTICS_API_KEY" \
-    --data-urlencode "ip=$ip" \
-    "${endpoint}/${SCAMALYTICS_USERNAME}" 2>/dev/null || true)
-  [ -n "$response" ] || return 1
-
-  score=$(jq_first_string "$response" '
-    [
-      .score,
-      .fraud_score,
-      .scamalytics_score,
-      .scamalytics.score,
-      .scamalytics.fraud_score,
-      .scamalytics.scamalytics_score,
-      .data.score,
-      .data.fraud_score,
-      .data.scamalytics_score
-    ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  risk_score_valid "$score" || return 1
-
-  SCAMALYTICS_RISK_SCORE="$score"
-  SCAMALYTICS_RISK_LEVEL=$(risk_level_from_score scamalytics "$score")
-  return 0
-}
-
-lookup_scamalytics_page() {
-  local ip="$1" response compact score
-  response=$(curl -fsSL --connect-timeout 5 --max-time 12 \
-    -H 'accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
-    -H 'referer: https://scamalytics.com/ip' \
-    -H "user-agent: $AI_USER_AGENT" \
-    "https://scamalytics.com/ip/${ip}" 2>/dev/null || true)
-  if [ -z "$response" ]; then
-    SCAMALYTICS_RISK_SCORE=""
-    SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    return 0
-  fi
-
-  compact=$(printf '%s' "$response" | tr '\r\n' ' ')
-  score=$(printf '%s' "$compact" \
-    | grep -oE '"score"[[:space:]]*:[[:space:]]*"[0-9]+([.][0-9]+)?"' \
-    | sed -n '1s/.*"\([0-9][0-9.]*\)".*/\1/p')
-  if [ -z "$score" ]; then
-    score=$(printf '%s' "$compact" \
-      | grep -oE 'Fraud Score:[^0-9]*[0-9]+([.][0-9]+)?' \
-      | sed -n '1s/.*\([0-9][0-9.]*\)$/\1/p')
-  fi
-  if risk_score_valid "$score"; then
-    SCAMALYTICS_RISK_SCORE="$score"
-    SCAMALYTICS_RISK_LEVEL=$(risk_level_from_score scamalytics "$score")
-  else
-    SCAMALYTICS_RISK_SCORE=""
-    SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-  fi
-}
-
 lookup_scamalytics() {
-  local ip="$1"
-  if lookup_scamalytics_api "$ip"; then
-    return 0
-  fi
-  lookup_scamalytics_page "$ip"
+  lookup_ipquality_paid scamalytics "$1"
 }
 
 fetch_dbip_core_page() {
@@ -2420,7 +2522,7 @@ fetch_dbip_self_json() {
 }
 
 lookup_dbip() {
-  local page api_key response error coordinates country_code country_name region city location
+  local page api_key response error coordinates country_code country_name region city location continent
   page=$(fetch_dbip_core_page || true)
   api_key=$(dbip_page_api_key "$page")
   if [ -z "$api_key" ]; then
@@ -2515,7 +2617,9 @@ lookup_dbip() {
   basic_set dbip coordinates "$coordinates"
   basic_set dbip map "$(map_url_from_coordinates "$coordinates")"
   basic_set dbip city "$(if [ -n "$region" ] && [ -n "$city" ]; then printf '%s, %s' "$region" "$city"; else printf '%s%s' "$region" "$city"; fi)"
-  basic_set dbip continent "$(jq_first_string "$response" 'if .continentCode != null and .continentName != null then "[\(.continentCode)]\(.continentName)" elif .continentName != null then .continentName else empty end')"
+  continent=$(jq_first_string "$response" 'if .continentCode != null and .continentName != null then "[\(.continentCode)]\(.continentName)" elif .continentName != null then .continentName else empty end')
+  [ -n "$continent" ] || continent=$(continent_from_country_value "$country_code")
+  basic_set dbip continent "$continent"
   basic_set dbip timezone "$(jq_first_string "$response" '.timeZone')"
   basic_set dbip location "$location"
 
@@ -2707,7 +2811,20 @@ lookup_active_neighbors() {
   # NetQuality 的邻居图和 /24 计算针对 IPv4；IPv6 没有对应的 IPv4 /24 邻居图。
   [[ "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 0
   prefix=$(bgp_tools_prefix "$ip" || true)
-  [ -n "$prefix" ] || return 0
+  if [ -z "$prefix" ]; then
+    # bgp.tools 的前缀页偶尔会被 CDN/WAF 拦截，但邻居图本身仍可能可用。
+    # 此时至少查询 IP 所在的 /24，避免把“前缀页失败”直接显示成无效。
+    subnet_prefix="${ip%.*}.0/24"
+    subnet_active=$(bgp_tools_active_count "$subnet_prefix" || true)
+    if [[ "$subnet_active" =~ ^[0-9]+$ ]]; then
+      ACTIVE_NEIGHBOR_VALUE="Subnet/24 ${subnet_active} / 256"
+      ACTIVE_NEIGHBOR_LABELS+=("Subnet/24")
+      ACTIVE_NEIGHBOR_SEGMENTS+=("${subnet_active} / 256")
+      ACTIVE_NEIGHBOR_ACTIVE+=("$subnet_active")
+      ACTIVE_NEIGHBOR_TOTAL+=(256)
+    fi
+    return 0
+  fi
   prefix_length="${prefix##*/}"
   [[ "$prefix_length" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]] || return 0
 

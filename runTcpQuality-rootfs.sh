@@ -35,7 +35,6 @@ TCPQUALITY_IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HO
 MAXMIND_ASN_DB="${MAXMIND_ASN_DB:-/data/GeoLite2-ASN.mmdb}"
 MAXMIND_COUNTRY_DB="${MAXMIND_COUNTRY_DB:-/data/GeoLite2-Country.mmdb}"
 MAXMIND_CITY_DB="${MAXMIND_CITY_DB:-/data/GeoLite2-City.mmdb}"
-TCPQUALITY_ENV_FILE="${TCPQUALITY_ENV_FILE:-}"
 OUTPUT_DIR="${TCPQUALITY_OUTPUT_DIR:-/tmp}"
 GUEST_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NEXTTRACE_RELEASE_API=https://api.github.com/repos/nxtrace/NTrace-core/releases/latest
@@ -43,7 +42,6 @@ NEXTTRACE_DOWNLOAD_TIMEOUT="${TCPQUALITY_NEXTTRACE_DOWNLOAD_TIMEOUT:-600}"
 DEBUG_MODE=0
 MIN_ROOTFS_FREE_KB=$((700 * 1024))
 IPQUALITY_REQUESTED=0
-IPQUALITY_ENV_GUEST=""
 
 usage() {
   cat <<'EOF'
@@ -1075,13 +1073,13 @@ install_guest_deps() {
     if [ -r "$ROOTFS_DIR/etc/tcpquality-rootfs-release" ] &&
        env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
          'for cmd in bash curl dig gawk ip iperf3 iptables jq ping nping sed ss tar traceroute bpftrace; do command -v "$cmd" >/dev/null || exit 1; done; test -r /usr/local/lib/libtcpquality-tcpinfo.so; test -r /usr/local/libexec/tcpquality-retrans-seq.bt; test -r /usr/local/libexec/tcpquality-retrans-skb.bt' &&
-       { [ "$IPQUALITY_REQUESTED" -eq 0 ] || env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c 'command -v mmdblookup >/dev/null 2>&1'; }; then
+       { [ "$IPQUALITY_REQUESTED" -eq 0 ] || env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c 'command -v mmdblookup >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1'; }; then
       echo "[√] 预构建 rootfs 依赖已就绪"
       return 0
     fi
     local apt_log="$GUEST_TMP_HOST/debian-rootfs-apt.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/bash -c \
-      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod mmdb-bin nmap ncurses-bin bpftrace sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
+      'export DEBIAN_FRONTEND=noninteractive PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates coreutils curl dnsutils findutils gawk grep iperf3 iproute2 iptables iputils-ping jq kmod mmdb-bin nmap ncurses-bin bpftrace python3 sed tar traceroute tzdata && rm -rf /var/lib/apt/lists/*' \
       >"$apt_log" 2>&1; then
       echo "[X] Debian rootfs 依赖安装失败" >&2
       echo "[i] apt/dpkg 日志已保留: $apt_log" >&2
@@ -1094,7 +1092,7 @@ install_guest_deps() {
   else
     local apk_log="$GUEST_TMP_HOST/alpine-rootfs-apk.log"
     if ! env -i HOME=/root "PATH=$GUEST_PATH" TERM=dumb chroot "$ROOTFS_DIR" /bin/sh -c \
-      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod libmaxminddb ncurses nmap-nping sed tar traceroute tzdata' \
+      'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk add --no-cache bash bind-tools ca-certificates coreutils curl findutils gawk grep iperf3 iproute2 iptables iputils jq kmod libmaxminddb ncurses nmap-nping python3 sed tar traceroute tzdata' \
       >"$apk_log" 2>&1; then
       echo "[X] Alpine rootfs 依赖安装失败" >&2
       echo "[i] apk 日志已保留: $apk_log" >&2
@@ -1216,7 +1214,7 @@ ensure_guest_tcp_info_support() {
 }
 
 prepare_guest_files() {
-  local nexttrace_path arg ipquality_path env_candidate
+  local nexttrace_path arg ipquality_path
   mkdir -p "$ROOTFS_DIR/root" "$ROOTFS_DIR/usr/local/bin"
   cp "$TARGET_SCRIPT" "$ROOTFS_DIR/root/runTcpQuality.sh"
   chmod 0755 "$ROOTFS_DIR/root/runTcpQuality.sh"
@@ -1230,17 +1228,6 @@ prepare_guest_files() {
     cp -L "$ipquality_path" "$ROOTFS_DIR/root/runIpQuality.sh"
     chmod 0755 "$ROOTFS_DIR/root/runIpQuality.sh"
 
-    for env_candidate in \
-      "${TCPQUALITY_ENV_FILE:-}" \
-      "$PWD/.env" \
-      "$SCRIPT_DIR/.env"; do
-      if [ -n "$env_candidate" ] && [ -r "$env_candidate" ]; then
-        cp -L "$env_candidate" "$ROOTFS_DIR/root/.env"
-        chmod 0600 "$ROOTFS_DIR/root/.env"
-        IPQUALITY_ENV_GUEST=/root/.env
-        break
-      fi
-    done
   fi
 
   for arg in "$@"; do
@@ -1311,7 +1298,6 @@ if [ "${INTERACTIVE_INCLUDE_DEFAULT_ROUTE:-0}" -eq 1 ]; then
 fi
 if [ "$IPQUALITY_REQUESTED" -eq 1 ]; then
   guest_env+=(TCPQUALITY_IPQUALITY_CACHE_DIR=/tmp/ipquality-cache)
-  [ -n "$IPQUALITY_ENV_GUEST" ] && guest_env+=("TCPQUALITY_ENV_FILE=$IPQUALITY_ENV_GUEST")
 fi
 for env_name in \
   GET_NODES_URL TCPQUALITY_REPORT_API TCPQUALITY_RANK_SESSION_API \
@@ -1319,10 +1305,9 @@ for env_name in \
   TCPQUALITY_TCP_INFO TCPQUALITY_TCP_INFO_PRELOAD TCPQUALITY_RETRANS_TRACE \
   TCPQUALITY_RETRANS_TRACE_SCRIPT TCPQUALITY_RETRANS_TRACE_FALLBACK_SCRIPT \
   TCPQUALITY_BPFTRACE_BTF TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS \
+  TCPQUALITY_MAXMIND_RISK_IPV6_PREFIX \
   MAXMIND_ASN_DB MAXMIND_COUNTRY_DB MAXMIND_CITY_DB MAXMIND_NODE_DIR \
-  IPQUALITY_API_BASE IPQUALITY_PAID_LOOKUP \
-  SCAMALYTICS_USERNAME SCAMALYTICS_API_KEY SCAMALYTICS_API_ENDPOINT \
-  SCAMALYTICS_API_TIMEOUT_SECONDS AI_PROBE_TIMEOUT_SECONDS \
+  IPQUALITY_API_BASE IPQUALITY_PAID_LOOKUP AI_PROBE_TIMEOUT_SECONDS \
   HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
   http_proxy https_proxy no_proxy all_proxy; do
   if [ "${!env_name+x}" = x ]; then
