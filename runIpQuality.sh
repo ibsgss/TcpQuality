@@ -1026,9 +1026,9 @@ report_color_prefix() {
   local color="$1" background
   if report_color_has_background "$color"; then
     background=$(report_background_color "$color")
-    # Set white text first, then the colored background; the background does
+    # Keep the title blue for colored IPQuality cells; the background does
     # not reset the foreground.
-    printf '%s%s' "$C_WHITE" "$background"
+    printf '%s%s' "$C_CYAN" "$background"
   else
     printf '%s' "$color"
   fi
@@ -1199,7 +1199,7 @@ report_risk_cell() {
   # 红黄绿风险值同时使用对应底纹，底纹覆盖整个固定风险值单元格，
   # 其他状态仅保留字体颜色。
   if report_color_has_background "$color"; then
-    printf '%s%s' "$C_WHITE" "$(report_background_color "$color")"
+    printf '%s%s' "$C_CYAN" "$(report_background_color "$color")"
     report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
@@ -1245,6 +1245,7 @@ ai_status_color() {
   local value="$1"
   case "$value" in
     解锁) printf '%s' "$C_GREEN" ;;
+    仅网页|仅APP) printf '%s' "$C_YELLOW" ;;
     屏蔽|失败) printf '%s' "$C_RED" ;;
     -|—|"") printf '%s' "$C_DIM" ;;
     *) : ;;
@@ -1458,6 +1459,19 @@ fetch_ai_page() {
     "$url" 2>/dev/null || true
 }
 
+fetch_ai_response() {
+  local url="$1"
+  shift
+  curl -sS -L --compressed --connect-timeout 5 --max-time "$AI_PROBE_TIMEOUT_SECONDS" \
+    -A "$AI_USER_AGENT" \
+    -H 'accept: application/json,text/html,application/xhtml+xml,*/*;q=0.8' \
+    -H 'accept-language: en-US,en;q=0.8' \
+    "$@" \
+    -o - \
+    -w $'\n__TCPQUALITY_HTTP__%{http_code}\n__TCPQUALITY_URL__%{url_effective}\n' \
+    "$url" 2>/dev/null || true
+}
+
 ai_probe_http() {
   local url="$1" status
   shift
@@ -1607,6 +1621,26 @@ ai_trace_region() {
   return 1
 }
 
+ai_openai_unsupported_country() {
+  local response="$1" visible_text
+  visible_text=$(ai_page_visible_text "$response")
+  printf '%s' "$visible_text" \
+    | grep -Eiq 'unsupported[_ -]?country|country[_ -]?not[_ -]?supported|not available in (your )?(country|region)|not available in your area|unavailable in your (country|region)|region (is )?not supported'
+}
+
+ai_openai_vpn_response() {
+  local response="$1" visible_text
+  visible_text=$(ai_page_visible_text "$response")
+  printf '%s' "$visible_text" \
+    | grep -Eiq '(^|[^[:alnum:]_])VPN([^[:alnum:]_]|$)'
+}
+
+ai_response_reachable() {
+  local code
+  code=$(ai_page_code "$1")
+  [[ "$code" =~ ^[1-9][0-9][0-9]$ ]]
+}
+
 ai_ipv4_special() {
   local ip="$1"
   awk -F. '
@@ -1678,23 +1712,64 @@ ai_method_for_domains() {
 }
 
 check_ai_chatgpt() {
-  local response region favicon_status ios_status api_status models_status trace_status
+  local response api_response ios_response region favicon_status
+  local api_restricted=0 ios_restricted=0 api_reachable=0 ios_reachable=0
   response=$(fetch_ai_page 'https://chatgpt.com/')
-  AI_CHATGPT_STATUS=$(ai_classify_page "$response")
-  if [ "$AI_CHATGPT_STATUS" != "解锁" ]; then
+  # 参考 xykt/IPQuality：可达首页不等于 ChatGPT 可用。实际使用 OpenAI
+  # 的无凭据接口返回判断地区限制；这里不读取 IP 数据库，也不维护地区黑名单。
+  api_response=$(fetch_ai_response 'https://api.openai.com/compliance/cookie_requirements' \
+    -H 'accept: */*' \
+    -H 'authorization: Bearer null' \
+    -H 'content-type: application/json' \
+    -H 'origin: https://platform.openai.com' \
+    -H 'referer: https://platform.openai.com/')
+  ios_response=$(fetch_ai_response 'https://ios.chat.openai.com/' \
+    -H 'accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+
+  if ai_openai_unsupported_country "$api_response"; then
+    # xykt/IPQuality 会再检查 favicon：如果网页入口不是 403，则不把
+    # compliance 接口的 unsupported_country 误判成 ChatGPT 网页屏蔽。
     favicon_status=$(ai_probe_http 'https://chatgpt.com/favicon.ico')
-    ios_status=$(ai_probe_http 'https://ios.chat.openai.com/')
-    api_status=$(ai_probe_http 'https://api.openai.com/compliance/cookie_requirements')
-    models_status=$(ai_probe_http 'https://api.openai.com/v1/models')
-    trace_status=$(ai_probe_http 'https://chat.openai.com/cdn-cgi/trace')
-    AI_CHATGPT_STATUS=$(ai_classify_service_probes \
-      "$response" "$favicon_status" "$ios_status" "$api_status" "$models_status" "$trace_status")
+    [ "$favicon_status" = "403" ] && api_restricted=1
   fi
-  if [ "$AI_CHATGPT_STATUS" != "解锁" ]; then
+  ai_openai_vpn_response "$ios_response" && ios_restricted=1
+  ai_response_reachable "$api_response" && api_reachable=1
+  ai_response_reachable "$ios_response" && ios_reachable=1
+
+  if [ "$api_restricted" -eq 1 ] && [ "$ios_restricted" -eq 1 ]; then
+    AI_CHATGPT_STATUS="屏蔽"
+  elif [ "$api_restricted" -eq 1 ]; then
+    # 与 xykt/IPQuality 的“仅 APP”语义一致：网页接口被地区限制，
+    # 但 iOS 入口没有返回 VPN 限制。
+    AI_CHATGPT_STATUS="仅APP"
+  elif [ "$ios_restricted" -eq 1 ]; then
+    if [ "$api_reachable" -eq 1 ]; then
+      AI_CHATGPT_STATUS="仅网页"
+    else
+      AI_CHATGPT_STATUS="屏蔽"
+    fi
+  elif [ "$api_reachable" -eq 1 ] && [ "$ios_reachable" -eq 1 ]; then
+    AI_CHATGPT_STATUS="解锁"
+  else
+    # 首页返回 200 只能证明静态页面可达，不能把它当成 ChatGPT 已解锁。
+    # 两个实际入口没有同时完成返回时，最多使用首页的明确屏蔽信号，
+    # 其余情况报告为失败，避免再次出现“页面可达=解锁”。
+    if ai_page_is_blocked "$response"; then
+      AI_CHATGPT_STATUS="屏蔽"
+    else
+      AI_CHATGPT_STATUS="失败"
+    fi
+  fi
+
+  case "$AI_CHATGPT_STATUS" in
+    解锁|仅网页|仅APP) ;;
+    *)
     AI_CHATGPT_REGION="-"
     AI_CHATGPT_METHOD="-"
     return 0
-  fi
+    ;;
+  esac
+
   region=$(ai_trace_region || true)
   AI_CHATGPT_REGION="${region:--}"
   if [ "$AI_CHATGPT_REGION" = "-" ]; then
