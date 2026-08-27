@@ -14,18 +14,6 @@ REPORT_JSON_FILE=""
 
 IPQUALITY_API_BASE="${IPQUALITY_API_BASE:-https://tcpquality.ibsgss.uk}"
 IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
-# 只有不需要服务端密钥的 IP2Location/IPinfo/活跃邻居使用客户端缓存；
-# MaxMind、Scamalytics、ipapi 均通过服务端 PoW 查询并由服务端缓存，
-# 客户端不保存这些结果。
-IPQUALITY_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS:-3888000}"
-IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
-IP2LOCATION_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IP2LOCATION_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-IPINFO_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IPINFO_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-[[ "$IPQUALITY_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPQUALITY_CACHE_TTL_SECONDS=3888000
-[[ "$IP2LOCATION_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IP2LOCATION_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
-[[ "$IPINFO_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPINFO_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
-[[ "$ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
 INVALID_STATUS="无效"
 
 C_CYAN=$'\033[36m'
@@ -471,13 +459,6 @@ PORT_25_STATUS="-"
 PORT_80_STATUS="-"
 PORT_443_STATUS="-"
 ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
-DATABASE_CACHE_HIT=0
-IP2LOCATION_CACHE_HIT=0
-IPINFO_CACHE_HIT=0
-ACTIVE_NEIGHBOR_CACHE_HIT=0
-CACHE_IP2LOCATION_SAVED_AT=""
-CACHE_IPINFO_SAVED_AT=""
-CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
 declare -a ACTIVE_NEIGHBOR_LABELS=()
 declare -a ACTIVE_NEIGHBOR_SEGMENTS=()
 declare -a ACTIVE_NEIGHBOR_ACTIVE=()
@@ -490,7 +471,6 @@ declare -a BASIC_FIELDS=(asn organization coordinates map city registered contin
 declare -A BASIC_MAXMIND=()
 declare -A BASIC_IP2LOCATION=()
 declare -A BASIC_IPINFO=()
-declare -A COUNTRY_ZH_CACHE=()
 
 basic_set() {
   local provider="$1" field="$2" value="$3"
@@ -558,15 +538,6 @@ reset_ipapi_results() {
   IPAPI_RISK_LEVEL="$INVALID_STATUS"
 }
 
-reset_database_cache_state() {
-  IP2LOCATION_CACHE_HIT=0
-  IPINFO_CACHE_HIT=0
-  ACTIVE_NEIGHBOR_CACHE_HIT=0
-  CACHE_IP2LOCATION_SAVED_AT=""
-  CACHE_IPINFO_SAVED_AT=""
-  CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
-}
-
 reset_results() {
   MAXMIND_USAGE_RAW=""
   MAXMIND_COMPANY_RAW=""
@@ -593,7 +564,6 @@ reset_results() {
   ACTIVE_NEIGHBOR_SEGMENTS=()
   ACTIVE_NEIGHBOR_ACTIVE=()
   ACTIVE_NEIGHBOR_TOTAL=()
-  reset_database_cache_state
   reset_ai_results
   reset_basic_results
 }
@@ -611,219 +581,6 @@ reset_ai_results() {
   AI_CLAUDE_STATUS="失败"
   AI_CLAUDE_REGION="-"
   AI_CLAUDE_METHOD="-"
-}
-
-cache_hash_for_key() {
-  local key="$1" hash=""
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$key" | sha256sum | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$key" | shasum -a 256 | awk '{print $1}')
-  else
-    hash=$(printf '%s' "$key" | cksum | awk '{print $1}')
-  fi
-  [ -n "$hash" ] || return 1
-  printf '%s' "$hash"
-}
-
-cache_file_for_ip() {
-  local hash
-  hash=$(cache_hash_for_key "$1") || return 1
-  printf '%s/%s.cache' "${IPQUALITY_CACHE_DIR%/}" "$hash"
-}
-
-cache_context_signature() {
-  local context hash
-  context="database-cache-v7|ip2location-type-v2|ipinfo-direct-v1|active-neighbor-v1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | shasum -a 256 | awk '{print $1}')
-  else
-    hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
-  fi
-  printf '%s' "$hash"
-}
-
-basic_cache_has_data() {
-  local provider="$1" field value
-  for field in asn organization coordinates city location; do
-    value=$(basic_get "$provider" "$field")
-    case "$value" in
-      ""|"-"|"$INVALID_STATUS") ;;
-      *) return 0 ;;
-    esac
-  done
-  return 1
-}
-
-cache_timestamp_is_fresh() {
-  local saved_at="$1" ttl="$2" now age
-  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
-  [[ "$ttl" =~ ^[0-9]+$ ]] || return 1
-  now=$(date +%s)
-  age=$((now - saved_at))
-  [ "$age" -ge 0 ] || age=0
-  [ "$age" -le "$ttl" ]
-}
-
-cache_group_variables() {
-  case "$1" in
-    ip2location)
-      printf '%s\n' BASIC_IP2LOCATION IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW \
-        IP2LOCATION_USAGE_TYPE IP2LOCATION_COMPANY_TYPE IP2LOCATION_IP_TYPE \
-        IP2LOCATION_RISK_SCORE IP2LOCATION_RISK_LEVEL
-      ;;
-    ipinfo)
-      printf '%s\n' BASIC_IPINFO IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
-      ;;
-    active_neighbor)
-      printf '%s\n' ACTIVE_NEIGHBOR_VALUE ACTIVE_NEIGHBOR_LABELS ACTIVE_NEIGHBOR_SEGMENTS \
-        ACTIVE_NEIGHBOR_ACTIVE ACTIVE_NEIGHBOR_TOTAL
-      ;;
-  esac
-}
-
-cache_group_reset() {
-  case "$1" in
-    ip2location)
-      BASIC_IP2LOCATION=()
-      basic_mark_provider ip2location "$INVALID_STATUS"
-      IP2LOCATION_USAGE_RAW=""
-      IP2LOCATION_COMPANY_RAW=""
-      IP2LOCATION_USAGE_TYPE="$INVALID_STATUS"
-      IP2LOCATION_COMPANY_TYPE="$INVALID_STATUS"
-      IP2LOCATION_IP_TYPE=""
-      IP2LOCATION_RISK_SCORE=""
-      IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
-      ;;
-    ipinfo)
-      BASIC_IPINFO=()
-      basic_mark_provider ipinfo "$INVALID_STATUS"
-      IPINFO_USAGE_RAW=""
-      IPINFO_COMPANY_RAW=""
-      IPINFO_USAGE_TYPE="$INVALID_STATUS"
-      IPINFO_COMPANY_TYPE="$INVALID_STATUS"
-      ;;
-    active_neighbor)
-      ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
-      ACTIVE_NEIGHBOR_LABELS=()
-      ACTIVE_NEIGHBOR_SEGMENTS=()
-      ACTIVE_NEIGHBOR_ACTIVE=()
-      ACTIVE_NEIGHBOR_TOTAL=()
-      ;;
-  esac
-}
-
-cache_group_has_data() {
-  case "$1" in
-    ip2location)
-      case "$IP2LOCATION_USAGE_TYPE" in
-        ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
-      esac
-      case "$IP2LOCATION_COMPANY_TYPE" in
-        ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
-      esac
-      return 0
-      ;;
-    ipinfo)
-      basic_cache_has_data ipinfo
-      ;;
-    active_neighbor)
-      [ -n "$ACTIVE_NEIGHBOR_VALUE" ] && [ "$ACTIVE_NEIGHBOR_VALUE" != "$INVALID_STATUS" ]
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-load_database_cache() {
-  local ip="$1" cache_file cache_signature group key metadata_var hit_var ttl_var
-  local saved_at ttl any=0
-  cache_file=$(cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
-  [ -L "$cache_file" ] && return 1
-
-  cache_signature=$(cache_context_signature)
-  unset CACHE_VERSION CACHE_IP CACHE_SAVED_AT CACHE_SIGNATURE \
-    CACHE_IP2LOCATION_SAVED_AT CACHE_IPINFO_SAVED_AT \
-    CACHE_ACTIVE_NEIGHBOR_SAVED_AT
-  reset_results
-  # 缓存由本脚本以 declare -p 生成，并限制为当前用户可读写；先校验
-  # 版本、IP、签名，再按每个数据源的独立时间戳选择性载入。
-  . "$cache_file" 2>/dev/null || {
-    reset_results
-    return 1
-  }
-  if [ "${CACHE_VERSION:-}" != "7" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
-     [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ]; then
-    reset_results
-    return 1
-  fi
-  # 服务端 PoW 查询结果（MaxMind、Scamalytics、ipapi）不从客户端缓存载入。
-  reset_ipapi_results
-
-  for group in ip2location ipinfo active_neighbor; do
-    key="${group^^}"
-    metadata_var="CACHE_${key}_SAVED_AT"
-    hit_var="${key}_CACHE_HIT"
-    ttl_var="${key}_CACHE_TTL_SECONDS"
-    saved_at="${!metadata_var:-}"
-    ttl="${!ttl_var:-}"
-    if cache_timestamp_is_fresh "$saved_at" "$ttl" && cache_group_has_data "$group"; then
-      printf -v "$hit_var" '%s' 1
-      any=1
-    else
-      cache_group_reset "$group"
-      printf -v "$metadata_var" '%s' ""
-    fi
-  done
-  [ "$any" -eq 1 ]
-}
-
-save_database_cache() {
-  local ip="$1" cache_file temp_file saved_at variable cache_signature group key
-  local metadata_var hit_var now any=0
-  local -a groups=(ip2location ipinfo active_neighbor)
-  for group in "${groups[@]}"; do
-    if cache_group_has_data "$group"; then any=1; fi
-  done
-  [ "$any" -eq 1 ] || return 0
-  cache_file=$(cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] || return 0
-  mkdir -p "$IPQUALITY_CACHE_DIR" 2>/dev/null || return 0
-  chmod 700 "$IPQUALITY_CACHE_DIR" 2>/dev/null || true
-  temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
-  now=$(date +%s)
-  cache_signature=$(cache_context_signature)
-  {
-    printf 'CACHE_VERSION=7\n'
-    printf 'CACHE_IP=%q\n' "$ip"
-    printf 'CACHE_SAVED_AT=%q\n' "$now"
-    printf 'CACHE_SIGNATURE=%q\n' "$cache_signature"
-    for group in "${groups[@]}"; do
-      cache_group_has_data "$group" || continue
-      key="${group^^}"
-      metadata_var="CACHE_${key}_SAVED_AT"
-      hit_var="${key}_CACHE_HIT"
-      saved_at="${!metadata_var:-}"
-      if ! [[ "$saved_at" =~ ^[0-9]+$ ]] || [ "${!hit_var:-0}" != "1" ]; then
-        saved_at="$now"
-        printf -v "$metadata_var" '%s' "$saved_at"
-      fi
-      printf 'CACHE_%s_SAVED_AT=%q\n' "$key" "$saved_at"
-      while IFS= read -r variable; do
-        [ -n "$variable" ] || continue
-        declare -p "$variable" | sed 's/^declare /declare -g /'
-      done < <(cache_group_variables "$group")
-    done
-  } > "$temp_file" || {
-    rm -f -- "$temp_file"
-    return 0
-  }
-  chmod 600 "$temp_file" 2>/dev/null || true
-  mv -f -- "$temp_file" "$cache_file" 2>/dev/null || rm -f -- "$temp_file"
 }
 
 jq_first_string() {
@@ -931,11 +688,6 @@ country_zh_name() {
   local code="${1^^}" name=""
   [ -n "$code" ] || return 0
 
-  if [[ -n "${COUNTRY_ZH_CACHE[$code]+cached}" ]]; then
-    printf '%s' "${COUNTRY_ZH_CACHE[$code]}"
-    return 0
-  fi
-
   # Node 20 的 Intl.DisplayNames 覆盖完整 ISO 3166-1 国家/地区代码。
   if command -v node >/dev/null 2>&1; then
     name=$(COUNTRY_CODE="$code" node --input-type=module -e '
@@ -962,7 +714,6 @@ country_zh_name() {
     esac
   fi
 
-  COUNTRY_ZH_CACHE["$code"]="$name"
   printf '%s' "$name"
 }
 
@@ -1984,7 +1735,7 @@ lookup_ipquality_paid() {
   esac
 
   # 只要进入实际查询，就先清掉上一轮的 provider 状态；这样未配置、
-  # key 失效、未命中或响应不完整时，不会把旧的成功结果重新写入缓存。
+  # key 失效、未命中或响应不完整时，不会把旧的成功结果继续用于本次应答。
   ipquality_set_failure "$provider"
 
   local base response error challenge_id nonce difficulty target_ip solution family=4
@@ -2812,13 +2563,11 @@ write_report_json() {
     --arg port443 "$PORT_443_STATUS" \
     --arg activeNeighbor "$ACTIVE_NEIGHBOR_VALUE" \
     --argjson activeNeighbors "$active_json" \
-    --argjson databaseCached "${DATABASE_CACHE_HIT:-0}" \
     '{
       version: 1,
       ip: $ip,
       maskedIp: $maskedIp,
       family: $family,
-      databaseCached: ($databaseCached == 1),
       basic: {
         columns: ["IP2Location"],
         columnPositions: [0],
@@ -2889,31 +2638,21 @@ display_type() {
 run_one() {
   local ip="$1"
   reset_results
-  DATABASE_CACHE_HIT=0
-  if load_database_cache "$ip"; then
-    DATABASE_CACHE_HIT=1
-  fi
 
   # MaxMind 基础信息和在线 IP Quality 都由服务端通过 PoW 查询；客户端
-  # 不读取 MMDB，也不保留 MaxMind 结果缓存。
+  # 不读取 MMDB，也不保留任何数据库结果缓存。
   lookup_maxmind "$ip"
   if [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
     lookup_maxmind_paid "$ip"
   fi
-  if [ "$IP2LOCATION_CACHE_HIT" -ne 1 ]; then
-    lookup_ip2location "$ip"
-  fi
-  if [ "$IPINFO_CACHE_HIT" -ne 1 ]; then
-    lookup_ipinfo "$ip"
-  fi
+  lookup_ip2location "$ip"
+  lookup_ipinfo "$ip"
   lookup_scamalytics "$ip"
-  if [[ "$ip" != *:* ]] && [ "$ACTIVE_NEIGHBOR_CACHE_HIT" -ne 1 ]; then
+  if [[ "$ip" != *:* ]]; then
     lookup_active_neighbors "$ip"
   fi
 
   lookup_ipapi "$ip"
-
-  save_database_cache "$ip"
 
   run_ai_checks
   print_type_report "$ip"
