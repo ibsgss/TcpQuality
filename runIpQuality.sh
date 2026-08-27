@@ -939,6 +939,21 @@ report_truncate() {
   printf '%s%s' "$result" "$ellipsis"
 }
 
+report_clip() {
+  local value="$1" max_width="$2" i=0 char char_width used=0 result=""
+  while [ "$i" -lt "${#value}" ]; do
+    char="${value:i:1}"
+    char_width=$(display_width "$char")
+    if [ $((used + char_width)) -gt "$max_width" ]; then
+      break
+    fi
+    result+="$char"
+    used=$((used + char_width))
+    i=$((i + 1))
+  done
+  printf '%s' "$result"
+}
+
 report_cell() {
   local value="$1" width="$2" truncated
   truncated=$(report_truncate "$value" "$width")
@@ -1016,7 +1031,7 @@ report_color_prefix() {
 
 REPORT_LABEL_WIDTH=0
 REPORT_COLUMN_WIDTHS=(0 0 0 0)
-RISK_VALUE_WIDTH=6
+RISK_VALUE_WIDTH=8
 REPORT_MEASURE_ONLY=0
 
 report_measure() {
@@ -1171,11 +1186,13 @@ report_risk_cell() {
   value_width="$RISK_VALUE_WIDTH"
   [ "$value_width" -gt "$width" ] && value_width="$width"
   trailing_width=$((width - value_width))
-  truncated=$(report_truncate "$value" "$value_width")
+  truncated=$(report_clip "$value" "$value_width")
   color=$(risk_color "$color_key")
-  # 分数和等级均使用 3 个汉字的固定显示宽度，并从各列起始位置左对齐。
+  # 分数和等级均使用 4 个汉字的固定显示宽度，并从各列起始位置左对齐；
+  # 超出时直接裁切，不添加省略号。
   # 列本身仍保留原宽度，确保风险值继续与数据库表头及其他区块对齐；
-  # 底纹只覆盖风险值单元格，不把整列的空白区域染色。
+  # 红黄绿风险值同时使用对应底纹，底纹覆盖整个固定风险值单元格，
+  # 其他状态仅保留字体颜色。
   if report_color_has_background "$color"; then
     printf '%s%s' "$(report_background_color "$color")" "$color"
     report_pad "$truncated" "$value_width"
