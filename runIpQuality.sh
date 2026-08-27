@@ -36,7 +36,9 @@ C_CYAN=$'\033[36m'
 C_GREEN=$'\033[32m'
 C_YELLOW=$'\033[33m'
 C_RED=$'\033[31m'
-C_BG_LIGHT=$'\033[107m'
+C_BG_RED=$'\033[48;2;254;226;226m'
+C_BG_YELLOW=$'\033[48;2;254;243;199m'
+C_BG_GREEN=$'\033[48;2;220;252;231m'
 C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 C_NC=$'\033[0m'
@@ -1261,10 +1263,20 @@ report_color_has_background() {
   esac
 }
 
+report_background_color() {
+  case "$1" in
+    "$C_RED") printf '%s' "$C_BG_RED" ;;
+    "$C_YELLOW") printf '%s' "$C_BG_YELLOW" ;;
+    "$C_GREEN") printf '%s' "$C_BG_GREEN" ;;
+    *) return 0 ;;
+  esac
+}
+
 report_color_prefix() {
-  local color="$1"
+  local color="$1" background
   if report_color_has_background "$color"; then
-    printf '%s%s' "$C_BG_LIGHT" "$color"
+    background=$(report_background_color "$color")
+    printf '%s%s' "$background" "$color"
   else
     printf '%s' "$color"
   fi
@@ -1439,7 +1451,7 @@ report_risk_cell() {
   printf '%*s' "$cell_padding" ''
   if report_color_has_background "$color"; then
     printf '%s%s%*s%s%s' \
-      "$C_BG_LIGHT" "$color" "$background_padding" '' "$truncated" "$C_NC"
+      "$(report_background_color "$color")" "$color" "$background_padding" '' "$truncated" "$C_NC"
   elif [ -n "$color" ]; then
     printf '%s%*s%s%s' "$color" "$background_padding" '' "$truncated" "$C_NC"
   else
