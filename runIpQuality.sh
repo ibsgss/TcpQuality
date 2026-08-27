@@ -11,42 +11,21 @@ set -o pipefail
 REQUESTED_IP=""
 REQUESTED_FAMILY=""
 REPORT_JSON_FILE=""
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-MAXMIND_ASN_DB="${MAXMIND_ASN_DB:-/data/GeoLite2-ASN.mmdb}"
-MAXMIND_COUNTRY_DB="${MAXMIND_COUNTRY_DB:-/data/GeoLite2-Country.mmdb}"
-MAXMIND_CITY_DB="${MAXMIND_CITY_DB:-/data/GeoLite2-City.mmdb}"
-MAXMIND_NODE_DIR="${MAXMIND_NODE_DIR:-$SCRIPT_DIR/server}"
 IPQUALITY_API_BASE="${IPQUALITY_API_BASE:-https://tcpquality.ibsgss.uk}"
 IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
-# 本地数据库结果缓存 45 天；ipapi.is 单独缓存 24 小时。端口和 AI 检测不进入缓存。
+# 只有不需要服务端密钥的 IP2Location/IPinfo/活跃邻居使用客户端缓存；
+# MaxMind、Scamalytics、ipapi 均通过服务端 PoW 查询并由服务端缓存，
+# 客户端不保存这些结果。
 IPQUALITY_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS:-3888000}"
 IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
-IPQUALITY_RISK_CACHE_DIR="${TCPQUALITY_IPQUALITY_RISK_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/maxmind-risk}"
-MAXMIND_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_MAXMIND_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-MAXMIND_RISK_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_MAXMIND_RISK_CACHE_TTL_SECONDS:-$MAXMIND_CACHE_TTL_SECONDS}"
-MAXMIND_BASIC_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
-MAXMIND_PAID_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
 IP2LOCATION_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IP2LOCATION_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
 IPINFO_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IPINFO_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-SCAMALYTICS_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_SCAMALYTICS_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
 ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
-IPAPI_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IPAPI_CACHE_TTL_SECONDS:-86400}"
-IPAPI_CACHE_DIR="${TCPQUALITY_IPQUALITY_IPAPI_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/ipapi}"
-# IPv6 风险按常见的 /64 子网复用；可显式切换为 /48 或 /56。
-MAXMIND_RISK_IPV6_PREFIX="${TCPQUALITY_MAXMIND_RISK_IPV6_PREFIX:-64}"
-case "$MAXMIND_RISK_IPV6_PREFIX" in
-  48|56|64) ;;
-  *) MAXMIND_RISK_IPV6_PREFIX=64 ;;
-esac
 [[ "$IPQUALITY_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPQUALITY_CACHE_TTL_SECONDS=3888000
-[[ "$MAXMIND_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || MAXMIND_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
-[[ "$MAXMIND_RISK_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || MAXMIND_RISK_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
 [[ "$IP2LOCATION_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IP2LOCATION_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
 [[ "$IPINFO_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPINFO_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
-[[ "$SCAMALYTICS_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || SCAMALYTICS_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
 [[ "$ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
-[[ "$IPAPI_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPAPI_CACHE_TTL_SECONDS=86400
 INVALID_STATUS="无效"
 
 C_CYAN=$'\033[36m'
@@ -493,17 +472,11 @@ PORT_80_STATUS="-"
 PORT_443_STATUS="-"
 ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
 DATABASE_CACHE_HIT=0
-MAXMIND_BASIC_CACHE_HIT=0
-MAXMIND_PAID_CACHE_HIT=0
 IP2LOCATION_CACHE_HIT=0
 IPINFO_CACHE_HIT=0
-SCAMALYTICS_CACHE_HIT=0
 ACTIVE_NEIGHBOR_CACHE_HIT=0
-CACHE_MAXMIND_BASIC_SAVED_AT=""
-CACHE_MAXMIND_PAID_SAVED_AT=""
 CACHE_IP2LOCATION_SAVED_AT=""
 CACHE_IPINFO_SAVED_AT=""
-CACHE_SCAMALYTICS_SAVED_AT=""
 CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
 declare -a ACTIVE_NEIGHBOR_LABELS=()
 declare -a ACTIVE_NEIGHBOR_SEGMENTS=()
@@ -586,17 +559,11 @@ reset_ipapi_results() {
 }
 
 reset_database_cache_state() {
-  MAXMIND_BASIC_CACHE_HIT=0
-  MAXMIND_PAID_CACHE_HIT=0
   IP2LOCATION_CACHE_HIT=0
   IPINFO_CACHE_HIT=0
-  SCAMALYTICS_CACHE_HIT=0
   ACTIVE_NEIGHBOR_CACHE_HIT=0
-  CACHE_MAXMIND_BASIC_SAVED_AT=""
-  CACHE_MAXMIND_PAID_SAVED_AT=""
   CACHE_IP2LOCATION_SAVED_AT=""
   CACHE_IPINFO_SAVED_AT=""
-  CACHE_SCAMALYTICS_SAVED_AT=""
   CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
 }
 
@@ -646,11 +613,6 @@ reset_ai_results() {
   AI_CLAUDE_METHOD="-"
 }
 
-declare -a IPAPI_CACHE_VARIABLES=(
-  IPAPI_USAGE_RAW IPAPI_COMPANY_RAW IPAPI_USAGE_TYPE IPAPI_COMPANY_TYPE
-  IPAPI_RISK_RAW IPAPI_RISK_SCORE IPAPI_RISK_LEVEL
-)
-
 cache_hash_for_key() {
   local key="$1" hash=""
   if command -v sha256sum >/dev/null 2>&1; then
@@ -670,83 +632,9 @@ cache_file_for_ip() {
   printf '%s/%s.cache' "${IPQUALITY_CACHE_DIR%/}" "$hash"
 }
 
-ipapi_cache_file_for_ip() {
-  local hash
-  hash=$(cache_hash_for_key "ipapi|$1") || return 1
-  printf '%s/%s.cache' "${IPAPI_CACHE_DIR%/}" "$hash"
-}
-
-maxmind_risk_cache_key() {
-  local ip="$1"
-  if [[ "$ip" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-    printf '%s.%s.%s.0/24' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
-  elif [[ "$ip" == *:* ]]; then
-    maxmind_ipv6_risk_cache_key "$ip"
-  else
-    return 1
-  fi
-}
-
-maxmind_ipv6_risk_cache_key() {
-  local ip="${1,,}" left right zero_count part normalized partial
-  local -a left_parts=() right_parts=() parts=() normalized_parts=()
-  [[ "$ip" == *:* ]] || return 1
-
-  if [[ "$ip" == *::* ]]; then
-    left="${ip%%::*}"
-    right="${ip#*::}"
-    if [ -n "$left" ]; then
-      IFS=':' read -r -a left_parts <<< "$left"
-    fi
-    if [ -n "$right" ]; then
-      IFS=':' read -r -a right_parts <<< "$right"
-    fi
-    zero_count=$((8 - ${#left_parts[@]} - ${#right_parts[@]}))
-    [ "$zero_count" -ge 1 ] || return 1
-    parts=("${left_parts[@]}")
-    while [ "$zero_count" -gt 0 ]; do
-      parts+=(0)
-      zero_count=$((zero_count - 1))
-    done
-    parts+=("${right_parts[@]}")
-  else
-    IFS=':' read -r -a parts <<< "$ip"
-  fi
-
-  [ "${#parts[@]}" -eq 8 ] || return 1
-  for part in "${parts[@]}"; do
-    [[ "$part" =~ ^[0-9a-f]{1,4}$ ]] || return 1
-    normalized=$(printf '%x' "$((16#$part))") || return 1
-    normalized_parts+=("$normalized")
-  done
-
-  case "$MAXMIND_RISK_IPV6_PREFIX" in
-    48)
-      printf '%s:%s:%s::/48' \
-        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}"
-      ;;
-    56)
-      partial=$(printf '%x' "$((16#${normalized_parts[3]} & 0xff00))") || return 1
-      printf '%s:%s:%s:%s::/56' \
-        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}" "$partial"
-      ;;
-    64)
-      printf '%s:%s:%s:%s::/64' \
-        "${normalized_parts[0]}" "${normalized_parts[1]}" "${normalized_parts[2]}" "${normalized_parts[3]}"
-      ;;
-  esac
-}
-
-maxmind_risk_cache_file_for_ip() {
-  local key hash
-  key=$(maxmind_risk_cache_key "$1") || return 1
-  hash=$(cache_hash_for_key "$key") || return 1
-  printf '%s/%s.cache' "${IPQUALITY_RISK_CACHE_DIR%/}" "$hash"
-}
-
 cache_context_signature() {
   local context hash
-  context="database-cache-v5|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3"
+  context="database-cache-v7|ip2location-type-v2|ipinfo-direct-v1|active-neighbor-v1"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -781,12 +669,6 @@ cache_timestamp_is_fresh() {
 
 cache_group_variables() {
   case "$1" in
-    maxmind_basic)
-      printf '%s\n' BASIC_MAXMIND
-      ;;
-    maxmind_paid)
-      printf '%s\n' MAXMIND_USAGE_RAW MAXMIND_COMPANY_RAW MAXMIND_USAGE_TYPE MAXMIND_COMPANY_TYPE
-      ;;
     ip2location)
       printf '%s\n' BASIC_IP2LOCATION IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW \
         IP2LOCATION_USAGE_TYPE IP2LOCATION_COMPANY_TYPE IP2LOCATION_IP_TYPE \
@@ -794,9 +676,6 @@ cache_group_variables() {
       ;;
     ipinfo)
       printf '%s\n' BASIC_IPINFO IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
-      ;;
-    scamalytics)
-      printf '%s\n' SCAMALYTICS_RISK_SCORE SCAMALYTICS_RISK_LEVEL
       ;;
     active_neighbor)
       printf '%s\n' ACTIVE_NEIGHBOR_VALUE ACTIVE_NEIGHBOR_LABELS ACTIVE_NEIGHBOR_SEGMENTS \
@@ -807,16 +686,6 @@ cache_group_variables() {
 
 cache_group_reset() {
   case "$1" in
-    maxmind_basic)
-      BASIC_MAXMIND=()
-      basic_mark_provider maxmind "$INVALID_STATUS"
-      ;;
-    maxmind_paid)
-      MAXMIND_USAGE_RAW=""
-      MAXMIND_COMPANY_RAW=""
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-      ;;
     ip2location)
       BASIC_IP2LOCATION=()
       basic_mark_provider ip2location "$INVALID_STATUS"
@@ -836,10 +705,6 @@ cache_group_reset() {
       IPINFO_USAGE_TYPE="$INVALID_STATUS"
       IPINFO_COMPANY_TYPE="$INVALID_STATUS"
       ;;
-    scamalytics)
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-      ;;
     active_neighbor)
       ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
       ACTIVE_NEIGHBOR_LABELS=()
@@ -852,19 +717,6 @@ cache_group_reset() {
 
 cache_group_has_data() {
   case "$1" in
-    maxmind_basic)
-      basic_cache_has_data maxmind
-      ;;
-    maxmind_paid)
-      [ "$IPQUALITY_PAID_LOOKUP" = "1" ] || return 1
-      case "$MAXMIND_USAGE_TYPE" in
-        ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
-      esac
-      case "$MAXMIND_COMPANY_TYPE" in
-        ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
-      esac
-      [ -n "$MAXMIND_USAGE_RAW" ] && [ -n "$MAXMIND_COMPANY_RAW" ]
-      ;;
     ip2location)
       case "$IP2LOCATION_USAGE_TYPE" in
         ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
@@ -876,13 +728,6 @@ cache_group_has_data() {
       ;;
     ipinfo)
       basic_cache_has_data ipinfo
-      ;;
-    scamalytics)
-      risk_score_valid "$SCAMALYTICS_RISK_SCORE" || return 1
-      case "$SCAMALYTICS_RISK_LEVEL" in
-        极低风险|低风险|较高风险|高风险|极高风险|中风险) return 0 ;;
-        *) return 1 ;;
-      esac
       ;;
     active_neighbor)
       [ -n "$ACTIVE_NEIGHBOR_VALUE" ] && [ "$ACTIVE_NEIGHBOR_VALUE" != "$INVALID_STATUS" ]
@@ -902,9 +747,8 @@ load_database_cache() {
 
   cache_signature=$(cache_context_signature)
   unset CACHE_VERSION CACHE_IP CACHE_SAVED_AT CACHE_SIGNATURE \
-    CACHE_MAXMIND_BASIC_SAVED_AT CACHE_MAXMIND_PAID_SAVED_AT \
     CACHE_IP2LOCATION_SAVED_AT CACHE_IPINFO_SAVED_AT \
-    CACHE_SCAMALYTICS_SAVED_AT CACHE_ACTIVE_NEIGHBOR_SAVED_AT
+    CACHE_ACTIVE_NEIGHBOR_SAVED_AT
   reset_results
   # 缓存由本脚本以 declare -p 生成，并限制为当前用户可读写；先校验
   # 版本、IP、签名，再按每个数据源的独立时间戳选择性载入。
@@ -912,19 +756,15 @@ load_database_cache() {
     reset_results
     return 1
   }
-  if [ "${CACHE_VERSION:-}" != "5" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
+  if [ "${CACHE_VERSION:-}" != "7" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
      [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ]; then
     reset_results
     return 1
   fi
-  # ipapi.is 使用独立的 24 小时缓存；忽略旧的综合缓存中的同名变量，
-  # 避免在 ipapi 缓存过期或不存在时继续显示旧结果。
+  # 服务端 PoW 查询结果（MaxMind、Scamalytics、ipapi）不从客户端缓存载入。
   reset_ipapi_results
-  # MaxMind risk 使用独立的 /24(/IPv6 子网)缓存，不接受旧综合缓存中的值。
-  MAXMIND_RISK_SCORE=""
-  MAXMIND_RISK_LEVEL="$INVALID_STATUS"
 
-  for group in maxmind_basic maxmind_paid ip2location ipinfo scamalytics active_neighbor; do
+  for group in ip2location ipinfo active_neighbor; do
     key="${group^^}"
     metadata_var="CACHE_${key}_SAVED_AT"
     hit_var="${key}_CACHE_HIT"
@@ -939,16 +779,13 @@ load_database_cache() {
       printf -v "$metadata_var" '%s' ""
     fi
   done
-  if [ "$IPQUALITY_PAID_LOOKUP" != "1" ]; then
-    MAXMIND_PAID_CACHE_HIT=1
-  fi
   [ "$any" -eq 1 ]
 }
 
 save_database_cache() {
   local ip="$1" cache_file temp_file saved_at variable cache_signature group key
   local metadata_var hit_var now any=0
-  local -a groups=(maxmind_basic maxmind_paid ip2location ipinfo scamalytics active_neighbor)
+  local -a groups=(ip2location ipinfo active_neighbor)
   for group in "${groups[@]}"; do
     if cache_group_has_data "$group"; then any=1; fi
   done
@@ -961,7 +798,7 @@ save_database_cache() {
   now=$(date +%s)
   cache_signature=$(cache_context_signature)
   {
-    printf 'CACHE_VERSION=5\n'
+    printf 'CACHE_VERSION=7\n'
     printf 'CACHE_IP=%q\n' "$ip"
     printf 'CACHE_SAVED_AT=%q\n' "$now"
     printf 'CACHE_SIGNATURE=%q\n' "$cache_signature"
@@ -981,168 +818,6 @@ save_database_cache() {
         declare -p "$variable" | sed 's/^declare /declare -g /'
       done < <(cache_group_variables "$group")
     done
-  } > "$temp_file" || {
-    rm -f -- "$temp_file"
-    return 0
-  }
-  chmod 600 "$temp_file" 2>/dev/null || true
-  mv -f -- "$temp_file" "$cache_file" 2>/dev/null || rm -f -- "$temp_file"
-}
-
-ipapi_cache_signature() {
-  local context hash
-  context="ipapi-cache-v1|${IPQUALITY_API_BASE}|ipapi.is"
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | shasum -a 256 | awk '{print $1}')
-  else
-    hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
-  fi
-  printf '%s' "$hash"
-}
-
-ipapi_cache_has_data() {
-  case "$IPAPI_USAGE_TYPE" in
-    ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
-  esac
-  case "$IPAPI_COMPANY_TYPE" in
-    ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
-  esac
-  [ -n "$IPAPI_USAGE_RAW" ] || return 1
-  [ -n "$IPAPI_COMPANY_RAW" ] || return 1
-  risk_score_valid "$IPAPI_RISK_SCORE" || return 1
-  case "$IPAPI_RISK_LEVEL" in
-    极低风险|低风险|较高风险|高风险|极高风险) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-load_ipapi_cache() {
-  local ip="$1" cache_file now saved_at age cache_signature
-  cache_file=$(ipapi_cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
-  [ -L "$cache_file" ] && return 1
-
-  saved_at=$(sed -n 's/^IPAPI_CACHE_SAVED_AT=//p' "$cache_file" | sed -n '1p')
-  saved_at=${saved_at//[^0-9]/}
-  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
-  now=$(date +%s)
-  age=$((now - saved_at))
-  [ "$age" -ge 0 ] || age=0
-  [ "$age" -le "$IPAPI_CACHE_TTL_SECONDS" ] || return 1
-
-  cache_signature=$(ipapi_cache_signature)
-  unset IPAPI_CACHE_VERSION IPAPI_CACHE_IP IPAPI_CACHE_SAVED_AT IPAPI_CACHE_SIGNATURE
-  reset_ipapi_results
-  . "$cache_file" 2>/dev/null || {
-    reset_ipapi_results
-    return 1
-  }
-  if [ "${IPAPI_CACHE_VERSION:-}" != "1" ] || [ "${IPAPI_CACHE_IP:-}" != "$ip" ] ||
-     [ "${IPAPI_CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
-     ! [[ "${IPAPI_CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]]; then
-    reset_ipapi_results
-    return 1
-  fi
-  if ! ipapi_cache_has_data; then
-    reset_ipapi_results
-    return 1
-  fi
-  return 0
-}
-
-save_ipapi_cache() {
-  local ip="$1" cache_file temp_file saved_at variable cache_signature
-  ipapi_cache_has_data || return 0
-  cache_file=$(ipapi_cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] || return 0
-  mkdir -p "$IPAPI_CACHE_DIR" 2>/dev/null || return 0
-  chmod 700 "$IPAPI_CACHE_DIR" 2>/dev/null || true
-  temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
-  saved_at=$(date +%s)
-  cache_signature=$(ipapi_cache_signature)
-  {
-    printf 'IPAPI_CACHE_VERSION=1\n'
-    printf 'IPAPI_CACHE_IP=%q\n' "$ip"
-    printf 'IPAPI_CACHE_SAVED_AT=%q\n' "$saved_at"
-    printf 'IPAPI_CACHE_SIGNATURE=%q\n' "$cache_signature"
-    for variable in "${IPAPI_CACHE_VARIABLES[@]}"; do
-      declare -p "$variable" | sed 's/^declare /declare -g /'
-    done
-  } > "$temp_file" || {
-    rm -f -- "$temp_file"
-    return 0
-  }
-  chmod 600 "$temp_file" 2>/dev/null || true
-  mv -f -- "$temp_file" "$cache_file" 2>/dev/null || rm -f -- "$temp_file"
-}
-
-maxmind_risk_cache_signature() {
-  local context hash
-  context="maxmind-risk-v2|${IPQUALITY_API_BASE}|ipv6-prefix-${MAXMIND_RISK_IPV6_PREFIX}"
-  if command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$context" | shasum -a 256 | awk '{print $1}')
-  else
-    hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
-  fi
-  printf '%s' "$hash"
-}
-
-load_maxmind_risk_cache() {
-  local ip="$1" cache_file now saved_at age cache_signature cache_key score
-  cache_key=$(maxmind_risk_cache_key "$ip" 2>/dev/null || true)
-  [ -n "$cache_key" ] || return 1
-  cache_file=$(maxmind_risk_cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
-  [ -L "$cache_file" ] && return 1
-
-  saved_at=$(sed -n 's/^RISK_CACHE_SAVED_AT=//p' "$cache_file" | sed -n '1p')
-  saved_at=${saved_at//[^0-9]/}
-  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
-  now=$(date +%s)
-  age=$((now - saved_at))
-  [ "$age" -ge 0 ] || age=0
-  [ "$age" -le "$MAXMIND_RISK_CACHE_TTL_SECONDS" ] || return 1
-
-  cache_signature=$(maxmind_risk_cache_signature)
-  unset RISK_CACHE_VERSION RISK_CACHE_PREFIX RISK_CACHE_SAVED_AT RISK_CACHE_SIGNATURE RISK_CACHE_SCORE
-  . "$cache_file" 2>/dev/null || return 1
-  score="${RISK_CACHE_SCORE:-}"
-  if [ "${RISK_CACHE_VERSION:-}" != "1" ] ||
-     [ "${RISK_CACHE_PREFIX:-}" != "$cache_key" ] ||
-     [ "${RISK_CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
-     ! [[ "${RISK_CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]] ||
-     ! risk_score_valid "$score"; then
-    return 1
-  fi
-
-  MAXMIND_RISK_SCORE="$score"
-  MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$score")
-  return 0
-}
-
-save_maxmind_risk_cache() {
-  local ip="$1" cache_key cache_file temp_file saved_at cache_signature score
-  score="${MAXMIND_RISK_SCORE:-}"
-  risk_score_valid "$score" || return 0
-  cache_key=$(maxmind_risk_cache_key "$ip" 2>/dev/null || true)
-  [ -n "$cache_key" ] || return 0
-  cache_file=$(maxmind_risk_cache_file_for_ip "$ip" 2>/dev/null || true)
-  [ -n "$cache_file" ] || return 0
-  mkdir -p "$IPQUALITY_RISK_CACHE_DIR" 2>/dev/null || return 0
-  chmod 700 "$IPQUALITY_RISK_CACHE_DIR" 2>/dev/null || true
-  temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
-  saved_at=$(date +%s)
-  cache_signature=$(maxmind_risk_cache_signature)
-  {
-    printf 'RISK_CACHE_VERSION=1\n'
-    printf 'RISK_CACHE_PREFIX=%q\n' "$cache_key"
-    printf 'RISK_CACHE_SAVED_AT=%q\n' "$saved_at"
-    printf 'RISK_CACHE_SIGNATURE=%q\n' "$cache_signature"
-    printf 'RISK_CACHE_SCORE=%q\n' "$score"
   } > "$temp_file" || {
     rm -f -- "$temp_file"
     return 0
@@ -2266,230 +1941,16 @@ run_ai_checks() {
   check_ai_claude
 }
 
-mmdblookup_scalar_json() {
-  local database="$1" ip="$2" raw value
-  shift 2
-  [ -r "$database" ] || {
-    printf 'null'
-    return 0
-  }
-
-  # mmdblookup 输出的是带类型注释、且不带逗号的 JSON-like 文本，不能直接交给
-  # jq 解析。按字段读取时每次只返回一个标量，去掉类型注释后就是合法 JSON。
-  raw=$(mmdblookup --file "$database" --ip "$ip" "$@" 2>/dev/null || true)
-  value=$(printf '%s\n' "$raw" | awk '
-    /^[[:space:]]*$/ { next }
-    {
-      sub(/^[[:space:]]+/, "")
-      sub(/[[:space:]]+<[^>]+>[[:space:]]*$/, "")
-      print
-      exit
-    }
-  ')
-  if [ -n "$value" ] && printf '%s' "$value" | jq -e . >/dev/null 2>&1; then
-    printf '%s' "$value"
-  else
-    printf 'null'
-  fi
-}
-
-lookup_maxmind_mmdblookup() {
-  local ip="$1"
-  local asn_number asn_organization
-  local city_zh city_en subdivision_zh subdivision_en
-  local country_code country_zh country_en registered_code registered_zh registered_en
-  local continent_code continent_zh continent_en latitude longitude time_zone
-  command -v mmdblookup >/dev/null 2>&1 || return 1
-  [ -r "$MAXMIND_ASN_DB" ] || [ -r "$MAXMIND_COUNTRY_DB" ] || [ -r "$MAXMIND_CITY_DB" ] || return 1
-
-  asn_number=$(mmdblookup_scalar_json "$MAXMIND_ASN_DB" "$ip" autonomous_system_number)
-  asn_organization=$(mmdblookup_scalar_json "$MAXMIND_ASN_DB" "$ip" autonomous_system_organization)
-
-  city_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" city names zh-CN)
-  city_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" city names en)
-  subdivision_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" subdivisions 0 names zh-CN)
-  subdivision_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" subdivisions 0 names en)
-
-  country_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country iso_code)
-  [ "$country_code" != "null" ] || country_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country iso_code)
-  country_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country names zh-CN)
-  [ "$country_zh" != "null" ] || country_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country names zh-CN)
-  country_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" country names en)
-  [ "$country_en" != "null" ] || country_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" country names en)
-
-  registered_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country iso_code)
-  [ "$registered_code" != "null" ] || registered_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country iso_code)
-  registered_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country names zh-CN)
-  [ "$registered_zh" != "null" ] || registered_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country names zh-CN)
-  registered_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" registered_country names en)
-  [ "$registered_en" != "null" ] || registered_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" registered_country names en)
-
-  continent_code=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent code)
-  [ "$continent_code" != "null" ] || continent_code=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent code)
-  continent_zh=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent names zh-CN)
-  [ "$continent_zh" != "null" ] || continent_zh=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent names zh-CN)
-  continent_en=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" continent names en)
-  [ "$continent_en" != "null" ] || continent_en=$(mmdblookup_scalar_json "$MAXMIND_COUNTRY_DB" "$ip" continent names en)
-
-  latitude=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location latitude)
-  longitude=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location longitude)
-  time_zone=$(mmdblookup_scalar_json "$MAXMIND_CITY_DB" "$ip" location time_zone)
-
-  jq -cn \
-    --argjson asnNumber "$asn_number" \
-    --argjson asnOrganization "$asn_organization" \
-    --argjson cityZh "$city_zh" \
-    --argjson cityEn "$city_en" \
-    --argjson subdivisionZh "$subdivision_zh" \
-    --argjson subdivisionEn "$subdivision_en" \
-    --argjson countryCode "$country_code" \
-    --argjson countryZh "$country_zh" \
-    --argjson countryEn "$country_en" \
-    --argjson registeredCode "$registered_code" \
-    --argjson registeredZh "$registered_zh" \
-    --argjson registeredEn "$registered_en" \
-    --argjson continentCode "$continent_code" \
-    --argjson continentZh "$continent_zh" \
-    --argjson continentEn "$continent_en" \
-    --argjson latitude "$latitude" \
-    --argjson longitude "$longitude" \
-    --argjson timeZone "$time_zone" '
-    def text($value):
-      if $value == null then "" else ($value | tostring) end;
-    def first_text($first; $second; $fallback):
-      if $first != null and $first != "" then text($first)
-      elif $second != null and $second != "" then text($second)
-      else text($fallback)
-      end;
-    {
-      asn: {
-        number: text($asnNumber),
-        organization: text($asnOrganization)
-      },
-      geo: {
-        city: first_text($cityZh; $cityEn; null),
-        subdivision: first_text($subdivisionZh; $subdivisionEn; null),
-        countryCode: text($countryCode),
-        countryName: first_text($countryZh; $countryEn; $countryCode),
-        registeredCountryCode: text($registeredCode),
-        registeredCountryName: first_text($registeredZh; $registeredEn; $registeredCode),
-        continentCode: text($continentCode),
-        continentName: first_text($continentZh; $continentEn; $continentCode),
-        latitude: (if $latitude == null then "" else $latitude end),
-        longitude: (if $longitude == null then "" else $longitude end),
-        timeZone: text($timeZone)
-      }
-    }'
-}
-
-lookup_maxmind_json() {
-  local ip="$1" response=""
-  [ -r "$MAXMIND_ASN_DB" ] || [ -r "$MAXMIND_COUNTRY_DB" ] || [ -r "$MAXMIND_CITY_DB" ] || return 1
-
-  if command -v node >/dev/null 2>&1 && [ -d "$MAXMIND_NODE_DIR/node_modules/maxmind" ]; then
-    response=$(
-      cd "$MAXMIND_NODE_DIR" || exit 1
-      if [ -r "$MAXMIND_ASN_DB" ]; then export MAXMIND_ASN_DB; else unset MAXMIND_ASN_DB; fi
-      if [ -r "$MAXMIND_COUNTRY_DB" ]; then export MAXMIND_COUNTRY_DB; else unset MAXMIND_COUNTRY_DB; fi
-      if [ -r "$MAXMIND_CITY_DB" ]; then export MAXMIND_CITY_DB; else unset MAXMIND_CITY_DB; fi
-      export MAXMIND_LOOKUP_IP="$ip"
-      node --input-type=module <<'NODE'
-import { open } from "maxmind";
-
-const ip = process.env.MAXMIND_LOOKUP_IP;
-const name = (value) => value?.names?.["zh-CN"] || value?.names?.en || value?.iso_code || "";
-const openOptional = (path) => path ? open(path) : Promise.resolve(null);
-const [asnReader, countryReader, cityReader] = await Promise.all([
-  openOptional(process.env.MAXMIND_ASN_DB),
-  openOptional(process.env.MAXMIND_COUNTRY_DB),
-  openOptional(process.env.MAXMIND_CITY_DB),
-]);
-const asn = asnReader?.get(ip) || {};
-const countryData = countryReader?.get(ip) || {};
-const cityData = cityReader?.get(ip) || {};
-const country = cityData.country || countryData.country || {};
-const registeredCountry = cityData.registered_country || countryData.registered_country || {};
-const continent = cityData.continent || countryData.continent || {};
-const location = cityData.location || {};
-const subdivision = Array.isArray(cityData.subdivisions) ? cityData.subdivisions[0] || {} : {};
-
-console.log(JSON.stringify({
-  asn: {
-    number: asn.autonomous_system_number || "",
-    organization: asn.autonomous_system_organization || "",
-  },
-  geo: {
-    city: name(cityData.city),
-    subdivision: name(subdivision),
-    countryCode: country.iso_code || "",
-    countryName: name(country),
-    registeredCountryCode: registeredCountry.iso_code || "",
-    registeredCountryName: name(registeredCountry),
-    continentCode: continent.code || "",
-    continentName: name(continent),
-    latitude: location.latitude ?? "",
-    longitude: location.longitude ?? "",
-    timeZone: location.time_zone || "",
-  },
-}));
-NODE
-    ) || true
-    if [ -n "$response" ] && printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-      printf '%s' "$response"
-      return 0
-    fi
-  fi
-
-  lookup_maxmind_mmdblookup "$ip"
-}
-
 lookup_maxmind() {
-  local ip="$1" response coordinates country_code country_name city subdivision location
-  response=$(lookup_maxmind_json "$ip" 2>/dev/null || true)
-  if [ -z "$response" ] || ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    basic_mark_provider maxmind "$INVALID_STATUS"
-    # GeoLite2 不包含 IP 属性分类；付费 MaxMind 接入点仍然保留。
-    MAXMIND_USAGE_TYPE="无效"
-    MAXMIND_COMPANY_TYPE="无效"
-    return 0
-  fi
-
-  coordinates=$(jq_first_string "$response" 'select(.geo.latitude != null and .geo.longitude != null and .geo.latitude != "" and .geo.longitude != "") | "\(.geo.latitude),\(.geo.longitude)"')
-  country_code=$(jq_first_string "$response" '.geo.countryCode')
-  country_name=$(jq_first_string "$response" '.geo.countryName')
-  subdivision=$(jq_first_string "$response" '.geo.subdivision')
-  city=$(jq_first_string "$response" '.geo.city')
-  location=""
-  if [ -n "$country_code" ] || [ -n "$country_name" ]; then
-    if [ -n "$country_code" ]; then
-      location=$(normalize_country_location "[${country_code}]${country_name}")
-    else
-      location=$(normalize_country_location "$country_name")
-    fi
-  fi
-  if [ -n "$subdivision" ] && [ -n "$city" ]; then
-    city="$subdivision, $city"
-  elif [ -n "$subdivision" ]; then
-    city="$subdivision"
-  fi
-  basic_set maxmind asn "$(jq_first_string "$response" 'select(.asn.number != null and .asn.number != "") | "AS\(.asn.number)"')"
-  basic_set maxmind organization "$(jq_first_string "$response" '.asn.organization')"
-  basic_set maxmind coordinates "$coordinates"
-  basic_set maxmind map "$(map_url_from_coordinates "$coordinates")"
-  basic_set maxmind city "$city"
-  basic_set maxmind registered "$(jq_first_string "$response" 'if ((.geo.registeredCountryCode // "") != "" or (.geo.registeredCountryName // "") != "") then "[\(.geo.registeredCountryCode // "")]\(.geo.registeredCountryName // "")" else empty end')"
-  basic_set maxmind continent "$(jq_first_string "$response" 'if ((.geo.continentCode // "") != "" or (.geo.continentName // "") != "") then "[\(.geo.continentCode // "")]\(.geo.continentName // "")" else empty end')"
-  basic_set maxmind timezone "$(jq_first_string "$response" '.geo.timeZone')"
-  basic_set maxmind location "$location"
-
-  # GeoLite2 的 ASN/City/Country 库没有 MaxMind Enterprise 的 user_type/company type。
-  MAXMIND_USAGE_TYPE="无效"
-  MAXMIND_COMPANY_TYPE="无效"
+  lookup_ipquality_paid maxmind_basic "$1"
 }
 
 ipquality_set_failure() {
   local provider="$1" status="${2:-$INVALID_STATUS}" raw="${3:-}"
   case "$provider" in
+    maxmind_basic)
+      basic_mark_provider maxmind "$status"
+      ;;
     maxmind)
       MAXMIND_USAGE_TYPE="$status"
       MAXMIND_COMPANY_TYPE="$status"
@@ -2518,7 +1979,7 @@ lookup_ipquality_paid() {
     return 0
   fi
   case "$provider" in
-    maxmind|scamalytics|ipapi) ;;
+    maxmind_basic|maxmind|scamalytics|ipapi) ;;
     *) return 0 ;;
   esac
 
@@ -2528,6 +1989,8 @@ lookup_ipquality_paid() {
 
   local base response error challenge_id nonce difficulty target_ip solution family=4
   local token token_response lookup_response usage_raw company_raw risk_score risk_level risk_raw
+  local asn_number organization country_code country_name registered_code registered_name
+  local continent_code continent_name continent_label latitude longitude time_zone subdivision city coordinates location
   [[ "$ip" == *:* ]] && family=6
   base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
   [ -n "$base" ] || return 0
@@ -2591,6 +2054,76 @@ lookup_ipquality_paid() {
   fi
 
   case "$provider" in
+    maxmind_basic)
+      asn_number=$(jq_first_string "$lookup_response" '.basic.asn.number')
+      organization=$(jq_first_string "$lookup_response" '.basic.asn.organization')
+      country_code=$(jq_first_string "$lookup_response" '.basic.geo.countryCode')
+      country_name=$(jq_first_string "$lookup_response" '.basic.geo.countryName')
+      registered_code=$(jq_first_string "$lookup_response" '.basic.geo.registeredCountryCode')
+      registered_name=$(jq_first_string "$lookup_response" '.basic.geo.registeredCountryName')
+      continent_code=$(jq_first_string "$lookup_response" '.basic.geo.continentCode')
+      continent_name=$(jq_first_string "$lookup_response" '.basic.geo.continentName')
+      latitude=$(jq_first_string "$lookup_response" '.basic.geo.latitude')
+      longitude=$(jq_first_string "$lookup_response" '.basic.geo.longitude')
+      time_zone=$(jq_first_string "$lookup_response" '.basic.geo.timeZone')
+      subdivision=$(jq_first_string "$lookup_response" '.basic.geo.subdivision')
+      city=$(jq_first_string "$lookup_response" '.basic.geo.city')
+      if [ -n "$latitude" ] && [ -n "$longitude" ]; then
+        coordinates="$latitude,$longitude"
+      else
+        coordinates=""
+      fi
+      if [ -n "$country_code" ] || [ -n "$country_name" ]; then
+        if [ -n "$country_code" ]; then
+          location=$(normalize_country_location "[$country_code]$country_name")
+        else
+          location=$(normalize_country_location "$country_name")
+        fi
+      else
+        location=""
+      fi
+      if [ -n "$subdivision" ] && [ -n "$city" ]; then
+        city="$subdivision, $city"
+      elif [ -n "$subdivision" ]; then
+        city="$subdivision"
+      fi
+      if [ -z "$asn_number" ] && [ -z "$organization" ] && [ -z "$country_code" ] &&
+         [ -z "$country_name" ] && [ -z "$city" ] && [ -z "$coordinates" ]; then
+        ipquality_set_failure "$provider"
+        return 0
+      fi
+      if [ -n "$registered_code" ] || [ -n "$registered_name" ]; then
+        if [ -n "$registered_code" ]; then
+          registered_name=$(normalize_country_location "[$registered_code]$registered_name")
+        else
+          registered_name=$(normalize_country_location "$registered_name")
+        fi
+      else
+        registered_name=""
+      fi
+      if [ -n "$continent_code" ] || [ -n "$continent_name" ]; then
+        if [ -n "$continent_code" ]; then
+          continent_label=$(continent_zh_name "$continent_code")
+          if [ -n "$continent_label" ]; then
+            continent_name="[$continent_code]$continent_label"
+          else
+            continent_name="[$continent_code]$continent_name"
+          fi
+        fi
+      else
+        continent_name=""
+      fi
+      if [ -n "$asn_number" ]; then asn_number="AS$asn_number"; fi
+      basic_set maxmind asn "$asn_number"
+      basic_set maxmind organization "$organization"
+      basic_set maxmind coordinates "$coordinates"
+      basic_set maxmind map "$(map_url_from_coordinates "$coordinates")"
+      basic_set maxmind city "$city"
+      basic_set maxmind registered "$registered_name"
+      basic_set maxmind continent "$continent_name"
+      basic_set maxmind timezone "$time_zone"
+      basic_set maxmind location "$location"
+      ;;
     maxmind)
       usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
       company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
@@ -3354,30 +2887,17 @@ display_type() {
 }
 
 run_one() {
-  local ip="$1" maxmind_risk_cache_hit=0
+  local ip="$1"
   reset_results
   DATABASE_CACHE_HIT=0
   if load_database_cache "$ip"; then
     DATABASE_CACHE_HIT=1
   fi
 
-  # MaxMind Enterprise 的 IP risk 作为 /24 属性缓存：同一 /24 内的其它
-  # IP 仍保留各自的基础信息，但风险分数统一沿用该网段首次成功查询的值。
-  MAXMIND_RISK_SCORE=""
-  MAXMIND_RISK_LEVEL="$INVALID_STATUS"
-  if load_maxmind_risk_cache "$ip"; then
-    maxmind_risk_cache_hit=1
-  elif [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
-    # 没有可复用的 risk 时，不能仅复用 MaxMind 的类型结果，否则 risk
-    # 查询失败会被间接缓存。
-    cache_group_reset maxmind_paid
-    MAXMIND_PAID_CACHE_HIT=0
-  fi
-
-  if [ "$MAXMIND_BASIC_CACHE_HIT" -ne 1 ]; then
-    lookup_maxmind "$ip"
-  fi
-  if [ "$IPQUALITY_PAID_LOOKUP" = "1" ] && [ "$MAXMIND_PAID_CACHE_HIT" -ne 1 ]; then
+  # MaxMind 基础信息和在线 IP Quality 都由服务端通过 PoW 查询；客户端
+  # 不读取 MMDB，也不保留 MaxMind 结果缓存。
+  lookup_maxmind "$ip"
+  if [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
     lookup_maxmind_paid "$ip"
   fi
   if [ "$IP2LOCATION_CACHE_HIT" -ne 1 ]; then
@@ -3386,23 +2906,13 @@ run_one() {
   if [ "$IPINFO_CACHE_HIT" -ne 1 ]; then
     lookup_ipinfo "$ip"
   fi
-  if [ "$SCAMALYTICS_CACHE_HIT" -ne 1 ]; then
-    lookup_scamalytics "$ip"
-  fi
+  lookup_scamalytics "$ip"
   if [[ "$ip" != *:* ]] && [ "$ACTIVE_NEIGHBOR_CACHE_HIT" -ne 1 ]; then
     lookup_active_neighbors "$ip"
   fi
 
-  # ipapi.is 单独使用 24 小时缓存；综合数据库缓存命中时，仅在此缓存
-  # 过期或不存在时重新请求 ipapi，不会因此重复查询其它数据库。
-  if ! load_ipapi_cache "$ip"; then
-    lookup_ipapi "$ip"
-    save_ipapi_cache "$ip"
-  fi
+  lookup_ipapi "$ip"
 
-  if [ "$maxmind_risk_cache_hit" -eq 0 ]; then
-    save_maxmind_risk_cache "$ip"
-  fi
   save_database_cache "$ip"
 
   run_ai_checks
