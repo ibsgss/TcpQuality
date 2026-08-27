@@ -372,23 +372,12 @@ ipinfo_label() {
   esac
 }
 
-dbip_label() {
+ipapi_label() {
   local value="$1"
   case "${value^^}" in
-    COM) printf '商业' ;; ORG) printf '组织' ;; GOV) printf '政府' ;;
-    MIL) printf '军事' ;; EDU) printf '教育' ;; LIB) printf '图书' ;;
-    CDN) printf '分发' ;; ISP) printf '固网' ;; MOB) printf '移动' ;;
-    DCH|HOSTING) printf '机房' ;; SES) printf '爬虫' ;; AIC) printf '智爬' ;;
-    RSV|RESERVED) printf '保留' ;; BUSINESS|CORPORATE) printf '商业' ;; CAFE) printf '咖网' ;;
-    CELLULAR) printf '移动' ;; COLLEGE) printf '高校' ;;
-    CONSUMER_PRIVACY_NETWORK) printf '隐网' ;;
-    CONTENT_DELIVERY_NETWORK) printf '分发' ;; GOVERNMENT) printf '政府' ;;
-    LIBRARY) printf '图书' ;; MILITARY) printf '军事' ;; RESIDENTIAL) printf '家宽' ;;
-    ROUTER) printf '路由' ;; SCHOOL) printf '学校' ;;
-    SEARCH_ENGINE_SPIDER) printf '爬虫' ;; TRAVELER) printf '旅网' ;;
-    EDUCATION) printf '教育' ;; CONSUMER|RESIDENTIAL) printf '家宽' ;;
-    MOBILE) printf '移动' ;; DATACENTER|DATA_CENTER|CLOUD) printf '机房' ;;
-    ORGANIZATION) printf '组织' ;; *) printf '%s' "$value" ;;
+    BUSINESS) printf '商业' ;; ISP) printf '家宽' ;; HOSTING) printf '机房' ;;
+    EDUCATION) printf '教育' ;; GOVERNMENT) printf '政府' ;; BANKING) printf '银行' ;;
+    *) printf '%s' "$value" ;;
   esac
 }
 
@@ -459,13 +448,13 @@ IPINFO_USAGE_TYPE="-"
 IPINFO_COMPANY_TYPE="-"
 SCAMALYTICS_RISK_SCORE=""
 SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-DBIP_USAGE_RAW=""
-DBIP_COMPANY_RAW=""
-DBIP_USAGE_TYPE="-"
-DBIP_COMPANY_TYPE=""
-DBIP_RISK_RAW=""
-DBIP_RISK_SCORE=""
-DBIP_RISK_LEVEL="$INVALID_STATUS"
+IPAPI_USAGE_RAW=""
+IPAPI_COMPANY_RAW=""
+IPAPI_USAGE_TYPE="$INVALID_STATUS"
+IPAPI_COMPANY_TYPE="$INVALID_STATUS"
+IPAPI_RISK_RAW=""
+IPAPI_RISK_SCORE=""
+IPAPI_RISK_LEVEL="$INVALID_STATUS"
 
 AI_USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/151 Safari/537.36"
 AI_PROBE_TIMEOUT_SECONDS="${AI_PROBE_TIMEOUT_SECONDS:-8}"
@@ -499,7 +488,6 @@ declare -a BASIC_FIELDS=(asn organization coordinates map city registered contin
 declare -A BASIC_MAXMIND=()
 declare -A BASIC_IP2LOCATION=()
 declare -A BASIC_IPINFO=()
-declare -A BASIC_DBIP=()
 declare -A COUNTRY_ZH_CACHE=()
 
 basic_set() {
@@ -508,7 +496,6 @@ basic_set() {
     maxmind) BASIC_MAXMIND["$field"]="$value" ;;
     ip2location) BASIC_IP2LOCATION["$field"]="$value" ;;
     ipinfo) BASIC_IPINFO["$field"]="$value" ;;
-    dbip) BASIC_DBIP["$field"]="$value" ;;
   esac
 }
 
@@ -518,7 +505,6 @@ basic_get() {
     maxmind) value="${BASIC_MAXMIND[$field]:-}" ;;
     ip2location) value="${BASIC_IP2LOCATION[$field]:-}" ;;
     ipinfo) value="${BASIC_IPINFO[$field]:-}" ;;
-    dbip) value="${BASIC_DBIP[$field]:-}" ;;
   esac
   printf '%s' "${value:--}"
 }
@@ -557,7 +543,6 @@ reset_basic_results() {
   BASIC_MAXMIND=()
   BASIC_IP2LOCATION=()
   BASIC_IPINFO=()
-  BASIC_DBIP=()
   basic_mark_provider maxmind "无效"
 }
 
@@ -581,13 +566,13 @@ reset_results() {
   IPINFO_COMPANY_TYPE="-"
   SCAMALYTICS_RISK_SCORE=""
   SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-  DBIP_USAGE_RAW=""
-  DBIP_COMPANY_RAW=""
-  DBIP_USAGE_TYPE="-"
-  DBIP_COMPANY_TYPE=""
-  DBIP_RISK_RAW=""
-  DBIP_RISK_SCORE=""
-  DBIP_RISK_LEVEL="$INVALID_STATUS"
+  IPAPI_USAGE_RAW=""
+  IPAPI_COMPANY_RAW=""
+  IPAPI_USAGE_TYPE="$INVALID_STATUS"
+  IPAPI_COMPANY_TYPE="$INVALID_STATUS"
+  IPAPI_RISK_RAW=""
+  IPAPI_RISK_SCORE=""
+  IPAPI_RISK_LEVEL="$INVALID_STATUS"
   ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
   ACTIVE_NEIGHBOR_LABELS=()
   ACTIVE_NEIGHBOR_SEGMENTS=()
@@ -614,7 +599,7 @@ reset_ai_results() {
 
 # 只缓存数据库查询结果。AI 服务和端口探测属于实时状态，每次运行都会重新检查。
 declare -a IPQUALITY_CACHE_VARIABLES=(
-  BASIC_MAXMIND BASIC_IP2LOCATION BASIC_IPINFO BASIC_DBIP
+  BASIC_MAXMIND BASIC_IP2LOCATION BASIC_IPINFO
   MAXMIND_USAGE_RAW MAXMIND_COMPANY_RAW MAXMIND_USAGE_TYPE MAXMIND_COMPANY_TYPE
   MAXMIND_RISK_SCORE MAXMIND_RISK_LEVEL
   IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW IP2LOCATION_USAGE_TYPE
@@ -622,8 +607,8 @@ declare -a IPQUALITY_CACHE_VARIABLES=(
   IP2LOCATION_RISK_LEVEL
   IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
   SCAMALYTICS_RISK_SCORE SCAMALYTICS_RISK_LEVEL
-  DBIP_USAGE_RAW DBIP_COMPANY_RAW DBIP_USAGE_TYPE DBIP_COMPANY_TYPE
-  DBIP_RISK_RAW DBIP_RISK_SCORE DBIP_RISK_LEVEL
+  IPAPI_USAGE_RAW IPAPI_COMPANY_RAW IPAPI_USAGE_TYPE IPAPI_COMPANY_TYPE
+  IPAPI_RISK_RAW IPAPI_RISK_SCORE IPAPI_RISK_LEVEL
   ACTIVE_NEIGHBOR_VALUE ACTIVE_NEIGHBOR_LABELS ACTIVE_NEIGHBOR_SEGMENTS
   ACTIVE_NEIGHBOR_ACTIVE ACTIVE_NEIGHBOR_TOTAL
 )
@@ -717,7 +702,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="database-cache-v2|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3|dbip-ip-v2"
+  context="database-cache-v3|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3|ipapi-remote-v1"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -736,7 +721,9 @@ database_cache_has_failed_results() {
     "$MAXMIND_RISK_LEVEL" \
     "$SCAMALYTICS_RISK_LEVEL" \
     "$IP2LOCATION_USAGE_TYPE" \
-    "$DBIP_USAGE_TYPE"; do
+    "$IPAPI_USAGE_TYPE" \
+    "$IPAPI_COMPANY_TYPE" \
+    "$IPAPI_RISK_LEVEL"; do
     case "$value" in
       "$INVALID_STATUS"|冷却|失败) return 0 ;;
     esac
@@ -746,7 +733,7 @@ database_cache_has_failed_results() {
 
 database_cache_has_data() {
   local provider field value
-  for provider in maxmind ip2location ipinfo dbip; do
+  for provider in maxmind ip2location ipinfo; do
     for field in asn organization coordinates city location; do
       value=$(basic_get "$provider" "$field")
       case "$value" in
@@ -757,12 +744,12 @@ database_cache_has_data() {
   done
   for value in \
     "$MAXMIND_RISK_SCORE" "$IP2LOCATION_RISK_SCORE" \
-    "$SCAMALYTICS_RISK_SCORE" "$DBIP_RISK_SCORE"; do
+    "$SCAMALYTICS_RISK_SCORE" "$IPAPI_RISK_SCORE"; do
     risk_score_valid "$value" && return 0
   done
   for value in \
     "$MAXMIND_USAGE_RAW" "$IP2LOCATION_USAGE_RAW" "$IPINFO_USAGE_RAW" \
-    "$DBIP_USAGE_RAW"; do
+    "$IPAPI_USAGE_RAW"; do
     [ -n "$value" ] && return 0
   done
   return 1
@@ -791,7 +778,7 @@ load_database_cache() {
     reset_results
     return 1
   }
-  if [ "${CACHE_VERSION:-}" != "2" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
+  if [ "${CACHE_VERSION:-}" != "3" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
      [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
      ! [[ "${CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]]; then
     reset_results
@@ -816,7 +803,7 @@ save_database_cache() {
   saved_at=$(date +%s)
   cache_signature=$(cache_context_signature)
   {
-    printf 'CACHE_VERSION=2\n'
+    printf 'CACHE_VERSION=3\n'
     printf 'CACHE_IP=%q\n' "$ip"
     printf 'CACHE_SAVED_AT=%q\n' "$saved_at"
     printf 'CACHE_SIGNATURE=%q\n' "$cache_signature"
@@ -1437,8 +1424,8 @@ report_neighbor_line() {
 risk_color() {
   local value="$1"
   case "$value" in
-    低风险) printf '%s' "$C_GREEN" ;;
-    中风险) printf '%s' "$C_YELLOW" ;;
+    极低风险|低风险) printf '%s' "$C_GREEN" ;;
+    较高风险|中风险) printf '%s' "$C_YELLOW" ;;
     高风险|极高风险) printf '%s' "$C_RED" ;;
     "$INVALID_STATUS"|冷却|-|—|"") printf '%s' "$C_DIM" ;;
     *) : ;;
@@ -1478,7 +1465,7 @@ report_risk_row() {
   local kind="$1" label="$2" index color_key
   shift 2
   local values=("$@")
-  local levels=("$MAXMIND_RISK_LEVEL" "$SCAMALYTICS_RISK_LEVEL" "$IP2LOCATION_RISK_LEVEL" "$DBIP_RISK_LEVEL")
+  local levels=("$MAXMIND_RISK_LEVEL" "$SCAMALYTICS_RISK_LEVEL" "$IP2LOCATION_RISK_LEVEL" "$IPAPI_RISK_LEVEL")
   printf '  '
   report_label_cell "$label" "$REPORT_LABEL_WIDTH"
   for index in 0 1 2 3; do
@@ -2240,14 +2227,43 @@ lookup_maxmind() {
   MAXMIND_COMPANY_TYPE="无效"
 }
 
+ipquality_set_failure() {
+  local provider="$1" status="${2:-$INVALID_STATUS}" raw="${3:-}"
+  case "$provider" in
+    maxmind)
+      MAXMIND_USAGE_TYPE="$status"
+      MAXMIND_COMPANY_TYPE="$status"
+      MAXMIND_USAGE_RAW="$raw"
+      MAXMIND_COMPANY_RAW="$raw"
+      ;;
+    scamalytics)
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$status"
+      ;;
+    ipapi)
+      IPAPI_USAGE_TYPE="$status"
+      IPAPI_COMPANY_TYPE="$status"
+      IPAPI_USAGE_RAW="$raw"
+      IPAPI_COMPANY_RAW="$raw"
+      IPAPI_RISK_RAW="$raw"
+      IPAPI_RISK_SCORE=""
+      IPAPI_RISK_LEVEL="$status"
+      ;;
+  esac
+}
+
 lookup_ipquality_paid() {
   local provider="$1" ip="$2"
   if [ "$provider" = "maxmind" ] && [ "$IPQUALITY_PAID_LOOKUP" != "1" ]; then
     return 0
   fi
+  case "$provider" in
+    maxmind|scamalytics|ipapi) ;;
+    *) return 0 ;;
+  esac
 
   local base response error challenge_id nonce difficulty target_ip solution family=4
-  local token token_response lookup_response usage_raw company_raw risk_score
+  local token token_response lookup_response usage_raw company_raw risk_score risk_level risk_raw
   [[ "$ip" == *:* ]] && family=6
   base=$(printf '%s' "$IPQUALITY_API_BASE" | sed 's:/*$::')
   [ -n "$base" ] || return 0
@@ -2256,40 +2272,18 @@ lookup_ipquality_paid() {
     "$(jq -nc --arg ip "$ip" --arg provider "$provider" '{ip:$ip,provider:$provider}')" \
     "" "$family" || true)
   if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    if [ "$provider" = "maxmind" ]; then
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
+    ipquality_set_failure "$provider"
     return 0
   fi
   error=$(jq_first_string "$response" '.error')
   if [ -n "$error" ]; then
     case "$error" in
-      maxmind_not_configured|scamalytics_not_configured) return 0 ;;
+      maxmind_not_configured|scamalytics_not_configured|ipapi_not_configured) return 0 ;;
       ip_cooldown|challenge_rate_limited)
-        if [ "$provider" = "maxmind" ]; then
-          MAXMIND_USAGE_TYPE="冷却"
-          MAXMIND_COMPANY_TYPE="冷却"
-          MAXMIND_USAGE_RAW="$error"
-          MAXMIND_COMPANY_RAW="$error"
-        else
-          SCAMALYTICS_RISK_SCORE=""
-          SCAMALYTICS_RISK_LEVEL="冷却"
-        fi
+        ipquality_set_failure "$provider" "冷却" "$error"
         ;;
       *)
-        if [ "$provider" = "maxmind" ]; then
-          MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-          MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-          MAXMIND_USAGE_RAW="$error"
-          MAXMIND_COMPANY_RAW="$error"
-        else
-          SCAMALYTICS_RISK_SCORE=""
-          SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-        fi
+        ipquality_set_failure "$provider" "$INVALID_STATUS" "$error"
         ;;
     esac
     return 0
@@ -2300,27 +2294,13 @@ lookup_ipquality_paid() {
   difficulty=$(jq_first_string "$response" '.difficulty')
   target_ip=$(jq_first_string "$response" '.targetIp')
   if [ -z "$challenge_id" ] || [ -z "$nonce" ] || [ -z "$target_ip" ]; then
-    if [ "$provider" = "maxmind" ]; then
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
+    ipquality_set_failure "$provider"
     return 0
   fi
   difficulty="${difficulty:-16}"
   solution=$(solve_ipquality_pow "$nonce" "$target_ip" "$difficulty" || true)
   if [ -z "$solution" ]; then
-    if [ "$provider" = "maxmind" ]; then
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-      MAXMIND_USAGE_RAW="pow_failed"
-      MAXMIND_COMPANY_RAW="pow_failed"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
+    ipquality_set_failure "$provider" "$INVALID_STATUS" "pow_failed"
     return 0
   fi
 
@@ -2330,105 +2310,112 @@ lookup_ipquality_paid() {
   token=$(jq_first_string "$token_response" '.token')
   if [ -z "$token" ]; then
     error=$(jq_first_string "$token_response" '.error')
-    if [ "$provider" = "maxmind" ]; then
-      if [ "$error" = "ip_cooldown" ]; then
-        MAXMIND_USAGE_TYPE="冷却"
-        MAXMIND_COMPANY_TYPE="冷却"
-      else
-        MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-        MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-      fi
-      MAXMIND_USAGE_RAW="${error:-token_failed}"
-      MAXMIND_COMPANY_RAW="${error:-token_failed}"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL=$([ "$error" = "ip_cooldown" ] && printf '冷却' || printf '%s' "$INVALID_STATUS")
-    fi
+    ipquality_set_failure "$provider" \
+      "$([ "$error" = "ip_cooldown" ] && printf '冷却' || printf '%s' "$INVALID_STATUS")" \
+      "${error:-token_failed}"
     return 0
   fi
 
   lookup_response=$(fetch_json_post "$base/ipquality/lookup" '{}' "$token" "$family" || true)
   if ! printf '%s' "$lookup_response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    if [ "$provider" = "maxmind" ]; then
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
+    ipquality_set_failure "$provider"
     return 0
   fi
   error=$(jq_first_string "$lookup_response" '.error')
   if [ -n "$error" ]; then
-    if [ "$error" = "maxmind_not_configured" ] || [ "$error" = "scamalytics_not_configured" ]; then
-      return 0
-    fi
-    if [ "$provider" = "maxmind" ]; then
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-      MAXMIND_USAGE_RAW="$error"
-      MAXMIND_COMPANY_RAW="$error"
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
+    case "$error" in
+      maxmind_not_configured|scamalytics_not_configured|ipapi_not_configured) return 0 ;;
+    esac
+    ipquality_set_failure "$provider" "$INVALID_STATUS" "$error"
     return 0
   fi
 
-  if [ "$provider" = "maxmind" ]; then
-    usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
-    company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
-    MAXMIND_USAGE_RAW="$usage_raw"
-    MAXMIND_COMPANY_RAW="$company_raw"
-    if [ -n "$usage_raw" ]; then
-      MAXMIND_USAGE_TYPE=$(maxmind_label "$usage_raw")
-    else
-      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
-    fi
-    if [ -n "$company_raw" ]; then
-      MAXMIND_COMPANY_TYPE=$(maxmind_label "$company_raw")
-    else
-      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
-    fi
+  case "$provider" in
+    maxmind)
+      usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      MAXMIND_USAGE_RAW="$usage_raw"
+      MAXMIND_COMPANY_RAW="$company_raw"
+      if [ -n "$usage_raw" ]; then
+        MAXMIND_USAGE_TYPE=$(maxmind_label "$usage_raw")
+      else
+        MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      fi
+      if [ -n "$company_raw" ]; then
+        MAXMIND_COMPANY_TYPE=$(maxmind_label "$company_raw")
+      else
+        MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      fi
 
-    risk_score=$(jq_first_string "$lookup_response" '
-      [
-        .attributes.riskScore,
-        .attributes.risk_score,
-        .attributes.ipRiskSnapshot,
-        .attributes.ip_risk_snapshot
-      ][]
-      | select(. != null and (type == "string" or type == "number"))
-      | tostring
-    ')
-    if risk_score_valid "$risk_score"; then
-      MAXMIND_RISK_SCORE="$risk_score"
-      MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$risk_score")
-    else
-      MAXMIND_RISK_SCORE=""
-      MAXMIND_RISK_LEVEL="$INVALID_STATUS"
-    fi
-  else
-    risk_score=$(jq_first_string "$lookup_response" '
-      [
-        .attributes.riskScore,
-        .attributes.risk_score,
-        .riskScore,
-        .risk_score,
-        .score,
-        .fraud_score
-      ][]
-      | select(. != null and (type == "string" or type == "number"))
-      | tostring
-    ')
-    if risk_score_valid "$risk_score"; then
-      SCAMALYTICS_RISK_SCORE="$risk_score"
-      SCAMALYTICS_RISK_LEVEL=$(risk_level_from_score scamalytics "$risk_score")
-    else
-      SCAMALYTICS_RISK_SCORE=""
-      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-    fi
-  fi
+      risk_score=$(jq_first_string "$lookup_response" '
+        [
+          .attributes.riskScore,
+          .attributes.risk_score,
+          .attributes.ipRiskSnapshot,
+          .attributes.ip_risk_snapshot
+        ][]
+        | select(. != null and (type == "string" or type == "number"))
+        | tostring
+      ')
+      if risk_score_valid "$risk_score"; then
+        MAXMIND_RISK_SCORE="$risk_score"
+        MAXMIND_RISK_LEVEL=$(risk_level_from_score maxmind "$risk_score")
+      else
+        MAXMIND_RISK_SCORE=""
+        MAXMIND_RISK_LEVEL="$INVALID_STATUS"
+      fi
+      ;;
+    scamalytics)
+      risk_score=$(jq_first_string "$lookup_response" '
+        [
+          .attributes.riskScore,
+          .attributes.risk_score,
+          .riskScore,
+          .risk_score,
+          .score,
+          .fraud_score
+        ][]
+        | select(. != null and (type == "string" or type == "number"))
+        | tostring
+      ')
+      if risk_score_valid "$risk_score"; then
+        SCAMALYTICS_RISK_SCORE="$risk_score"
+        SCAMALYTICS_RISK_LEVEL=$(risk_level_from_score scamalytics "$risk_score")
+      else
+        SCAMALYTICS_RISK_SCORE=""
+        SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+      fi
+      ;;
+    ipapi)
+      usage_raw=$(jq_first_string "$lookup_response" '[.attributes.usageTypeRaw, .attributes.usageType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      company_raw=$(jq_first_string "$lookup_response" '[.attributes.companyTypeRaw, .attributes.companyType][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      risk_score=$(jq_first_string "$lookup_response" '[.attributes.riskScore, .attributes.risk_score][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      risk_level=$(jq_first_string "$lookup_response" '[.attributes.riskLevel, .attributes.risk_level][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      risk_raw=$(jq_first_string "$lookup_response" '[.attributes.riskRaw, .attributes.risk_raw][] | select(. != null and (type == "string" or type == "number")) | tostring')
+      IPAPI_USAGE_RAW="$usage_raw"
+      IPAPI_COMPANY_RAW="$company_raw"
+      IPAPI_RISK_RAW="$risk_raw"
+      if [ -n "$usage_raw" ]; then
+        IPAPI_USAGE_TYPE=$(ipapi_label "$usage_raw")
+      else
+        IPAPI_USAGE_TYPE="$INVALID_STATUS"
+      fi
+      if [ -n "$company_raw" ]; then
+        IPAPI_COMPANY_TYPE=$(ipapi_label "$company_raw")
+      else
+        IPAPI_COMPANY_TYPE="$INVALID_STATUS"
+      fi
+      if risk_score_valid "$risk_score"; then
+        IPAPI_RISK_SCORE="$risk_score"
+      else
+        IPAPI_RISK_SCORE=""
+      fi
+      case "$risk_level" in
+        极低风险|低风险|较高风险|高风险|极高风险) IPAPI_RISK_LEVEL="$risk_level" ;;
+        *) IPAPI_RISK_LEVEL="$INVALID_STATUS" ;;
+      esac
+      ;;
+  esac
 }
 
 lookup_maxmind_paid() {
@@ -2609,176 +2596,8 @@ lookup_scamalytics() {
   lookup_ipquality_paid scamalytics "$1"
 }
 
-fetch_dbip_core_page() {
-  curl -sSL --connect-timeout 5 --max-time 12 \
-    -H 'accept: */*' \
-    -H 'accept-language: en-US,en;q=0.9' \
-    -H 'content-type: text/html;charset=UTF-8' \
-    -H 'dnt: 1' \
-    -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36' \
-    'https://db-ip.com/api/core/' 2>/dev/null || true
-}
-
-dbip_page_api_key() {
-  local page="$1"
-  page=${page//$'\r'/ }
-  page=${page//$'\n'/ }
-  printf '%s' "$page" \
-    | sed -n 's/.*data-api-key="\([^"]*\)".*/\1/p' \
-    | sed -n '1p'
-}
-
-fetch_dbip_self_json() {
-  local api_key="$1"
-  curl -sSL --connect-timeout 5 --max-time 12 \
-    -H 'accept: */*' \
-    -H 'accept-language: en-US,en;q=0.9' \
-    -H 'content-type: text/plain;charset=UTF-8' \
-    -H 'dnt: 1' \
-    -H 'origin: https://db-ip.com' \
-    -H 'priority: u=1, i' \
-    -H 'referer: https://db-ip.com/' \
-    -H 'sec-ch-ua: "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"' \
-    -H 'sec-ch-ua-mobile: ?0' \
-    -H 'sec-ch-ua-platform: "Windows"' \
-    -H 'sec-fetch-dest: empty' \
-    -H 'sec-fetch-mode: cors' \
-    -H 'sec-fetch-site: same-site' \
-    -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36' \
-    --data-raw '[["11.49","EUR"],["139.90","EUR"],["699.90","EUR"]]' \
-    "https://api.db-ip.com/v2/${api_key}/self?convertCurrencies" 2>/dev/null || true
-}
-
-fetch_dbip_free_json() {
-  local ip="$1" family=4
-  [[ "$ip" == *:* ]] && family=6
-  curl "-$family" -sSL --connect-timeout 5 --max-time 12 \
-    -H 'accept: application/json' \
-    -H 'user-agent: TcpQuality-IPQuality/0.1' \
-    "https://api.db-ip.com/v2/free/${ip}" 2>/dev/null || true
-}
-
-lookup_dbip() {
-  local page api_key response error coordinates country_code country_name registered region city location continent
-  page=$(fetch_dbip_core_page || true)
-  api_key=$(dbip_page_api_key "$page")
-  response=""
-  if [ -n "$api_key" ]; then
-    response=$(fetch_dbip_self_json "$api_key")
-    if ! printf '%s' "$response" | jq -e --arg ip "$ip" \
-      'type == "object" and .ipAddress == $ip and (.errorCode == null)' >/dev/null 2>&1; then
-      response=""
-    fi
-  fi
-  if [ -z "$response" ]; then
-    response=$(fetch_dbip_free_json "$ip")
-  fi
-
-  if ! printf '%s' "$response" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    DBIP_USAGE_TYPE="$INVALID_STATUS"
-    basic_mark_provider dbip "$INVALID_STATUS"
-    return 0
-  fi
-
-  error=$(jq_first_string "$response" '
-    [ .errorCode, .error, .message ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  if [ -n "$error" ]; then
-    DBIP_USAGE_TYPE="$INVALID_STATUS"
-    DBIP_USAGE_RAW="$error"
-    basic_mark_provider dbip "$INVALID_STATUS"
-    return 0
-  fi
-
-  DBIP_USAGE_RAW=$(jq_first_string "$response" '
-    [
-      .usage_type,
-      .usageType,
-      .usage,
-      .network.usage_type,
-      .network.usageType,
-      .network.type,
-      .data.usage_type,
-      .data.usageType
-    ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  DBIP_RISK_RAW=$(jq_first_string "$response" '
-    [
-      .threatLevel,
-      .threat_level,
-      .threat.level,
-      .data.threatLevel,
-      .data.threat_level
-    ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  case "${DBIP_RISK_RAW,,}" in
-    low|low_risk)
-      DBIP_RISK_SCORE="0"
-      DBIP_RISK_LEVEL="低风险"
-      ;;
-    medium|medium_risk)
-      DBIP_RISK_SCORE="50"
-      DBIP_RISK_LEVEL="中风险"
-      ;;
-    high|high_risk)
-      DBIP_RISK_SCORE="100"
-      DBIP_RISK_LEVEL="高风险"
-      ;;
-    *)
-      DBIP_RISK_SCORE=""
-      DBIP_RISK_LEVEL="$INVALID_STATUS"
-      ;;
-  esac
-  coordinates=$(jq_first_string "$response" 'select(.latitude != null and .longitude != null) | "\(.latitude),\(.longitude)"')
-  country_code=$(jq_first_string "$response" '.countryCode')
-  country_name=$(jq_first_string "$response" '.countryName')
-  registered=$(jq_first_string "$response" '
-    [
-      .registeredCountry,
-      .registered_country,
-      .registrationCountry,
-      .registration_country,
-      .network.registeredCountry,
-      .network.registered_country,
-      .data.registeredCountry,
-      .data.registered_country
-    ][]
-    | select(. != null and (type == "string" or type == "number"))
-    | tostring
-  ')
-  region=$(jq_first_string "$response" '.stateProv')
-  city=$(jq_first_string "$response" '.city')
-  location=""
-  if [ -n "$country_code" ] || [ -n "$country_name" ]; then
-    if [ -n "$country_code" ]; then
-      location=$(normalize_country_location "[${country_code}]${country_name}")
-    else
-      location=$(normalize_country_location "$country_name")
-    fi
-  fi
-  basic_set dbip asn "$(jq_first_string "$response" 'select(.asNumber != null) | "AS\(.asNumber)"')"
-  basic_set dbip organization "$(jq_first_string "$response" '[.organization, .isp, .asName][] | select(. != null and (type == "string" or type == "number")) | tostring')"
-  basic_set dbip coordinates "$coordinates"
-  basic_set dbip map "$(map_url_from_coordinates "$coordinates")"
-  basic_set dbip city "$(if [ -n "$region" ] && [ -n "$city" ]; then printf '%s, %s' "$region" "$city"; else printf '%s%s' "$region" "$city"; fi)"
-  basic_set dbip registered "$(normalize_country_location "$registered")"
-  continent=$(jq_first_string "$response" 'if .continentCode != null and .continentName != null then "[\(.continentCode)]\(.continentName)" elif .continentName != null then .continentName else empty end')
-  [ -n "$continent" ] || continent=$(continent_from_country_value "$country_code")
-  basic_set dbip continent "$continent"
-  basic_set dbip timezone "$(jq_first_string "$response" '.timeZone')"
-  basic_set dbip location "$location"
-
-  if [ -n "$DBIP_USAGE_RAW" ]; then
-    DBIP_USAGE_TYPE=$(dbip_label "$DBIP_USAGE_RAW")
-  else
-    DBIP_USAGE_TYPE="$INVALID_STATUS"
-  fi
+lookup_ipapi() {
+  lookup_ipquality_paid ipapi "$1"
 }
 
 bgp_tools_prefix() {
@@ -3038,32 +2857,31 @@ report_basic_rows() {
 }
 
 report_type_rows() {
-  report_database_line '数据库' 'MaxMind' 'IPinfo' 'IP2Location' 'DB-IP'
+  report_database_line '数据库' 'MaxMind' 'IPinfo' 'IP2Location' 'ipapi.is'
   report_type_line '使用类型' \
     "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
     "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
     "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
-    "$(display_type "$DBIP_USAGE_TYPE" "$DBIP_USAGE_RAW")"
-  # DB-IP 没有独立的公司类型字段，因此保留空白，不显示“未提供”。
+    "$(display_type "$IPAPI_USAGE_TYPE" "$IPAPI_USAGE_RAW")"
   report_type_line '公司类型' \
     "$(display_type "$MAXMIND_COMPANY_TYPE" "$MAXMIND_COMPANY_RAW")" \
     "$(display_type "$IPINFO_COMPANY_TYPE" "$IPINFO_COMPANY_RAW")" \
     "$(display_type "$IP2LOCATION_COMPANY_TYPE" "$IP2LOCATION_COMPANY_RAW")" \
-    ''
+    "$(display_type "$IPAPI_COMPANY_TYPE" "$IPAPI_COMPANY_RAW")"
 }
 
 report_risk_rows() {
-  report_database_line '数据库' 'MaxMind' 'Scamalytics' 'IP2Location' 'DB-IP'
+  report_database_line '数据库' 'MaxMind' 'Scamalytics' 'IP2Location' 'ipapi.is'
   report_risk_line score '分数' \
     "$(risk_score_display "$MAXMIND_RISK_SCORE")" \
     "$(risk_score_display "$SCAMALYTICS_RISK_SCORE")" \
     "$(risk_score_display "$IP2LOCATION_RISK_SCORE")" \
-    "$(risk_score_display "$DBIP_RISK_SCORE")"
+    "$(risk_score_display "$IPAPI_RISK_SCORE")"
   report_risk_line level '等级' \
     "$MAXMIND_RISK_LEVEL" \
     "$SCAMALYTICS_RISK_LEVEL" \
     "$IP2LOCATION_RISK_LEVEL" \
-    "$DBIP_RISK_LEVEL"
+    "$IPAPI_RISK_LEVEL"
 }
 
 report_ai_rows() {
@@ -3171,18 +2989,19 @@ write_report_json() {
     --arg maxmindUsage "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
     --arg ip2Usage "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     --arg ipinfoUsage "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
-    --arg dbipUsage "$(display_type "$DBIP_USAGE_TYPE" "$DBIP_USAGE_RAW")" \
+    --arg ipapiUsage "$(display_type "$IPAPI_USAGE_TYPE" "$IPAPI_USAGE_RAW")" \
     --arg maxmindCompany "$(display_type "$MAXMIND_COMPANY_TYPE" "$MAXMIND_COMPANY_RAW")" \
     --arg ip2Company "$(display_type "$IP2LOCATION_COMPANY_TYPE" "$IP2LOCATION_COMPANY_RAW")" \
     --arg ipinfoCompany "$(display_type "$IPINFO_COMPANY_TYPE" "$IPINFO_COMPANY_RAW")" \
+    --arg ipapiCompany "$(display_type "$IPAPI_COMPANY_TYPE" "$IPAPI_COMPANY_RAW")" \
     --arg maxmindScore "$(risk_score_display "$MAXMIND_RISK_SCORE")" \
     --arg ip2Score "$(risk_score_display "$IP2LOCATION_RISK_SCORE")" \
     --arg scamalyticsScore "$(risk_score_display "$SCAMALYTICS_RISK_SCORE")" \
-    --arg dbipScore "$(risk_score_display "$DBIP_RISK_SCORE")" \
+    --arg ipapiScore "$(risk_score_display "$IPAPI_RISK_SCORE")" \
     --arg maxmindLevel "$MAXMIND_RISK_LEVEL" \
     --arg ip2Level "$IP2LOCATION_RISK_LEVEL" \
     --arg scamalyticsLevel "$SCAMALYTICS_RISK_LEVEL" \
-    --arg dbipLevel "$DBIP_RISK_LEVEL" \
+    --arg ipapiLevel "$IPAPI_RISK_LEVEL" \
     --arg chatgptStatus "$AI_CHATGPT_STATUS" \
     --arg geminiStatus "$AI_GEMINI_STATUS" \
     --arg grokStatus "$AI_GROK_STATUS" \
@@ -3224,17 +3043,17 @@ write_report_json() {
         ]
       },
       type: {
-        columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
+        columns: ["MaxMind", "IPinfo", "IP2Location", "ipapi.is"],
         rows: [
-          {"label": "使用类型", "values": [$maxmindUsage, $ipinfoUsage, $ip2Usage, $dbipUsage]},
-          {"label": "公司类型", "values": [$maxmindCompany, $ipinfoCompany, $ip2Company, "-"]}
+          {"label": "使用类型", "values": [$maxmindUsage, $ipinfoUsage, $ip2Usage, $ipapiUsage]},
+          {"label": "公司类型", "values": [$maxmindCompany, $ipinfoCompany, $ip2Company, $ipapiCompany]}
         ]
       },
       risk: {
-        columns: ["MaxMind", "Scamalytics", "IP2Location", "DB-IP"],
+        columns: ["MaxMind", "Scamalytics", "IP2Location", "ipapi.is"],
         rows: [
-          {"label": "分数", "values": [$maxmindScore, $scamalyticsScore, $ip2Score, $dbipScore]},
-          {"label": "等级", "values": [$maxmindLevel, $scamalyticsLevel, $ip2Level, $dbipLevel]}
+          {"label": "分数", "values": [$maxmindScore, $scamalyticsScore, $ip2Score, $ipapiScore]},
+          {"label": "等级", "values": [$maxmindLevel, $scamalyticsLevel, $ip2Level, $ipapiLevel]}
         ]
       },
       ai: {
@@ -3286,7 +3105,7 @@ run_one() {
     lookup_ip2location "$ip"
     lookup_ipinfo "$ip"
     lookup_scamalytics "$ip"
-    lookup_dbip "$ip"
+    lookup_ipapi "$ip"
     if [[ "$ip" != *:* ]]; then
       lookup_active_neighbors "$ip"
     fi
