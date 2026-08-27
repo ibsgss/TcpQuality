@@ -1016,6 +1016,7 @@ report_color_prefix() {
 
 REPORT_LABEL_WIDTH=0
 REPORT_COLUMN_WIDTHS=(0 0 0 0)
+RISK_VALUE_WIDTH=6
 REPORT_MEASURE_ONLY=0
 
 report_measure() {
@@ -1166,22 +1167,28 @@ risk_score_display() {
 }
 
 report_risk_cell() {
-  local value="$1" width="$2" color_key="${3:-$value}" truncated color
-  truncated=$(report_truncate "$value" "$width")
+  local value="$1" width="$2" color_key="${3:-$value}" truncated color value_width trailing_width
+  value_width="$RISK_VALUE_WIDTH"
+  [ "$value_width" -gt "$width" ] && value_width="$width"
+  trailing_width=$((width - value_width))
+  truncated=$(report_truncate "$value" "$value_width")
   color=$(risk_color "$color_key")
-  # 分数和等级从各自列的起始位置左对齐，并完整占用同样的显示宽度。
-  # 有效风险值的底纹覆盖整个固定单元格，其他状态仅保留文字颜色，
-  # 但仍使用完全相同的占位宽度。
+  # 分数和等级均使用 3 个汉字的固定显示宽度，并从各列起始位置左对齐。
+  # 列本身仍保留原宽度，确保风险值继续与数据库表头及其他区块对齐；
+  # 底纹只覆盖风险值单元格，不把整列的空白区域染色。
   if report_color_has_background "$color"; then
     printf '%s%s' "$(report_background_color "$color")" "$color"
-    report_pad "$truncated" "$width"
+    report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
     printf '%s' "$color"
-    report_pad "$truncated" "$width"
+    report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   else
-    report_pad "$truncated" "$width"
+    report_pad "$truncated" "$value_width"
+  fi
+  if [ "$trailing_width" -gt 0 ]; then
+    printf '%*s' "$trailing_width" ''
   fi
 }
 
