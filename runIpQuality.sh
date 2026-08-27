@@ -17,15 +17,15 @@ IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
 INVALID_STATUS="无效"
 
 C_CYAN=$'\033[36m'
-# Keep the foreground as the normal ANSI 8-color red/yellow/green, and use
-# dark ANSI 8-bit (256-color) backgrounds so the same-color text remains
-# readable instead of being covered by 41/43/42.
+# Keep red/yellow/green as the internal status colors, but render IPQuality
+# status cells with white text on the corresponding ANSI 8-color background.
 C_GREEN=$'\033[0;32m'
 C_YELLOW=$'\033[0;33m'
 C_RED=$'\033[0;31m'
-C_BG_RED=$'\033[48;5;52m'
-C_BG_YELLOW=$'\033[48;5;58m'
-C_BG_GREEN=$'\033[48;5;22m'
+C_WHITE=$'\033[0;37m'
+C_BG_RED=$'\033[41m'
+C_BG_YELLOW=$'\033[43m'
+C_BG_GREEN=$'\033[42m'
 C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 C_NC=$'\033[0m'
@@ -1026,9 +1026,9 @@ report_color_prefix() {
   local color="$1" background
   if report_color_has_background "$color"; then
     background=$(report_background_color "$color")
-    # The font sequence contains SGR 0, which resets an already selected
-    # background.  Set the font first and the background second.
-    printf '%s%s' "$color" "$background"
+    # Set white text first, then the colored background; the background does
+    # not reset the foreground.
+    printf '%s%s' "$C_WHITE" "$background"
   else
     printf '%s' "$color"
   fi
@@ -1199,8 +1199,7 @@ report_risk_cell() {
   # 红黄绿风险值同时使用对应底纹，底纹覆盖整个固定风险值单元格，
   # 其他状态仅保留字体颜色。
   if report_color_has_background "$color"; then
-    # Set the background after the font; C_GREEN/C_YELLOW/C_RED include SGR 0.
-    printf '%s%s' "$color" "$(report_background_color "$color")"
+    printf '%s%s' "$C_WHITE" "$(report_background_color "$color")"
     report_pad "$truncated" "$value_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
