@@ -1230,6 +1230,28 @@ report_database_row() {
   printf '\n'
 }
 
+report_row_2() {
+  local values=("$@") index
+  printf '  '
+  report_label_cell "${values[0]}" "$REPORT_LABEL_WIDTH"
+  for index in 1 2; do
+    printf '  '
+    report_cell "${values[$index]}" "${REPORT_COLUMN_WIDTHS[$((index - 1))]}"
+  done
+  printf '\n'
+}
+
+report_database_row_2() {
+  local values=("$@") index
+  printf '  '
+  report_label_cell "${values[0]}" "$REPORT_LABEL_WIDTH"
+  for index in 1 2; do
+    printf '  '
+    report_label_cell "${values[$index]}" "${REPORT_COLUMN_WIDTHS[$((index - 1))]}"
+  done
+  printf '\n'
+}
+
 report_line() {
   if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
     report_measure "$@"
@@ -1251,6 +1273,22 @@ report_database_line() {
     report_measure "$@"
   else
     report_database_row "$@"
+  fi
+}
+
+report_line_2() {
+  if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
+    report_measure "$@"
+  else
+    report_row_2 "$@"
+  fi
+}
+
+report_database_line_2() {
+  if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
+    report_measure "$@"
+  else
+    report_database_row_2 "$@"
   fi
 }
 
@@ -2889,37 +2927,26 @@ lookup_active_neighbors() {
 
 report_basic_rows() {
   local ip="$1"
-  report_database_line '数据库' 'MaxMind' 'IP2Location' 'IPinfo' 'DB-IP'
-  report_line 'ASN' \
+  report_database_line_2 '数据库' 'MaxMind' 'IP2Location'
+  report_line_2 'ASN' \
     "$(basic_get maxmind asn)" \
-    "$(basic_get ip2location asn)" \
-    "$(basic_get ipinfo asn)" \
-    "$(basic_get dbip asn)"
-  report_line '组织' \
+    "$(basic_get ip2location asn)"
+  report_line_2 '组织' \
     "$(basic_get maxmind organization)" \
-    "$(basic_get ip2location organization)" \
-    "$(basic_get ipinfo organization)" \
-    "$(basic_get dbip organization)"
-  report_line '坐标' \
+    "$(basic_get ip2location organization)"
+  report_line_2 '坐标' \
     "$(basic_get maxmind coordinates)" \
-    "$(basic_get ip2location coordinates)" \
-    "$(basic_get ipinfo coordinates)" \
-    "$(basic_get dbip coordinates)"
-  report_line '城市' \
+    "$(basic_get ip2location coordinates)"
+  report_line_2 '城市' \
     "$(basic_get maxmind city)" \
-    "$(basic_get ip2location city)" \
-    "$(basic_get ipinfo city)" \
-    "$(basic_get dbip city)"
-  report_line '洲际' \
+    "$(basic_get ip2location city)"
+  report_line_2 '洲际' \
     "$(basic_get maxmind continent)" \
-    "$(basic_get ip2location continent)" \
-    "$(basic_get ipinfo continent)" \
-    "$(basic_get dbip continent)"
-  report_line '时区' \
+    "$(basic_get ip2location continent)"
+  report_line_2 '时区' \
     "$(basic_get maxmind timezone)" \
-    "$(basic_get ip2location timezone)" \
-    "$(basic_get ipinfo timezone)" \
-    "$(basic_get dbip timezone)"
+    "$(basic_get ip2location timezone)"
+  report_database_line '数据库' 'MaxMind' 'IP2Location' 'IPinfo' 'DB-IP'
   report_line '注册地' \
     "$(basic_get maxmind registered)" \
     "$(basic_get ip2location registered)" \
@@ -3139,6 +3166,28 @@ write_report_json() {
           {"label": "使用地", "values": [$maxmindLocation, $ip2Location, $ipinfoLocation, $dbipLocation]},
           {"label": "IP类型", "values": [$maxmindIpType, $ip2IpType, $ipinfoIpType, $dbipIpType]},
           {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
+        ],
+        tables: [
+          {
+            columns: ["MaxMind", "IP2Location"],
+            rows: [
+              {"label": "ASN", "values": [$maxmindAsn, $ip2Asn]},
+              {"label": "组织", "values": [$maxmindOrganization, $ip2Organization]},
+              {"label": "坐标", "values": [$maxmindCoordinates, $ip2Coordinates]},
+              {"label": "城市", "values": [$maxmindCity, $ip2City]},
+              {"label": "洲际", "values": [$maxmindContinent, $ip2Continent]},
+              {"label": "时区", "values": [$maxmindTimezone, $ip2Timezone]}
+            ]
+          },
+          {
+            columns: ["MaxMind", "IP2Location", "IPinfo", "DB-IP"],
+            rows: [
+              {"label": "注册地", "values": [$maxmindRegistered, $ip2Registered, $ipinfoRegistered, $dbipRegistered]},
+              {"label": "使用地", "values": [$maxmindLocation, $ip2Location, $ipinfoLocation, $dbipLocation]},
+              {"label": "IP类型", "values": [$maxmindIpType, $ip2IpType, $ipinfoIpType, $dbipIpType]},
+              {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
+            ]
+          }
         ]
       },
       type: {
