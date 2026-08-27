@@ -19,10 +19,20 @@ MAXMIND_CITY_DB="${MAXMIND_CITY_DB:-/data/GeoLite2-City.mmdb}"
 MAXMIND_NODE_DIR="${MAXMIND_NODE_DIR:-$SCRIPT_DIR/server}"
 IPQUALITY_API_BASE="${IPQUALITY_API_BASE:-https://tcpquality.ibsgss.uk}"
 IPQUALITY_PAID_LOOKUP="${IPQUALITY_PAID_LOOKUP:-0}"
-# 数据库结果缓存 45 天；可用环境变量覆盖，端口和 AI 检测不进入缓存。
+# 本地数据库结果缓存 45 天；ipapi.is 单独缓存 24 小时。端口和 AI 检测不进入缓存。
 IPQUALITY_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_CACHE_TTL_SECONDS:-3888000}"
 IPQUALITY_CACHE_DIR="${TCPQUALITY_IPQUALITY_CACHE_DIR:-${XDG_CACHE_HOME:-/var/cache}/tcpquality/ipquality}"
 IPQUALITY_RISK_CACHE_DIR="${TCPQUALITY_IPQUALITY_RISK_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/maxmind-risk}"
+MAXMIND_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_MAXMIND_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
+MAXMIND_RISK_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_MAXMIND_RISK_CACHE_TTL_SECONDS:-$MAXMIND_CACHE_TTL_SECONDS}"
+MAXMIND_BASIC_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
+MAXMIND_PAID_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
+IP2LOCATION_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IP2LOCATION_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
+IPINFO_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IPINFO_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
+SCAMALYTICS_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_SCAMALYTICS_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
+ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS:-$IPQUALITY_CACHE_TTL_SECONDS}"
+IPAPI_CACHE_TTL_SECONDS="${TCPQUALITY_IPQUALITY_IPAPI_CACHE_TTL_SECONDS:-86400}"
+IPAPI_CACHE_DIR="${TCPQUALITY_IPQUALITY_IPAPI_CACHE_DIR:-${IPQUALITY_CACHE_DIR%/}/ipapi}"
 # IPv6 风险按常见的 /64 子网复用；可显式切换为 /48 或 /56。
 MAXMIND_RISK_IPV6_PREFIX="${TCPQUALITY_MAXMIND_RISK_IPV6_PREFIX:-64}"
 case "$MAXMIND_RISK_IPV6_PREFIX" in
@@ -30,6 +40,13 @@ case "$MAXMIND_RISK_IPV6_PREFIX" in
   *) MAXMIND_RISK_IPV6_PREFIX=64 ;;
 esac
 [[ "$IPQUALITY_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPQUALITY_CACHE_TTL_SECONDS=3888000
+[[ "$MAXMIND_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || MAXMIND_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
+[[ "$MAXMIND_RISK_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || MAXMIND_RISK_CACHE_TTL_SECONDS="$MAXMIND_CACHE_TTL_SECONDS"
+[[ "$IP2LOCATION_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IP2LOCATION_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
+[[ "$IPINFO_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPINFO_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
+[[ "$SCAMALYTICS_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || SCAMALYTICS_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
+[[ "$ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || ACTIVE_NEIGHBOR_CACHE_TTL_SECONDS="$IPQUALITY_CACHE_TTL_SECONDS"
+[[ "$IPAPI_CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || IPAPI_CACHE_TTL_SECONDS=86400
 INVALID_STATUS="无效"
 
 C_CYAN=$'\033[36m'
@@ -476,6 +493,18 @@ PORT_80_STATUS="-"
 PORT_443_STATUS="-"
 ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
 DATABASE_CACHE_HIT=0
+MAXMIND_BASIC_CACHE_HIT=0
+MAXMIND_PAID_CACHE_HIT=0
+IP2LOCATION_CACHE_HIT=0
+IPINFO_CACHE_HIT=0
+SCAMALYTICS_CACHE_HIT=0
+ACTIVE_NEIGHBOR_CACHE_HIT=0
+CACHE_MAXMIND_BASIC_SAVED_AT=""
+CACHE_MAXMIND_PAID_SAVED_AT=""
+CACHE_IP2LOCATION_SAVED_AT=""
+CACHE_IPINFO_SAVED_AT=""
+CACHE_SCAMALYTICS_SAVED_AT=""
+CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
 declare -a ACTIVE_NEIGHBOR_LABELS=()
 declare -a ACTIVE_NEIGHBOR_SEGMENTS=()
 declare -a ACTIVE_NEIGHBOR_ACTIVE=()
@@ -546,6 +575,31 @@ reset_basic_results() {
   basic_mark_provider maxmind "无效"
 }
 
+reset_ipapi_results() {
+  IPAPI_USAGE_RAW=""
+  IPAPI_COMPANY_RAW=""
+  IPAPI_USAGE_TYPE="$INVALID_STATUS"
+  IPAPI_COMPANY_TYPE="$INVALID_STATUS"
+  IPAPI_RISK_RAW=""
+  IPAPI_RISK_SCORE=""
+  IPAPI_RISK_LEVEL="$INVALID_STATUS"
+}
+
+reset_database_cache_state() {
+  MAXMIND_BASIC_CACHE_HIT=0
+  MAXMIND_PAID_CACHE_HIT=0
+  IP2LOCATION_CACHE_HIT=0
+  IPINFO_CACHE_HIT=0
+  SCAMALYTICS_CACHE_HIT=0
+  ACTIVE_NEIGHBOR_CACHE_HIT=0
+  CACHE_MAXMIND_BASIC_SAVED_AT=""
+  CACHE_MAXMIND_PAID_SAVED_AT=""
+  CACHE_IP2LOCATION_SAVED_AT=""
+  CACHE_IPINFO_SAVED_AT=""
+  CACHE_SCAMALYTICS_SAVED_AT=""
+  CACHE_ACTIVE_NEIGHBOR_SAVED_AT=""
+}
+
 reset_results() {
   MAXMIND_USAGE_RAW=""
   MAXMIND_COMPANY_RAW=""
@@ -566,18 +620,13 @@ reset_results() {
   IPINFO_COMPANY_TYPE="-"
   SCAMALYTICS_RISK_SCORE=""
   SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
-  IPAPI_USAGE_RAW=""
-  IPAPI_COMPANY_RAW=""
-  IPAPI_USAGE_TYPE="$INVALID_STATUS"
-  IPAPI_COMPANY_TYPE="$INVALID_STATUS"
-  IPAPI_RISK_RAW=""
-  IPAPI_RISK_SCORE=""
-  IPAPI_RISK_LEVEL="$INVALID_STATUS"
+  reset_ipapi_results
   ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
   ACTIVE_NEIGHBOR_LABELS=()
   ACTIVE_NEIGHBOR_SEGMENTS=()
   ACTIVE_NEIGHBOR_ACTIVE=()
   ACTIVE_NEIGHBOR_TOTAL=()
+  reset_database_cache_state
   reset_ai_results
   reset_basic_results
 }
@@ -597,20 +646,9 @@ reset_ai_results() {
   AI_CLAUDE_METHOD="-"
 }
 
-# 只缓存数据库查询结果。AI 服务和端口探测属于实时状态，每次运行都会重新检查。
-declare -a IPQUALITY_CACHE_VARIABLES=(
-  BASIC_MAXMIND BASIC_IP2LOCATION BASIC_IPINFO
-  MAXMIND_USAGE_RAW MAXMIND_COMPANY_RAW MAXMIND_USAGE_TYPE MAXMIND_COMPANY_TYPE
-  MAXMIND_RISK_SCORE MAXMIND_RISK_LEVEL
-  IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW IP2LOCATION_USAGE_TYPE
-  IP2LOCATION_COMPANY_TYPE IP2LOCATION_IP_TYPE IP2LOCATION_RISK_SCORE
-  IP2LOCATION_RISK_LEVEL
-  IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
-  SCAMALYTICS_RISK_SCORE SCAMALYTICS_RISK_LEVEL
+declare -a IPAPI_CACHE_VARIABLES=(
   IPAPI_USAGE_RAW IPAPI_COMPANY_RAW IPAPI_USAGE_TYPE IPAPI_COMPANY_TYPE
   IPAPI_RISK_RAW IPAPI_RISK_SCORE IPAPI_RISK_LEVEL
-  ACTIVE_NEIGHBOR_VALUE ACTIVE_NEIGHBOR_LABELS ACTIVE_NEIGHBOR_SEGMENTS
-  ACTIVE_NEIGHBOR_ACTIVE ACTIVE_NEIGHBOR_TOTAL
 )
 
 cache_hash_for_key() {
@@ -630,6 +668,12 @@ cache_file_for_ip() {
   local hash
   hash=$(cache_hash_for_key "$1") || return 1
   printf '%s/%s.cache' "${IPQUALITY_CACHE_DIR%/}" "$hash"
+}
+
+ipapi_cache_file_for_ip() {
+  local hash
+  hash=$(cache_hash_for_key "ipapi|$1") || return 1
+  printf '%s/%s.cache' "${IPAPI_CACHE_DIR%/}" "$hash"
 }
 
 maxmind_risk_cache_key() {
@@ -702,7 +746,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="database-cache-v3|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3|ipapi-remote-v1"
+  context="database-cache-v5|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -713,101 +757,317 @@ cache_context_signature() {
   printf '%s' "$hash"
 }
 
-database_cache_has_failed_results() {
-  local value
-  # 这些结果代表对应查询没有拿到可用数据；不能随其它数据库结果一起
-  # 缓存，否则下一次运行会直接复用失败状态而跳过重试。
-  for value in \
-    "$MAXMIND_RISK_LEVEL" \
-    "$SCAMALYTICS_RISK_LEVEL" \
-    "$IP2LOCATION_USAGE_TYPE" \
-    "$IPAPI_USAGE_TYPE" \
-    "$IPAPI_COMPANY_TYPE" \
-    "$IPAPI_RISK_LEVEL"; do
+basic_cache_has_data() {
+  local provider="$1" field value
+  for field in asn organization coordinates city location; do
+    value=$(basic_get "$provider" "$field")
     case "$value" in
-      "$INVALID_STATUS"|冷却|失败) return 0 ;;
+      ""|"-"|"$INVALID_STATUS") ;;
+      *) return 0 ;;
     esac
   done
   return 1
 }
 
-database_cache_has_data() {
-  local provider field value
-  for provider in maxmind ip2location ipinfo; do
-    for field in asn organization coordinates city location; do
-      value=$(basic_get "$provider" "$field")
-      case "$value" in
-        ""|"-"|"$INVALID_STATUS") ;;
-        *) return 0 ;;
+cache_timestamp_is_fresh() {
+  local saved_at="$1" ttl="$2" now age
+  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
+  [[ "$ttl" =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  age=$((now - saved_at))
+  [ "$age" -ge 0 ] || age=0
+  [ "$age" -le "$ttl" ]
+}
+
+cache_group_variables() {
+  case "$1" in
+    maxmind_basic)
+      printf '%s\n' BASIC_MAXMIND
+      ;;
+    maxmind_paid)
+      printf '%s\n' MAXMIND_USAGE_RAW MAXMIND_COMPANY_RAW MAXMIND_USAGE_TYPE MAXMIND_COMPANY_TYPE
+      ;;
+    ip2location)
+      printf '%s\n' BASIC_IP2LOCATION IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW \
+        IP2LOCATION_USAGE_TYPE IP2LOCATION_COMPANY_TYPE IP2LOCATION_IP_TYPE \
+        IP2LOCATION_RISK_SCORE IP2LOCATION_RISK_LEVEL
+      ;;
+    ipinfo)
+      printf '%s\n' BASIC_IPINFO IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
+      ;;
+    scamalytics)
+      printf '%s\n' SCAMALYTICS_RISK_SCORE SCAMALYTICS_RISK_LEVEL
+      ;;
+    active_neighbor)
+      printf '%s\n' ACTIVE_NEIGHBOR_VALUE ACTIVE_NEIGHBOR_LABELS ACTIVE_NEIGHBOR_SEGMENTS \
+        ACTIVE_NEIGHBOR_ACTIVE ACTIVE_NEIGHBOR_TOTAL
+      ;;
+  esac
+}
+
+cache_group_reset() {
+  case "$1" in
+    maxmind_basic)
+      BASIC_MAXMIND=()
+      basic_mark_provider maxmind "$INVALID_STATUS"
+      ;;
+    maxmind_paid)
+      MAXMIND_USAGE_RAW=""
+      MAXMIND_COMPANY_RAW=""
+      MAXMIND_USAGE_TYPE="$INVALID_STATUS"
+      MAXMIND_COMPANY_TYPE="$INVALID_STATUS"
+      ;;
+    ip2location)
+      BASIC_IP2LOCATION=()
+      basic_mark_provider ip2location "$INVALID_STATUS"
+      IP2LOCATION_USAGE_RAW=""
+      IP2LOCATION_COMPANY_RAW=""
+      IP2LOCATION_USAGE_TYPE="$INVALID_STATUS"
+      IP2LOCATION_COMPANY_TYPE="$INVALID_STATUS"
+      IP2LOCATION_IP_TYPE=""
+      IP2LOCATION_RISK_SCORE=""
+      IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
+      ;;
+    ipinfo)
+      BASIC_IPINFO=()
+      basic_mark_provider ipinfo "$INVALID_STATUS"
+      IPINFO_USAGE_RAW=""
+      IPINFO_COMPANY_RAW=""
+      IPINFO_USAGE_TYPE="$INVALID_STATUS"
+      IPINFO_COMPANY_TYPE="$INVALID_STATUS"
+      ;;
+    scamalytics)
+      SCAMALYTICS_RISK_SCORE=""
+      SCAMALYTICS_RISK_LEVEL="$INVALID_STATUS"
+      ;;
+    active_neighbor)
+      ACTIVE_NEIGHBOR_VALUE="$INVALID_STATUS"
+      ACTIVE_NEIGHBOR_LABELS=()
+      ACTIVE_NEIGHBOR_SEGMENTS=()
+      ACTIVE_NEIGHBOR_ACTIVE=()
+      ACTIVE_NEIGHBOR_TOTAL=()
+      ;;
+  esac
+}
+
+cache_group_has_data() {
+  case "$1" in
+    maxmind_basic)
+      basic_cache_has_data maxmind
+      ;;
+    maxmind_paid)
+      [ "$IPQUALITY_PAID_LOOKUP" = "1" ] || return 1
+      case "$MAXMIND_USAGE_TYPE" in
+        ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
       esac
-    done
-  done
-  for value in \
-    "$MAXMIND_RISK_SCORE" "$IP2LOCATION_RISK_SCORE" \
-    "$SCAMALYTICS_RISK_SCORE" "$IPAPI_RISK_SCORE"; do
-    risk_score_valid "$value" && return 0
-  done
-  for value in \
-    "$MAXMIND_USAGE_RAW" "$IP2LOCATION_USAGE_RAW" "$IPINFO_USAGE_RAW" \
-    "$IPAPI_USAGE_RAW"; do
-    [ -n "$value" ] && return 0
-  done
-  return 1
+      case "$MAXMIND_COMPANY_TYPE" in
+        ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
+      esac
+      [ -n "$MAXMIND_USAGE_RAW" ] && [ -n "$MAXMIND_COMPANY_RAW" ]
+      ;;
+    ip2location)
+      case "$IP2LOCATION_USAGE_TYPE" in
+        ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
+      esac
+      case "$IP2LOCATION_COMPANY_TYPE" in
+        ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
+      esac
+      return 0
+      ;;
+    ipinfo)
+      basic_cache_has_data ipinfo
+      ;;
+    scamalytics)
+      risk_score_valid "$SCAMALYTICS_RISK_SCORE" || return 1
+      case "$SCAMALYTICS_RISK_LEVEL" in
+        极低风险|低风险|较高风险|高风险|极高风险|中风险) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    active_neighbor)
+      [ -n "$ACTIVE_NEIGHBOR_VALUE" ] && [ "$ACTIVE_NEIGHBOR_VALUE" != "$INVALID_STATUS" ]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 load_database_cache() {
-  local ip="$1" cache_file now saved_at age cache_signature
+  local ip="$1" cache_file cache_signature group key metadata_var hit_var ttl_var
+  local saved_at ttl any=0
   cache_file=$(cache_file_for_ip "$ip" 2>/dev/null || true)
   [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
   [ -L "$cache_file" ] && return 1
 
-  saved_at=$(sed -n 's/^CACHE_SAVED_AT=//p' "$cache_file" | sed -n '1p')
-  saved_at=${saved_at//[^0-9]/}
-  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
-  now=$(date +%s)
-  age=$((now - saved_at))
-  [ "$age" -ge 0 ] || age=0
-  [ "$age" -le "$IPQUALITY_CACHE_TTL_SECONDS" ] || return 1
-
   cache_signature=$(cache_context_signature)
-  unset CACHE_VERSION CACHE_IP CACHE_SAVED_AT CACHE_SIGNATURE
+  unset CACHE_VERSION CACHE_IP CACHE_SAVED_AT CACHE_SIGNATURE \
+    CACHE_MAXMIND_BASIC_SAVED_AT CACHE_MAXMIND_PAID_SAVED_AT \
+    CACHE_IP2LOCATION_SAVED_AT CACHE_IPINFO_SAVED_AT \
+    CACHE_SCAMALYTICS_SAVED_AT CACHE_ACTIVE_NEIGHBOR_SAVED_AT
   reset_results
-  # 缓存由本脚本以 declare -p 生成，并限制为当前用户可读写；只在校验
-  # 版本、IP 和时间后接受其中的结果变量。
+  # 缓存由本脚本以 declare -p 生成，并限制为当前用户可读写；先校验
+  # 版本、IP、签名，再按每个数据源的独立时间戳选择性载入。
   . "$cache_file" 2>/dev/null || {
     reset_results
     return 1
   }
-  if [ "${CACHE_VERSION:-}" != "3" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
-     [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
-     ! [[ "${CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]]; then
+  if [ "${CACHE_VERSION:-}" != "5" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
+     [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ]; then
     reset_results
     return 1
   fi
-  if database_cache_has_failed_results; then
-    reset_results
-    return 1
+  # ipapi.is 使用独立的 24 小时缓存；忽略旧的综合缓存中的同名变量，
+  # 避免在 ipapi 缓存过期或不存在时继续显示旧结果。
+  reset_ipapi_results
+  # MaxMind risk 使用独立的 /24(/IPv6 子网)缓存，不接受旧综合缓存中的值。
+  MAXMIND_RISK_SCORE=""
+  MAXMIND_RISK_LEVEL="$INVALID_STATUS"
+
+  for group in maxmind_basic maxmind_paid ip2location ipinfo scamalytics active_neighbor; do
+    key="${group^^}"
+    metadata_var="CACHE_${key}_SAVED_AT"
+    hit_var="${key}_CACHE_HIT"
+    ttl_var="${key}_CACHE_TTL_SECONDS"
+    saved_at="${!metadata_var:-}"
+    ttl="${!ttl_var:-}"
+    if cache_timestamp_is_fresh "$saved_at" "$ttl" && cache_group_has_data "$group"; then
+      printf -v "$hit_var" '%s' 1
+      any=1
+    else
+      cache_group_reset "$group"
+      printf -v "$metadata_var" '%s' ""
+    fi
+  done
+  if [ "$IPQUALITY_PAID_LOOKUP" != "1" ]; then
+    MAXMIND_PAID_CACHE_HIT=1
   fi
-  return 0
+  [ "$any" -eq 1 ]
 }
 
 save_database_cache() {
-  local ip="$1" cache_file temp_file saved_at variable cache_signature
-  database_cache_has_failed_results && return 0
-  database_cache_has_data || return 0
+  local ip="$1" cache_file temp_file saved_at variable cache_signature group key
+  local metadata_var hit_var now any=0
+  local -a groups=(maxmind_basic maxmind_paid ip2location ipinfo scamalytics active_neighbor)
+  for group in "${groups[@]}"; do
+    if cache_group_has_data "$group"; then any=1; fi
+  done
+  [ "$any" -eq 1 ] || return 0
   cache_file=$(cache_file_for_ip "$ip" 2>/dev/null || true)
   [ -n "$cache_file" ] || return 0
   mkdir -p "$IPQUALITY_CACHE_DIR" 2>/dev/null || return 0
   chmod 700 "$IPQUALITY_CACHE_DIR" 2>/dev/null || true
   temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
-  saved_at=$(date +%s)
+  now=$(date +%s)
   cache_signature=$(cache_context_signature)
   {
-    printf 'CACHE_VERSION=3\n'
+    printf 'CACHE_VERSION=5\n'
     printf 'CACHE_IP=%q\n' "$ip"
-    printf 'CACHE_SAVED_AT=%q\n' "$saved_at"
+    printf 'CACHE_SAVED_AT=%q\n' "$now"
     printf 'CACHE_SIGNATURE=%q\n' "$cache_signature"
-    for variable in "${IPQUALITY_CACHE_VARIABLES[@]}"; do
+    for group in "${groups[@]}"; do
+      cache_group_has_data "$group" || continue
+      key="${group^^}"
+      metadata_var="CACHE_${key}_SAVED_AT"
+      hit_var="${key}_CACHE_HIT"
+      saved_at="${!metadata_var:-}"
+      if ! [[ "$saved_at" =~ ^[0-9]+$ ]] || [ "${!hit_var:-0}" != "1" ]; then
+        saved_at="$now"
+        printf -v "$metadata_var" '%s' "$saved_at"
+      fi
+      printf 'CACHE_%s_SAVED_AT=%q\n' "$key" "$saved_at"
+      while IFS= read -r variable; do
+        [ -n "$variable" ] || continue
+        declare -p "$variable" | sed 's/^declare /declare -g /'
+      done < <(cache_group_variables "$group")
+    done
+  } > "$temp_file" || {
+    rm -f -- "$temp_file"
+    return 0
+  }
+  chmod 600 "$temp_file" 2>/dev/null || true
+  mv -f -- "$temp_file" "$cache_file" 2>/dev/null || rm -f -- "$temp_file"
+}
+
+ipapi_cache_signature() {
+  local context hash
+  context="ipapi-cache-v1|${IPQUALITY_API_BASE}|ipapi.is"
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$context" | shasum -a 256 | awk '{print $1}')
+  else
+    hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
+  fi
+  printf '%s' "$hash"
+}
+
+ipapi_cache_has_data() {
+  case "$IPAPI_USAGE_TYPE" in
+    ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
+  esac
+  case "$IPAPI_COMPANY_TYPE" in
+    ""|"$INVALID_STATUS"|失败|未知) return 1 ;;
+  esac
+  [ -n "$IPAPI_USAGE_RAW" ] || return 1
+  [ -n "$IPAPI_COMPANY_RAW" ] || return 1
+  risk_score_valid "$IPAPI_RISK_SCORE" || return 1
+  case "$IPAPI_RISK_LEVEL" in
+    极低风险|低风险|较高风险|高风险|极高风险) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_ipapi_cache() {
+  local ip="$1" cache_file now saved_at age cache_signature
+  cache_file=$(ipapi_cache_file_for_ip "$ip" 2>/dev/null || true)
+  [ -n "$cache_file" ] && [ -r "$cache_file" ] || return 1
+  [ -L "$cache_file" ] && return 1
+
+  saved_at=$(sed -n 's/^IPAPI_CACHE_SAVED_AT=//p' "$cache_file" | sed -n '1p')
+  saved_at=${saved_at//[^0-9]/}
+  [[ "$saved_at" =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  age=$((now - saved_at))
+  [ "$age" -ge 0 ] || age=0
+  [ "$age" -le "$IPAPI_CACHE_TTL_SECONDS" ] || return 1
+
+  cache_signature=$(ipapi_cache_signature)
+  unset IPAPI_CACHE_VERSION IPAPI_CACHE_IP IPAPI_CACHE_SAVED_AT IPAPI_CACHE_SIGNATURE
+  reset_ipapi_results
+  . "$cache_file" 2>/dev/null || {
+    reset_ipapi_results
+    return 1
+  }
+  if [ "${IPAPI_CACHE_VERSION:-}" != "1" ] || [ "${IPAPI_CACHE_IP:-}" != "$ip" ] ||
+     [ "${IPAPI_CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
+     ! [[ "${IPAPI_CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]]; then
+    reset_ipapi_results
+    return 1
+  fi
+  if ! ipapi_cache_has_data; then
+    reset_ipapi_results
+    return 1
+  fi
+  return 0
+}
+
+save_ipapi_cache() {
+  local ip="$1" cache_file temp_file saved_at variable cache_signature
+  ipapi_cache_has_data || return 0
+  cache_file=$(ipapi_cache_file_for_ip "$ip" 2>/dev/null || true)
+  [ -n "$cache_file" ] || return 0
+  mkdir -p "$IPAPI_CACHE_DIR" 2>/dev/null || return 0
+  chmod 700 "$IPAPI_CACHE_DIR" 2>/dev/null || true
+  temp_file=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null) || return 0
+  saved_at=$(date +%s)
+  cache_signature=$(ipapi_cache_signature)
+  {
+    printf 'IPAPI_CACHE_VERSION=1\n'
+    printf 'IPAPI_CACHE_IP=%q\n' "$ip"
+    printf 'IPAPI_CACHE_SAVED_AT=%q\n' "$saved_at"
+    printf 'IPAPI_CACHE_SIGNATURE=%q\n' "$cache_signature"
+    for variable in "${IPAPI_CACHE_VARIABLES[@]}"; do
       declare -p "$variable" | sed 's/^declare /declare -g /'
     done
   } > "$temp_file" || {
@@ -845,7 +1105,7 @@ load_maxmind_risk_cache() {
   now=$(date +%s)
   age=$((now - saved_at))
   [ "$age" -ge 0 ] || age=0
-  [ "$age" -le "$IPQUALITY_CACHE_TTL_SECONDS" ] || return 1
+  [ "$age" -le "$MAXMIND_RISK_CACHE_TTL_SECONDS" ] || return 1
 
   cache_signature=$(maxmind_risk_cache_signature)
   unset RISK_CACHE_VERSION RISK_CACHE_PREFIX RISK_CACHE_SAVED_AT RISK_CACHE_SIGNATURE RISK_CACHE_SCORE
@@ -3094,31 +3354,55 @@ display_type() {
 }
 
 run_one() {
-  local ip="$1"
+  local ip="$1" maxmind_risk_cache_hit=0
   reset_results
   DATABASE_CACHE_HIT=0
   if load_database_cache "$ip"; then
     DATABASE_CACHE_HIT=1
-  else
-    lookup_maxmind "$ip"
-    lookup_maxmind_paid "$ip"
-    lookup_ip2location "$ip"
-    lookup_ipinfo "$ip"
-    lookup_scamalytics "$ip"
-    lookup_ipapi "$ip"
-    if [[ "$ip" != *:* ]]; then
-      lookup_active_neighbors "$ip"
-    fi
   fi
 
   # MaxMind Enterprise 的 IP risk 作为 /24 属性缓存：同一 /24 内的其它
   # IP 仍保留各自的基础信息，但风险分数统一沿用该网段首次成功查询的值。
-  if ! load_maxmind_risk_cache "$ip"; then
+  MAXMIND_RISK_SCORE=""
+  MAXMIND_RISK_LEVEL="$INVALID_STATUS"
+  if load_maxmind_risk_cache "$ip"; then
+    maxmind_risk_cache_hit=1
+  elif [ "$IPQUALITY_PAID_LOOKUP" = "1" ]; then
+    # 没有可复用的 risk 时，不能仅复用 MaxMind 的类型结果，否则 risk
+    # 查询失败会被间接缓存。
+    MAXMIND_PAID_CACHE_HIT=0
+  fi
+
+  if [ "$MAXMIND_BASIC_CACHE_HIT" -ne 1 ]; then
+    lookup_maxmind "$ip"
+  fi
+  if [ "$IPQUALITY_PAID_LOOKUP" = "1" ] && [ "$MAXMIND_PAID_CACHE_HIT" -ne 1 ]; then
+    lookup_maxmind_paid "$ip"
+  fi
+  if [ "$IP2LOCATION_CACHE_HIT" -ne 1 ]; then
+    lookup_ip2location "$ip"
+  fi
+  if [ "$IPINFO_CACHE_HIT" -ne 1 ]; then
+    lookup_ipinfo "$ip"
+  fi
+  if [ "$SCAMALYTICS_CACHE_HIT" -ne 1 ]; then
+    lookup_scamalytics "$ip"
+  fi
+  if [[ "$ip" != *:* ]] && [ "$ACTIVE_NEIGHBOR_CACHE_HIT" -ne 1 ]; then
+    lookup_active_neighbors "$ip"
+  fi
+
+  # ipapi.is 单独使用 24 小时缓存；综合数据库缓存命中时，仅在此缓存
+  # 过期或不存在时重新请求 ipapi，不会因此重复查询其它数据库。
+  if ! load_ipapi_cache "$ip"; then
+    lookup_ipapi "$ip"
+    save_ipapi_cache "$ip"
+  fi
+
+  if [ "$maxmind_risk_cache_hit" -eq 0 ]; then
     save_maxmind_risk_cache "$ip"
   fi
-  if [ "$DATABASE_CACHE_HIT" -eq 0 ]; then
-    save_database_cache "$ip"
-  fi
+  save_database_cache "$ip"
 
   run_ai_checks
   print_type_report "$ip"
