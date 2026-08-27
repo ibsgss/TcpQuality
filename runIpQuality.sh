@@ -20,6 +20,9 @@ C_CYAN=$'\033[36m'
 C_GREEN=$'\033[0;32m'
 C_YELLOW=$'\033[0;33m'
 C_RED=$'\033[0;31m'
+C_BG_RED_FALLBACK=$'\033[41m'
+C_BG_YELLOW_FALLBACK=$'\033[43m'
+C_BG_GREEN_FALLBACK=$'\033[42m'
 C_BG_RED=$'\033[48;2;42;16;16m'
 C_BG_YELLOW=$'\033[48;2;43;43;0m'
 C_BG_GREEN=$'\033[48;2;13;43;13m'
@@ -1012,9 +1015,9 @@ report_color_has_background() {
 
 report_background_color() {
   case "$1" in
-    "$C_RED") printf '%s' "$C_BG_RED" ;;
-    "$C_YELLOW") printf '%s' "$C_BG_YELLOW" ;;
-    "$C_GREEN") printf '%s' "$C_BG_GREEN" ;;
+    "$C_RED") printf '%s%s' "$C_BG_RED_FALLBACK" "$C_BG_RED" ;;
+    "$C_YELLOW") printf '%s%s' "$C_BG_YELLOW_FALLBACK" "$C_BG_YELLOW" ;;
+    "$C_GREEN") printf '%s%s' "$C_BG_GREEN_FALLBACK" "$C_BG_GREEN" ;;
     *) return 0 ;;
   esac
 }
