@@ -448,6 +448,7 @@ IP2LOCATION_USAGE_RAW=""
 IP2LOCATION_COMPANY_RAW=""
 IP2LOCATION_USAGE_TYPE="-"
 IP2LOCATION_COMPANY_TYPE="-"
+IP2LOCATION_IP_TYPE=""
 IP2LOCATION_RISK_SCORE=""
 IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
 IPINFO_USAGE_RAW=""
@@ -520,6 +521,29 @@ basic_get() {
   printf '%s' "${value:--}"
 }
 
+basic_value_available() {
+  case "$1" in
+    ""|"-"|"$INVALID_STATUS"|失败|未知) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+basic_preferred_get() {
+  local field="$1" value fallback
+  value=$(basic_get ip2location "$field")
+  if basic_value_available "$value"; then
+    printf '%s' "$value"
+    return 0
+  fi
+
+  fallback=$(basic_get maxmind "$field")
+  if [ -n "$fallback" ] && [ "$fallback" != "-" ]; then
+    printf '%s' "$fallback"
+  else
+    printf '%s' "-"
+  fi
+}
+
 basic_mark_provider() {
   local provider="$1" value="$2" field
   for field in "${BASIC_FIELDS[@]}"; do
@@ -546,6 +570,7 @@ reset_results() {
   IP2LOCATION_COMPANY_RAW=""
   IP2LOCATION_USAGE_TYPE="-"
   IP2LOCATION_COMPANY_TYPE="-"
+  IP2LOCATION_IP_TYPE=""
   IP2LOCATION_RISK_SCORE=""
   IP2LOCATION_RISK_LEVEL="$INVALID_STATUS"
   IPINFO_USAGE_RAW=""
@@ -591,7 +616,8 @@ declare -a IPQUALITY_CACHE_VARIABLES=(
   MAXMIND_USAGE_RAW MAXMIND_COMPANY_RAW MAXMIND_USAGE_TYPE MAXMIND_COMPANY_TYPE
   MAXMIND_RISK_SCORE MAXMIND_RISK_LEVEL
   IP2LOCATION_USAGE_RAW IP2LOCATION_COMPANY_RAW IP2LOCATION_USAGE_TYPE
-  IP2LOCATION_COMPANY_TYPE IP2LOCATION_RISK_SCORE IP2LOCATION_RISK_LEVEL
+  IP2LOCATION_COMPANY_TYPE IP2LOCATION_IP_TYPE IP2LOCATION_RISK_SCORE
+  IP2LOCATION_RISK_LEVEL
   IPINFO_USAGE_RAW IPINFO_COMPANY_RAW IPINFO_USAGE_TYPE IPINFO_COMPANY_TYPE
   SCAMALYTICS_RISK_SCORE SCAMALYTICS_RISK_LEVEL
   DBIP_USAGE_RAW DBIP_COMPANY_RAW DBIP_USAGE_TYPE DBIP_COMPANY_TYPE
@@ -1073,14 +1099,42 @@ basic_ip_type() {
   fi
 }
 
+normalize_direct_ip_type() {
+  case "$(trim_text "$1")" in
+    原生) printf '%s' '原生' ;;
+    广播) printf '%s' '广播' ;;
+    [Nn][Aa][Tt][Ii][Vv][Ee]) printf '%s' '原生' ;;
+    [Bb][Rr][Oo][Aa][Dd][Cc][Aa][Ss][Tt]) printf '%s' '广播' ;;
+    *) return 0 ;;
+  esac
+}
+
+extract_direct_ip_type() {
+  local text="$1" match candidate
+  match=$(printf '%s' "$text" \
+    | grep -Eio '(IP[[:space:]_-]*Type|IP类型)[^A-Za-z]{0,30}(native|broadcast|原生|广播)' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -n -E 's/.*(native|broadcast|原生|广播).*/\1/p' \
+    | sed -n '1p' || true)
+  candidate=$(normalize_direct_ip_type "$match")
+  [ -n "$candidate" ] && printf '%s' "$candidate"
+}
+
 ip2location_ip_type() {
-  local registered="$1" location="$2"
-  # IP2Location 公共查询结果没有独立的 Registered Country 字段；在该字段
-  # 缺失时，用它自己的 Country/使用地作为地理一致性判定基准，避免类型无效。
-  if [ -z "$(country_code_from_value "$registered")" ]; then
-    registered="$location"
+  local direct="$1" location="$2" registered="$3" direct_type
+  direct_type=$(normalize_direct_ip_type "$direct")
+  if [ -n "$direct_type" ]; then
+    printf '%s' "$direct_type"
+    return 0
   fi
   basic_ip_type "$registered" "$location"
+}
+
+basic_preferred_ip_type() {
+  ip2location_ip_type \
+    "$IP2LOCATION_IP_TYPE" \
+    "$(basic_preferred_get location)" \
+    "$(basic_get maxmind registered)"
 }
 
 map_url_from_coordinates() {
@@ -1374,19 +1428,22 @@ report_risk_cell() {
   truncated=$(report_truncate "$value" "$width")
   current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
+  # 分数和等级都固定在单元格右侧的同一块区域内，避免 3、0 与“低风险”
+  # 因为文本宽度不同而看起来错位。有效风险值保留浅色底纹，其他状态仅保留
+  # 文字颜色，但仍使用完全相同的占位宽度。
+  background_width="$REPORT_RISK_BACKGROUND_WIDTH"
+  [ "$background_width" -gt "$width" ] && background_width="$width"
+  [ "$background_width" -lt "$current" ] && background_width="$current"
+  background_padding=$((background_width - current))
+  cell_padding=$((width - background_width))
+  printf '%*s' "$cell_padding" ''
   if report_color_has_background "$color"; then
-    background_width="$REPORT_RISK_BACKGROUND_WIDTH"
-    [ "$background_width" -gt "$width" ] && background_width="$width"
-    [ "$background_width" -lt "$current" ] && background_width="$current"
-    background_padding=$((background_width - current))
-    cell_padding=$((width - background_width))
-    printf '%*s' "$cell_padding" ''
     printf '%s%s%*s%s%s' \
       "$C_BG_LIGHT" "$color" "$background_padding" '' "$truncated" "$C_NC"
   elif [ -n "$color" ]; then
-    printf '%s%*s%s%s' "$color" $((width - current)) '' "$truncated" "$C_NC"
+    printf '%s%*s%s%s' "$color" "$background_padding" '' "$truncated" "$C_NC"
   else
-    printf '%*s%s' $((width - current)) '' "$truncated"
+    printf '%*s%s' "$background_padding" '' "$truncated"
   fi
 }
 
@@ -2369,6 +2426,8 @@ lookup_ip2location() {
     basic_mark_provider ip2location "$INVALID_STATUS"
     return 0
   fi
+  IP2LOCATION_IP_TYPE=$(extract_direct_ip_type "$response" || true)
+  [ -n "$IP2LOCATION_IP_TYPE" ] || IP2LOCATION_IP_TYPE=$(extract_direct_ip_type "$demo_text" || true)
   usage_section=$(ip2location_demo_section "$demo_text" "Usage Type" "Address Type" || true)
   company_section=$(ip2location_demo_section "$demo_text" "AS Usage Type" "Olson Time Zone" || true)
   if [ -z "$company_section" ]; then
@@ -2924,55 +2983,28 @@ lookup_active_neighbors() {
 }
 
 report_basic_rows() {
-  local ip="$1"
-  # 与下方四列报告保持相同的列锚点：MaxMind 在第 1 列，IP2Location 在第 3 列。
-  report_database_line '数据库' 'MaxMind' '' 'IP2Location' ''
-  report_line 'ASN' \
-    "$(basic_get maxmind asn)" \
-    '' \
-    "$(basic_get ip2location asn)" \
-    ''
-  report_line '组织' \
-    "$(basic_get maxmind organization)" \
-    '' \
-    "$(basic_get ip2location organization)" \
-    ''
-  report_line '坐标' \
-    "$(basic_get maxmind coordinates)" \
-    '' \
-    "$(basic_get ip2location coordinates)" \
-    ''
-  report_line '城市' \
-    "$(basic_get maxmind city)" \
-    '' \
-    "$(basic_get ip2location city)" \
-    ''
-  report_line '洲际' \
-    "$(basic_get maxmind continent)" \
-    '' \
-    "$(basic_get ip2location continent)" \
-    ''
-  report_line '时区' \
-    "$(basic_get maxmind timezone)" \
-    '' \
-    "$(basic_get ip2location timezone)" \
-    ''
-  report_database_line '数据库' 'MaxMind' 'IPinfo' 'IP2Location' 'DB-IP'
-  report_line '注册地' \
-    "$(basic_get maxmind registered)" \
-    "$(basic_get ipinfo registered)" \
-    "$(basic_get ip2location registered)" \
-    "$(basic_get dbip registered)"
-  report_line '使用地' \
-    "$(basic_get maxmind location)" \
-    "$(basic_get ipinfo location)" \
-    "$(basic_get ip2location location)" \
-    "$(basic_get dbip location)"
-  report_type_line 'IP类型' \
-    "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
-    "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
-    "$(ip2location_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
-    "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")"
+  local ip="$1" basic_value basic_type
+  # 基础信息只展示 IP2Location；每个字段缺失时由本地 MaxMind 离线库兜底，
+  # 并继续放在第三列，和下方多数据库表中的 IP2Location 列对齐。
+  report_database_line '数据库' '' '' 'IP2Location' ''
+  basic_value=$(basic_preferred_get asn)
+  report_line 'ASN' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get organization)
+  report_line '组织' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get coordinates)
+  report_line '坐标' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get city)
+  report_line '城市' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get continent)
+  report_line '洲际' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get timezone)
+  report_line '时区' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get registered)
+  report_line '注册地' '' '' "$basic_value" ''
+  basic_value=$(basic_preferred_get location)
+  report_line '使用地' '' '' "$basic_value" ''
+  basic_type=$(basic_preferred_ip_type)
+  report_type_line 'IP类型' '' '' "$basic_type" ''
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
   fi
@@ -3080,51 +3112,35 @@ active_neighbor_json() {
 
 write_report_json() {
   local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
+  local basic_asn basic_organization basic_coordinates basic_city basic_continent
+  local basic_timezone basic_registered basic_location basic_ip_type
   [ -n "$file" ] || return 0
   family=4
   [[ "$ip" == *:* ]] && family=6
   active_json=$(active_neighbor_json)
+  basic_asn=$(basic_preferred_get asn)
+  basic_organization=$(basic_preferred_get organization)
+  basic_coordinates=$(basic_preferred_get coordinates)
+  basic_city=$(basic_preferred_get city)
+  basic_continent=$(basic_preferred_get continent)
+  basic_timezone=$(basic_preferred_get timezone)
+  basic_registered=$(basic_preferred_get registered)
+  basic_location=$(basic_preferred_get location)
+  basic_ip_type=$(basic_preferred_ip_type)
 
   jq -cn \
     --arg ip "$ip" \
     --arg maskedIp "$(mask_ip "$ip")" \
     --arg family "IPv${family}" \
-    --arg maxmindAsn "$(basic_get maxmind asn)" \
-    --arg ip2Asn "$(basic_get ip2location asn)" \
-    --arg ipinfoAsn "$(basic_get ipinfo asn)" \
-    --arg dbipAsn "$(basic_get dbip asn)" \
-    --arg maxmindOrganization "$(basic_get maxmind organization)" \
-    --arg ip2Organization "$(basic_get ip2location organization)" \
-    --arg ipinfoOrganization "$(basic_get ipinfo organization)" \
-    --arg dbipOrganization "$(basic_get dbip organization)" \
-    --arg maxmindCoordinates "$(basic_get maxmind coordinates)" \
-    --arg ip2Coordinates "$(basic_get ip2location coordinates)" \
-    --arg ipinfoCoordinates "$(basic_get ipinfo coordinates)" \
-    --arg dbipCoordinates "$(basic_get dbip coordinates)" \
-    --arg maxmindCity "$(basic_get maxmind city)" \
-    --arg ip2City "$(basic_get ip2location city)" \
-    --arg ipinfoCity "$(basic_get ipinfo city)" \
-    --arg dbipCity "$(basic_get dbip city)" \
-    --arg maxmindContinent "$(basic_get maxmind continent)" \
-    --arg ip2Continent "$(basic_get ip2location continent)" \
-    --arg ipinfoContinent "$(basic_get ipinfo continent)" \
-    --arg dbipContinent "$(basic_get dbip continent)" \
-    --arg maxmindTimezone "$(basic_get maxmind timezone)" \
-    --arg ip2Timezone "$(basic_get ip2location timezone)" \
-    --arg ipinfoTimezone "$(basic_get ipinfo timezone)" \
-    --arg dbipTimezone "$(basic_get dbip timezone)" \
-    --arg maxmindRegistered "$(basic_get maxmind registered)" \
-    --arg ip2Registered "$(basic_get ip2location registered)" \
-    --arg ipinfoRegistered "$(basic_get ipinfo registered)" \
-    --arg dbipRegistered "$(basic_get dbip registered)" \
-    --arg maxmindLocation "$(basic_get maxmind location)" \
-    --arg ip2Location "$(basic_get ip2location location)" \
-    --arg ipinfoLocation "$(basic_get ipinfo location)" \
-    --arg dbipLocation "$(basic_get dbip location)" \
-    --arg maxmindIpType "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
-    --arg ip2IpType "$(ip2location_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
-    --arg ipinfoIpType "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
-    --arg dbipIpType "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")" \
+    --arg basicAsn "$basic_asn" \
+    --arg basicOrganization "$basic_organization" \
+    --arg basicCoordinates "$basic_coordinates" \
+    --arg basicCity "$basic_city" \
+    --arg basicContinent "$basic_continent" \
+    --arg basicTimezone "$basic_timezone" \
+    --arg basicRegistered "$basic_registered" \
+    --arg basicLocation "$basic_location" \
+    --arg basicIpType "$basic_ip_type" \
     --arg maxmindUsage "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
     --arg ip2Usage "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     --arg ipinfoUsage "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
@@ -3165,41 +3181,19 @@ write_report_json() {
       family: $family,
       databaseCached: ($databaseCached == 1),
       basic: {
-        columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
+        columns: ["IP2Location"],
+        columnPositions: [2],
         rows: [
-          {"label": "ASN", "values": [$maxmindAsn, $ipinfoAsn, $ip2Asn, $dbipAsn]},
-          {"label": "组织", "values": [$maxmindOrganization, $ipinfoOrganization, $ip2Organization, $dbipOrganization]},
-          {"label": "坐标", "values": [$maxmindCoordinates, $ipinfoCoordinates, $ip2Coordinates, $dbipCoordinates]},
-          {"label": "城市", "values": [$maxmindCity, $ipinfoCity, $ip2City, $dbipCity]},
-          {"label": "洲际", "values": [$maxmindContinent, $ipinfoContinent, $ip2Continent, $dbipContinent]},
-          {"label": "时区", "values": [$maxmindTimezone, $ipinfoTimezone, $ip2Timezone, $dbipTimezone]},
-          {"label": "注册地", "values": [$maxmindRegistered, $ipinfoRegistered, $ip2Registered, $dbipRegistered]},
-          {"label": "使用地", "values": [$maxmindLocation, $ipinfoLocation, $ip2Location, $dbipLocation]},
-          {"label": "IP类型", "values": [$maxmindIpType, $ipinfoIpType, $ip2IpType, $dbipIpType]},
-          {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
-        ],
-        tables: [
-          {
-            columns: ["MaxMind", "IP2Location"],
-            columnPositions: [0, 2],
-            rows: [
-              {"label": "ASN", "values": [$maxmindAsn, $ip2Asn]},
-              {"label": "组织", "values": [$maxmindOrganization, $ip2Organization]},
-              {"label": "坐标", "values": [$maxmindCoordinates, $ip2Coordinates]},
-              {"label": "城市", "values": [$maxmindCity, $ip2City]},
-              {"label": "洲际", "values": [$maxmindContinent, $ip2Continent]},
-              {"label": "时区", "values": [$maxmindTimezone, $ip2Timezone]}
-            ]
-          },
-          {
-            columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
-            rows: [
-              {"label": "注册地", "values": [$maxmindRegistered, $ipinfoRegistered, $ip2Registered, $dbipRegistered]},
-              {"label": "使用地", "values": [$maxmindLocation, $ipinfoLocation, $ip2Location, $dbipLocation]},
-              {"label": "IP类型", "values": [$maxmindIpType, $ipinfoIpType, $ip2IpType, $dbipIpType]},
-              {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
-            ]
-          }
+          {"label": "ASN", "values": [$basicAsn]},
+          {"label": "组织", "values": [$basicOrganization]},
+          {"label": "坐标", "values": [$basicCoordinates]},
+          {"label": "城市", "values": [$basicCity]},
+          {"label": "洲际", "values": [$basicContinent]},
+          {"label": "时区", "values": [$basicTimezone]},
+          {"label": "注册地", "values": [$basicRegistered]},
+          {"label": "使用地", "values": [$basicLocation]},
+          {"label": "IP类型", "values": [$basicIpType]},
+          {"label": "活跃邻居", "values": [$activeNeighbor]}
         ]
       },
       type: {
