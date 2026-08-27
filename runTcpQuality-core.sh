@@ -302,7 +302,10 @@ IPQUALITY_DISABLED=0
 IPQUALITY_EXPLICIT=0
 IPQUALITY_OTHER_TEST=0
 IPQUALITY_ONLY=0
-IPQUALITY_SCRIPT="${TCPQUALITY_IPQUALITY_SCRIPT:-$CORE_SCRIPT_DIR/runIpQuality.sh}"
+# A bundled runIpQuality.sh may be stale (especially in an older rootfs
+# release).  Keep an explicitly supplied path authoritative, but let the
+# selected release source win before falling back to the bundled copy.
+IPQUALITY_SCRIPT="${TCPQUALITY_IPQUALITY_SCRIPT:-}"
 IPQUALITY_SCRIPT_TEMP=""
 IPQUALITY_TEXT_FILE=""
 IPQUALITY_JSON_FILE=""
@@ -4094,7 +4097,7 @@ run_international_mode() {
 
 # ===================== 国内单线程测速 =====================
 resolve_ip_quality_script() {
-  local configured raw_base cache_file candidate already
+  local configured raw_base cache_file candidate already local_candidate
   local -a raw_bases=()
   configured="${IPQUALITY_SCRIPT:-}"
   if [ -n "$configured" ] && [ -r "$configured" ]; then
@@ -4139,6 +4142,13 @@ resolve_ip_quality_script() {
       return 0
     fi
   done
+
+  # Offline/local fallback only after trying the selected remote release.
+  local_candidate="$CORE_SCRIPT_DIR/runIpQuality.sh"
+  if [ -r "$local_candidate" ]; then
+    printf '%s\n' "$local_candidate"
+    return 0
+  fi
   return 1
 }
 

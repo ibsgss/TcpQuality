@@ -1062,15 +1062,22 @@ speedtest_args_requested() {
 }
 
 resolve_tcpquality_asset() {
-  local env_name="$1" file_name="$2" cache_file="$3" configured candidate raw_base upstream_base
+  local env_name="$1" file_name="$2" cache_file="$3" configured candidate raw_base upstream_base prefer_remote
   local -a raw_bases=()
+  prefer_remote=0
   configured="${!env_name:-}"
   if [ -n "$configured" ] && [ -r "$configured" ]; then
     printf '%s\n' "$configured"
     return 0
   fi
   candidate="$SCRIPT_DIR/$file_name"
-  if [ -r "$candidate" ]; then
+  # When the beta source is selected, a local runIpQuality.sh can belong to
+  # an older release.  Try the selected source first and use local only as a
+  # last-resort offline fallback.
+  if [ "$file_name" = "runIpQuality.sh" ] && [ -n "${TCPQUALITY_RAW_BASE:-}" ]; then
+    prefer_remote=1
+  fi
+  if [ "$prefer_remote" -eq 0 ] && [ -r "$candidate" ]; then
     printf '%s\n' "$candidate"
     return 0
   fi
@@ -1087,6 +1094,10 @@ resolve_tcpquality_asset() {
       return 0
     fi
   done
+  if [ -r "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
   return 1
 }
 
