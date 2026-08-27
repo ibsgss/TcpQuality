@@ -36,7 +36,7 @@ C_CYAN=$'\033[36m'
 C_GREEN=$'\033[32m'
 C_YELLOW=$'\033[33m'
 C_RED=$'\033[31m'
-C_BG_LIGHT=$'\033[47m'
+C_BG_LIGHT=$'\033[107m'
 C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 C_NC=$'\033[0m'
@@ -689,7 +689,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|scamalytics-local-v2|dbip-ip-v2"
+  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-local-v2|dbip-ip-v2"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -1073,6 +1073,16 @@ basic_ip_type() {
   fi
 }
 
+ip2location_ip_type() {
+  local registered="$1" location="$2"
+  # IP2Location 公共查询结果没有独立的 Registered Country 字段；在该字段
+  # 缺失时，用它自己的 Country/使用地作为地理一致性判定基准，避免类型无效。
+  if [ -z "$(country_code_from_value "$registered")" ]; then
+    registered="$location"
+  fi
+  basic_ip_type "$registered" "$location"
+}
+
 map_url_from_coordinates() {
   local coordinates="$1" latitude longitude
   if [[ "$coordinates" != *,* ]]; then
@@ -1190,21 +1200,26 @@ report_type_cell() {
   fi
 }
 
+report_color_has_background() {
+  case "$1" in
+    "$C_GREEN"|"$C_YELLOW"|"$C_RED") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 report_color_prefix() {
   local color="$1"
-  case "$color" in
-    "$C_GREEN"|"$C_YELLOW"|"$C_RED")
-      printf '%s%s' "$C_BG_LIGHT" "$color"
-      ;;
-    *)
-      printf '%s' "$color"
-      ;;
-  esac
+  if report_color_has_background "$color"; then
+    printf '%s%s' "$C_BG_LIGHT" "$color"
+  else
+    printf '%s' "$color"
+  fi
 }
 
 REPORT_LABEL_WIDTH=0
 REPORT_COLUMN_WIDTHS=(0 0 0 0)
 REPORT_MEASURE_ONLY=0
+REPORT_RISK_BACKGROUND_WIDTH=8
 
 report_measure() {
   :
@@ -1243,28 +1258,6 @@ report_database_row() {
   printf '\n'
 }
 
-report_row_2() {
-  local values=("$@") index
-  printf '  '
-  report_label_cell "${values[0]}" "$REPORT_LABEL_WIDTH"
-  for index in 1 2; do
-    printf '  '
-    report_cell "${values[$index]}" "${REPORT_COLUMN_WIDTHS[$((index - 1))]}"
-  done
-  printf '\n'
-}
-
-report_database_row_2() {
-  local values=("$@") index
-  printf '  '
-  report_label_cell "${values[0]}" "$REPORT_LABEL_WIDTH"
-  for index in 1 2; do
-    printf '  '
-    report_label_cell "${values[$index]}" "${REPORT_COLUMN_WIDTHS[$((index - 1))]}"
-  done
-  printf '\n'
-}
-
 report_line() {
   if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
     report_measure "$@"
@@ -1286,22 +1279,6 @@ report_database_line() {
     report_measure "$@"
   else
     report_database_row "$@"
-  fi
-}
-
-report_line_2() {
-  if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
-    report_measure "$@"
-  else
-    report_row_2 "$@"
-  fi
-}
-
-report_database_line_2() {
-  if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
-    report_measure "$@"
-  else
-    report_database_row_2 "$@"
   fi
 }
 
@@ -1341,7 +1318,7 @@ report_neighbor_cell() {
       "${ACTIVE_NEIGHBOR_ACTIVE[$index]}" \
       "${ACTIVE_NEIGHBOR_TOTAL[$index]}")
     color_prefix=$(report_color_prefix "$color")
-    rendered+="${C_CYAN}${label}${C_NC} ${color_prefix}${active_display}${C_NC} / ${total_display}"
+    rendered+="${C_CYAN}${label}${C_NC} ${color_prefix}${active_display} / ${total_display}${C_NC}"
   done
   printf '%s' "$rendered"
   if [ "$current" -lt "$width" ]; then
@@ -1393,16 +1370,23 @@ risk_score_display() {
 
 report_risk_cell() {
   local value="$1" width="$2" color_key="${3:-$value}" truncated current color
+  local background_width background_padding cell_padding
   truncated=$(report_truncate "$value" "$width")
   current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
-  if [ -n "$color" ]; then
-    printf '%s%s%s' "$(report_color_prefix "$color")" "$truncated" "$C_NC"
+  if report_color_has_background "$color"; then
+    background_width="$REPORT_RISK_BACKGROUND_WIDTH"
+    [ "$background_width" -gt "$width" ] && background_width="$width"
+    [ "$background_width" -lt "$current" ] && background_width="$current"
+    background_padding=$((background_width - current))
+    cell_padding=$((width - background_width))
+    printf '%*s' "$cell_padding" ''
+    printf '%s%s%*s%s%s' \
+      "$C_BG_LIGHT" "$color" "$background_padding" '' "$truncated" "$C_NC"
+  elif [ -n "$color" ]; then
+    printf '%s%*s%s%s' "$color" $((width - current)) '' "$truncated" "$C_NC"
   else
-    printf '%s' "$truncated"
-  fi
-  if [ "$current" -lt "$width" ]; then
-    printf '%*s' $((width - current)) ''
+    printf '%*s%s' $((width - current)) '' "$truncated"
   fi
 }
 
@@ -1410,7 +1394,7 @@ report_risk_row() {
   local kind="$1" label="$2" index color_key
   shift 2
   local values=("$@")
-  local levels=("$MAXMIND_RISK_LEVEL" "$IP2LOCATION_RISK_LEVEL" "$SCAMALYTICS_RISK_LEVEL" "$DBIP_RISK_LEVEL")
+  local levels=("$MAXMIND_RISK_LEVEL" "$SCAMALYTICS_RISK_LEVEL" "$IP2LOCATION_RISK_LEVEL" "$DBIP_RISK_LEVEL")
   printf '  '
   report_label_cell "$label" "$REPORT_LABEL_WIDTH"
   for index in 0 1 2 3; do
@@ -2941,40 +2925,53 @@ lookup_active_neighbors() {
 
 report_basic_rows() {
   local ip="$1"
-  report_database_line_2 '数据库' 'MaxMind' 'IP2Location'
-  report_line_2 'ASN' \
+  # 与下方四列报告保持相同的列锚点：MaxMind 在第 1 列，IP2Location 在第 3 列。
+  report_database_line '数据库' 'MaxMind' '' 'IP2Location' ''
+  report_line 'ASN' \
     "$(basic_get maxmind asn)" \
-    "$(basic_get ip2location asn)"
-  report_line_2 '组织' \
+    '' \
+    "$(basic_get ip2location asn)" \
+    ''
+  report_line '组织' \
     "$(basic_get maxmind organization)" \
-    "$(basic_get ip2location organization)"
-  report_line_2 '坐标' \
+    '' \
+    "$(basic_get ip2location organization)" \
+    ''
+  report_line '坐标' \
     "$(basic_get maxmind coordinates)" \
-    "$(basic_get ip2location coordinates)"
-  report_line_2 '城市' \
+    '' \
+    "$(basic_get ip2location coordinates)" \
+    ''
+  report_line '城市' \
     "$(basic_get maxmind city)" \
-    "$(basic_get ip2location city)"
-  report_line_2 '洲际' \
+    '' \
+    "$(basic_get ip2location city)" \
+    ''
+  report_line '洲际' \
     "$(basic_get maxmind continent)" \
-    "$(basic_get ip2location continent)"
-  report_line_2 '时区' \
+    '' \
+    "$(basic_get ip2location continent)" \
+    ''
+  report_line '时区' \
     "$(basic_get maxmind timezone)" \
-    "$(basic_get ip2location timezone)"
-  report_database_line '数据库' 'MaxMind' 'IP2Location' 'IPinfo' 'DB-IP'
+    '' \
+    "$(basic_get ip2location timezone)" \
+    ''
+  report_database_line '数据库' 'MaxMind' 'IPinfo' 'IP2Location' 'DB-IP'
   report_line '注册地' \
     "$(basic_get maxmind registered)" \
-    "$(basic_get ip2location registered)" \
     "$(basic_get ipinfo registered)" \
+    "$(basic_get ip2location registered)" \
     "$(basic_get dbip registered)"
   report_line '使用地' \
     "$(basic_get maxmind location)" \
-    "$(basic_get ip2location location)" \
     "$(basic_get ipinfo location)" \
+    "$(basic_get ip2location location)" \
     "$(basic_get dbip location)"
   report_type_line 'IP类型' \
     "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
-    "$(basic_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
     "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
+    "$(ip2location_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
     "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")"
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
@@ -2982,31 +2979,31 @@ report_basic_rows() {
 }
 
 report_type_rows() {
-  report_database_line '数据库' 'MaxMind' 'IP2Location' 'IPinfo' 'DB-IP'
+  report_database_line '数据库' 'MaxMind' 'IPinfo' 'IP2Location' 'DB-IP'
   report_type_line '使用类型' \
     "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
-    "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
+    "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     "$(display_type "$DBIP_USAGE_TYPE" "$DBIP_USAGE_RAW")"
   # DB-IP 没有独立的公司类型字段，因此保留空白，不显示“未提供”。
   report_type_line '公司类型' \
     "$(display_type "$MAXMIND_COMPANY_TYPE" "$MAXMIND_COMPANY_RAW")" \
-    "$(display_type "$IP2LOCATION_COMPANY_TYPE" "$IP2LOCATION_COMPANY_RAW")" \
     "$(display_type "$IPINFO_COMPANY_TYPE" "$IPINFO_COMPANY_RAW")" \
+    "$(display_type "$IP2LOCATION_COMPANY_TYPE" "$IP2LOCATION_COMPANY_RAW")" \
     ''
 }
 
 report_risk_rows() {
-  report_database_line '数据库' 'MaxMind' 'IP2Location' 'Scamalytics' 'DB-IP'
+  report_database_line '数据库' 'MaxMind' 'Scamalytics' 'IP2Location' 'DB-IP'
   report_risk_line score '分数' \
     "$(risk_score_display "$MAXMIND_RISK_SCORE")" \
-    "$(risk_score_display "$IP2LOCATION_RISK_SCORE")" \
     "$(risk_score_display "$SCAMALYTICS_RISK_SCORE")" \
+    "$(risk_score_display "$IP2LOCATION_RISK_SCORE")" \
     "$(risk_score_display "$DBIP_RISK_SCORE")"
   report_risk_line level '等级' \
     "$MAXMIND_RISK_LEVEL" \
-    "$IP2LOCATION_RISK_LEVEL" \
     "$SCAMALYTICS_RISK_LEVEL" \
+    "$IP2LOCATION_RISK_LEVEL" \
     "$DBIP_RISK_LEVEL"
 }
 
@@ -3125,7 +3122,7 @@ write_report_json() {
     --arg ipinfoLocation "$(basic_get ipinfo location)" \
     --arg dbipLocation "$(basic_get dbip location)" \
     --arg maxmindIpType "$(basic_ip_type "$(basic_get maxmind registered)" "$(basic_get maxmind location)")" \
-    --arg ip2IpType "$(basic_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
+    --arg ip2IpType "$(ip2location_ip_type "$(basic_get ip2location registered)" "$(basic_get ip2location location)")" \
     --arg ipinfoIpType "$(basic_ip_type "$(basic_get ipinfo registered)" "$(basic_get ipinfo location)")" \
     --arg dbipIpType "$(basic_ip_type "$(basic_get dbip registered)" "$(basic_get dbip location)")" \
     --arg maxmindUsage "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
@@ -3168,22 +3165,23 @@ write_report_json() {
       family: $family,
       databaseCached: ($databaseCached == 1),
       basic: {
-        columns: ["MaxMind", "IP2Location", "IPinfo", "DB-IP"],
+        columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
         rows: [
-          {"label": "ASN", "values": [$maxmindAsn, $ip2Asn, $ipinfoAsn, $dbipAsn]},
-          {"label": "组织", "values": [$maxmindOrganization, $ip2Organization, $ipinfoOrganization, $dbipOrganization]},
-          {"label": "坐标", "values": [$maxmindCoordinates, $ip2Coordinates, $ipinfoCoordinates, $dbipCoordinates]},
-          {"label": "城市", "values": [$maxmindCity, $ip2City, $ipinfoCity, $dbipCity]},
-          {"label": "洲际", "values": [$maxmindContinent, $ip2Continent, $ipinfoContinent, $dbipContinent]},
-          {"label": "时区", "values": [$maxmindTimezone, $ip2Timezone, $ipinfoTimezone, $dbipTimezone]},
-          {"label": "注册地", "values": [$maxmindRegistered, $ip2Registered, $ipinfoRegistered, $dbipRegistered]},
-          {"label": "使用地", "values": [$maxmindLocation, $ip2Location, $ipinfoLocation, $dbipLocation]},
-          {"label": "IP类型", "values": [$maxmindIpType, $ip2IpType, $ipinfoIpType, $dbipIpType]},
+          {"label": "ASN", "values": [$maxmindAsn, $ipinfoAsn, $ip2Asn, $dbipAsn]},
+          {"label": "组织", "values": [$maxmindOrganization, $ipinfoOrganization, $ip2Organization, $dbipOrganization]},
+          {"label": "坐标", "values": [$maxmindCoordinates, $ipinfoCoordinates, $ip2Coordinates, $dbipCoordinates]},
+          {"label": "城市", "values": [$maxmindCity, $ipinfoCity, $ip2City, $dbipCity]},
+          {"label": "洲际", "values": [$maxmindContinent, $ipinfoContinent, $ip2Continent, $dbipContinent]},
+          {"label": "时区", "values": [$maxmindTimezone, $ipinfoTimezone, $ip2Timezone, $dbipTimezone]},
+          {"label": "注册地", "values": [$maxmindRegistered, $ipinfoRegistered, $ip2Registered, $dbipRegistered]},
+          {"label": "使用地", "values": [$maxmindLocation, $ipinfoLocation, $ip2Location, $dbipLocation]},
+          {"label": "IP类型", "values": [$maxmindIpType, $ipinfoIpType, $ip2IpType, $dbipIpType]},
           {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
         ],
         tables: [
           {
             columns: ["MaxMind", "IP2Location"],
+            columnPositions: [0, 2],
             rows: [
               {"label": "ASN", "values": [$maxmindAsn, $ip2Asn]},
               {"label": "组织", "values": [$maxmindOrganization, $ip2Organization]},
@@ -3194,28 +3192,28 @@ write_report_json() {
             ]
           },
           {
-            columns: ["MaxMind", "IP2Location", "IPinfo", "DB-IP"],
+            columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
             rows: [
-              {"label": "注册地", "values": [$maxmindRegistered, $ip2Registered, $ipinfoRegistered, $dbipRegistered]},
-              {"label": "使用地", "values": [$maxmindLocation, $ip2Location, $ipinfoLocation, $dbipLocation]},
-              {"label": "IP类型", "values": [$maxmindIpType, $ip2IpType, $ipinfoIpType, $dbipIpType]},
+              {"label": "注册地", "values": [$maxmindRegistered, $ipinfoRegistered, $ip2Registered, $dbipRegistered]},
+              {"label": "使用地", "values": [$maxmindLocation, $ipinfoLocation, $ip2Location, $dbipLocation]},
+              {"label": "IP类型", "values": [$maxmindIpType, $ipinfoIpType, $ip2IpType, $dbipIpType]},
               {"label": "活跃邻居", "values": [$activeNeighbor, "", "", ""]}
             ]
           }
         ]
       },
       type: {
-        columns: ["MaxMind", "IP2Location", "IPinfo", "DB-IP"],
+        columns: ["MaxMind", "IPinfo", "IP2Location", "DB-IP"],
         rows: [
-          {"label": "使用类型", "values": [$maxmindUsage, $ip2Usage, $ipinfoUsage, $dbipUsage]},
-          {"label": "公司类型", "values": [$maxmindCompany, $ip2Company, $ipinfoCompany, "-"]}
+          {"label": "使用类型", "values": [$maxmindUsage, $ipinfoUsage, $ip2Usage, $dbipUsage]},
+          {"label": "公司类型", "values": [$maxmindCompany, $ipinfoCompany, $ip2Company, "-"]}
         ]
       },
       risk: {
-        columns: ["MaxMind", "IP2Location", "Scamalytics", "DB-IP"],
+        columns: ["MaxMind", "Scamalytics", "IP2Location", "DB-IP"],
         rows: [
-          {"label": "分数", "values": [$maxmindScore, $ip2Score, $scamalyticsScore, $dbipScore]},
-          {"label": "等级", "values": [$maxmindLevel, $ip2Level, $scamalyticsLevel, $dbipLevel]}
+          {"label": "分数", "values": [$maxmindScore, $scamalyticsScore, $ip2Score, $dbipScore]},
+          {"label": "等级", "values": [$maxmindLevel, $scamalyticsLevel, $ip2Level, $dbipLevel]}
         ]
       },
       ai: {
