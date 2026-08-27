@@ -717,7 +717,7 @@ maxmind_risk_cache_file_for_ip() {
 
 cache_context_signature() {
   local context hash
-  context="maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-local-v2|dbip-ip-v2"
+  context="database-cache-v2|maxmind-mmdb-v2|${MAXMIND_ASN_DB}|${MAXMIND_COUNTRY_DB}|${MAXMIND_CITY_DB}|${IPQUALITY_PAID_LOOKUP}|${IPQUALITY_API_BASE}|ip2location-type-v2|scamalytics-remote-v3|dbip-ip-v2"
   if command -v sha256sum >/dev/null 2>&1; then
     hash=$(printf '%s' "$context" | sha256sum | awk '{print $1}')
   elif command -v shasum >/dev/null 2>&1; then
@@ -726,6 +726,22 @@ cache_context_signature() {
     hash=$(printf '%s' "$context" | cksum | awk '{print $1}')
   fi
   printf '%s' "$hash"
+}
+
+database_cache_has_failed_results() {
+  local value
+  # 这些结果代表对应查询没有拿到可用数据；不能随其它数据库结果一起
+  # 缓存，否则下一次运行会直接复用失败状态而跳过重试。
+  for value in \
+    "$MAXMIND_RISK_LEVEL" \
+    "$SCAMALYTICS_RISK_LEVEL" \
+    "$IP2LOCATION_USAGE_TYPE" \
+    "$DBIP_USAGE_TYPE"; do
+    case "$value" in
+      "$INVALID_STATUS"|冷却|失败) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 database_cache_has_data() {
@@ -775,9 +791,13 @@ load_database_cache() {
     reset_results
     return 1
   }
-  if [ "${CACHE_VERSION:-}" != "1" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
+  if [ "${CACHE_VERSION:-}" != "2" ] || [ "${CACHE_IP:-}" != "$ip" ] ||
      [ "${CACHE_SIGNATURE:-}" != "$cache_signature" ] ||
      ! [[ "${CACHE_SAVED_AT:-}" =~ ^[0-9]+$ ]]; then
+    reset_results
+    return 1
+  fi
+  if database_cache_has_failed_results; then
     reset_results
     return 1
   fi
@@ -786,6 +806,7 @@ load_database_cache() {
 
 save_database_cache() {
   local ip="$1" cache_file temp_file saved_at variable cache_signature
+  database_cache_has_failed_results && return 0
   database_cache_has_data || return 0
   cache_file=$(cache_file_for_ip "$ip" 2>/dev/null || true)
   [ -n "$cache_file" ] || return 0
@@ -795,7 +816,7 @@ save_database_cache() {
   saved_at=$(date +%s)
   cache_signature=$(cache_context_signature)
   {
-    printf 'CACHE_VERSION=1\n'
+    printf 'CACHE_VERSION=2\n'
     printf 'CACHE_IP=%q\n' "$ip"
     printf 'CACHE_SAVED_AT=%q\n' "$saved_at"
     printf 'CACHE_SIGNATURE=%q\n' "$cache_signature"
@@ -1285,7 +1306,6 @@ report_color_prefix() {
 REPORT_LABEL_WIDTH=0
 REPORT_COLUMN_WIDTHS=(0 0 0 0)
 REPORT_MEASURE_ONLY=0
-REPORT_RISK_BACKGROUND_WIDTH=8
 
 report_measure() {
   :
@@ -1435,29 +1455,22 @@ risk_score_display() {
 }
 
 report_risk_cell() {
-  local value="$1" width="$2" color_key="${3:-$value}" truncated current color
-  local background_width cell_padding
+  local value="$1" width="$2" color_key="${3:-$value}" truncated color
   truncated=$(report_truncate "$value" "$width")
-  current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
-  # 分数和等级保持左对齐，但都固定占用同样的显示宽度，避免短值改变
-  # 彩色底纹和后续列的位置。有效风险值保留浅色底纹，其他状态仅保留
-  # 文字颜色，但仍使用完全相同的占位宽度。
-  background_width="$REPORT_RISK_BACKGROUND_WIDTH"
-  [ "$background_width" -gt "$width" ] && background_width="$width"
-  [ "$background_width" -lt "$current" ] && background_width="$current"
-  cell_padding=$((width - background_width))
-  printf '%*s' "$cell_padding" ''
+  # 分数和等级从各自列的起始位置左对齐，并完整占用同样的显示宽度。
+  # 有效风险值的底纹覆盖整个固定单元格，其他状态仅保留文字颜色，
+  # 但仍使用完全相同的占位宽度。
   if report_color_has_background "$color"; then
     printf '%s%s' "$(report_background_color "$color")" "$color"
-    report_pad "$truncated" "$background_width"
+    report_pad "$truncated" "$width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
     printf '%s' "$color"
-    report_pad "$truncated" "$background_width"
+    report_pad "$truncated" "$width"
     printf '%s' "$C_NC"
   else
-    report_pad "$truncated" "$background_width"
+    report_pad "$truncated" "$width"
   fi
 }
 
