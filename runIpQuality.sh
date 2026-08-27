@@ -1434,23 +1434,14 @@ risk_score_display() {
   fi
 }
 
-report_right_aligned_text() {
-  local value="$1" width="$2" current
-  current=$(display_width "$value")
-  if [ "$current" -lt "$width" ]; then
-    printf '%*s' $((width - current)) ''
-  fi
-  printf '%s' "$value"
-}
-
 report_risk_cell() {
   local value="$1" width="$2" color_key="${3:-$value}" truncated current color
   local background_width cell_padding
   truncated=$(report_truncate "$value" "$width")
   current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
-  # 分数和等级都固定在单元格右侧的同一块区域内，避免 3、0 与“低风险”
-  # 因为文本宽度不同而看起来错位。有效风险值保留浅色底纹，其他状态仅保留
+  # 分数和等级保持左对齐，但都固定占用同样的显示宽度，避免短值改变
+  # 彩色底纹和后续列的位置。有效风险值保留浅色底纹，其他状态仅保留
   # 文字颜色，但仍使用完全相同的占位宽度。
   background_width="$REPORT_RISK_BACKGROUND_WIDTH"
   [ "$background_width" -gt "$width" ] && background_width="$width"
@@ -1459,14 +1450,14 @@ report_risk_cell() {
   printf '%*s' "$cell_padding" ''
   if report_color_has_background "$color"; then
     printf '%s%s' "$(report_background_color "$color")" "$color"
-    report_right_aligned_text "$truncated" "$background_width"
+    report_pad "$truncated" "$background_width"
     printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
     printf '%s' "$color"
-    report_right_aligned_text "$truncated" "$background_width"
+    report_pad "$truncated" "$background_width"
     printf '%s' "$C_NC"
   else
-    report_right_aligned_text "$truncated" "$background_width"
+    report_pad "$truncated" "$background_width"
   fi
 }
 
