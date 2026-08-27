@@ -36,6 +36,7 @@ C_CYAN=$'\033[36m'
 C_GREEN=$'\033[32m'
 C_YELLOW=$'\033[33m'
 C_RED=$'\033[31m'
+C_BG_LIGHT=$'\033[47m'
 C_DIM=$'\033[2m'
 C_BOLD=$'\033[1m'
 C_NC=$'\033[0m'
@@ -1180,13 +1181,25 @@ report_type_cell() {
   current=$(display_width "$truncated")
   color=$(ip_type_color "$value")
   if [ -n "$color" ]; then
-    printf '%s%s%s' "$color" "$truncated" "$C_NC"
+    printf '%s%s%s' "$(report_color_prefix "$color")" "$truncated" "$C_NC"
   else
     printf '%s' "$truncated"
   fi
   if [ "$current" -lt "$width" ]; then
     printf '%*s' $((width - current)) ''
   fi
+}
+
+report_color_prefix() {
+  local color="$1"
+  case "$color" in
+    "$C_GREEN"|"$C_YELLOW"|"$C_RED")
+      printf '%s%s' "$C_BG_LIGHT" "$color"
+      ;;
+    *)
+      printf '%s' "$color"
+      ;;
+  esac
 }
 
 REPORT_LABEL_WIDTH=0
@@ -1306,7 +1319,7 @@ neighbor_ratio_color() {
 }
 
 report_neighbor_cell() {
-  local width="$1" current index label segment active_display total_display color rendered=""
+  local width="$1" current index label segment active_display total_display color color_prefix rendered=""
   if [ "${#ACTIVE_NEIGHBOR_SEGMENTS[@]}" -eq 0 ]; then
     report_cell "$ACTIVE_NEIGHBOR_VALUE" "$width"
     return
@@ -1327,7 +1340,8 @@ report_neighbor_cell() {
     color=$(neighbor_ratio_color \
       "${ACTIVE_NEIGHBOR_ACTIVE[$index]}" \
       "${ACTIVE_NEIGHBOR_TOTAL[$index]}")
-    rendered+="${C_CYAN}${label}${C_NC} ${color}${active_display}${C_NC} / ${total_display}"
+    color_prefix=$(report_color_prefix "$color")
+    rendered+="${C_CYAN}${label}${C_NC} ${color_prefix}${active_display}${C_NC} / ${total_display}"
   done
   printf '%s' "$rendered"
   if [ "$current" -lt "$width" ]; then
@@ -1383,7 +1397,7 @@ report_risk_cell() {
   current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
   if [ -n "$color" ]; then
-    printf '%s%s%s' "$color" "$truncated" "$C_NC"
+    printf '%s%s%s' "$(report_color_prefix "$color")" "$truncated" "$C_NC"
   else
     printf '%s' "$truncated"
   fi
@@ -1435,7 +1449,7 @@ report_ai_status_cell() {
   current=$(display_width "$truncated")
   color=$(ai_status_color "$value")
   if [ -n "$color" ]; then
-    printf '%s%s%s' "$color" "$truncated" "$C_NC"
+    printf '%s%s%s' "$(report_color_prefix "$color")" "$truncated" "$C_NC"
   else
     printf '%s' "$truncated"
   fi
@@ -1504,7 +1518,7 @@ report_port_status_cell() {
   current=$(display_width "$truncated")
   color=$(port_status_color "$value")
   if [ -n "$color" ]; then
-    printf '%s%s%s' "$color" "$truncated" "$C_NC"
+    printf '%s%s%s' "$(report_color_prefix "$color")" "$truncated" "$C_NC"
   else
     printf '%s' "$truncated"
   fi
@@ -1522,7 +1536,7 @@ report_port_value_cell() {
     status="${BASH_REMATCH[2]}"
     color=$(port_status_color "$status")
     if [ -n "$color" ]; then
-      printf '%s[%s%s%s]' "$port" "$color" "$status" "$C_NC"
+      printf '%s[%s%s%s]' "$port" "$(report_color_prefix "$color")" "$status" "$C_NC"
     else
       printf '%s' "$truncated"
     fi
