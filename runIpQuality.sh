@@ -1095,18 +1095,18 @@ basic_ip_type() {
   if [ -z "$registered_code" ] || [ -z "$location_code" ]; then
     printf '%s' "$INVALID_STATUS"
   elif [ "$registered_code" = "$location_code" ]; then
-    printf '%s' '原生'
+    printf '%s' '原生IP'
   else
-    printf '%s' '广播'
+    printf '%s' '广播IP'
   fi
 }
 
 normalize_direct_ip_type() {
   case "$(trim_text "$1")" in
-    原生) printf '%s' '原生' ;;
-    广播) printf '%s' '广播' ;;
-    [Nn][Aa][Tt][Ii][Vv][Ee]) printf '%s' '原生' ;;
-    [Bb][Rr][Oo][Aa][Dd][Cc][Aa][Ss][Tt]) printf '%s' '广播' ;;
+    原生|原生IP) printf '%s' '原生IP' ;;
+    广播|广播IP) printf '%s' '广播IP' ;;
+    [Nn][Aa][Tt][Ii][Vv][Ee]) printf '%s' '原生IP' ;;
+    [Bb][Rr][Oo][Aa][Dd][Cc][Aa][Ss][Tt]) printf '%s' '广播IP' ;;
     *) return 0 ;;
   esac
 }
@@ -1226,8 +1226,8 @@ report_label_cell() {
 ip_type_color() {
   local normalized="${1,,}"
   case "$normalized" in
-    原生) printf '%s' "$C_GREEN" ;;
-    广播) printf '%s' "$C_YELLOW" ;;
+    原生ip) printf '%s' "$C_GREEN" ;;
+    广播ip) printf '%s' "$C_YELLOW" ;;
     *家宽*|*固网*|*移动*|*住宅*|*residential*|*isp*) printf '%s' "$C_GREEN" ;;
     *商业*|*组织*|*机房*|*托管*|*数据中心*|*business*|*hosting*|*datacenter*|*data_center*|*dch*)
       printf '%s' "$C_YELLOW"
@@ -1434,9 +1434,18 @@ risk_score_display() {
   fi
 }
 
+report_right_aligned_text() {
+  local value="$1" width="$2" current
+  current=$(display_width "$value")
+  if [ "$current" -lt "$width" ]; then
+    printf '%*s' $((width - current)) ''
+  fi
+  printf '%s' "$value"
+}
+
 report_risk_cell() {
   local value="$1" width="$2" color_key="${3:-$value}" truncated current color
-  local background_width background_padding cell_padding
+  local background_width cell_padding
   truncated=$(report_truncate "$value" "$width")
   current=$(display_width "$truncated")
   color=$(risk_color "$color_key")
@@ -1446,16 +1455,18 @@ report_risk_cell() {
   background_width="$REPORT_RISK_BACKGROUND_WIDTH"
   [ "$background_width" -gt "$width" ] && background_width="$width"
   [ "$background_width" -lt "$current" ] && background_width="$current"
-  background_padding=$((background_width - current))
   cell_padding=$((width - background_width))
   printf '%*s' "$cell_padding" ''
   if report_color_has_background "$color"; then
-    printf '%s%s%*s%s%s' \
-      "$(report_background_color "$color")" "$color" "$background_padding" '' "$truncated" "$C_NC"
+    printf '%s%s' "$(report_background_color "$color")" "$color"
+    report_right_aligned_text "$truncated" "$background_width"
+    printf '%s' "$C_NC"
   elif [ -n "$color" ]; then
-    printf '%s%*s%s%s' "$color" "$background_padding" '' "$truncated" "$C_NC"
+    printf '%s' "$color"
+    report_right_aligned_text "$truncated" "$background_width"
+    printf '%s' "$C_NC"
   else
-    printf '%*s%s' "$background_padding" '' "$truncated"
+    report_right_aligned_text "$truncated" "$background_width"
   fi
 }
 
@@ -2997,26 +3008,26 @@ lookup_active_neighbors() {
 report_basic_rows() {
   local ip="$1" basic_value basic_type
   # 基础信息只展示 IP2Location；每个字段缺失时由本地 MaxMind 离线库兜底，
-  # 并继续放在第三列，和下方多数据库表中的 IP2Location 列对齐。
-  report_database_line '数据库' '' '' 'IP2Location' ''
+  # 无论实际命中哪个数据源，都固定放在第一列。
+  report_database_line '数据库' 'IP2Location' '' '' ''
   basic_value=$(basic_preferred_get asn)
-  report_line 'ASN' '' '' "$basic_value" ''
+  report_line 'ASN' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get organization)
-  report_line '组织' '' '' "$basic_value" ''
+  report_line '组织' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get coordinates)
-  report_line '坐标' '' '' "$basic_value" ''
+  report_line '坐标' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get city)
-  report_line '城市' '' '' "$basic_value" ''
+  report_line '城市' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get continent)
-  report_line '洲际' '' '' "$basic_value" ''
+  report_line '洲际' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get timezone)
-  report_line '时区' '' '' "$basic_value" ''
+  report_line '时区' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get registered)
-  report_line '注册地' '' '' "$basic_value" ''
+  report_line '注册地' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get location)
-  report_line '使用地' '' '' "$basic_value" ''
+  report_line '使用地' "$basic_value" '' '' ''
   basic_type=$(basic_preferred_ip_type)
-  report_type_line 'IP类型' '' '' "$basic_type" ''
+  report_type_line 'IP类型' "$basic_type" '' '' ''
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
   fi
@@ -3194,7 +3205,7 @@ write_report_json() {
       databaseCached: ($databaseCached == 1),
       basic: {
         columns: ["IP2Location"],
-        columnPositions: [2],
+        columnPositions: [0],
         rows: [
           {"label": "ASN", "values": [$basicAsn]},
           {"label": "组织", "values": [$basicOrganization]},
