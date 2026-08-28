@@ -2682,9 +2682,9 @@ lookup_active_neighbors_direct() {
     subnet_prefix="${ip%.*}.0/24"
     subnet_active=$(bgp_tools_active_count "$subnet_prefix" || true)
     if [[ "$subnet_active" =~ ^[0-9]+$ ]]; then
-      ACTIVE_NEIGHBOR_VALUE="Subnet/24 ${subnet_active} / 256"
+      ACTIVE_NEIGHBOR_VALUE="Subnet/24: ${subnet_active}/256"
       ACTIVE_NEIGHBOR_LABELS+=("Subnet/24")
-      ACTIVE_NEIGHBOR_SEGMENTS+=("${subnet_active} / 256")
+      ACTIVE_NEIGHBOR_SEGMENTS+=("${subnet_active}/256")
       ACTIVE_NEIGHBOR_ACTIVE+=("$subnet_active")
       ACTIVE_NEIGHBOR_TOTAL+=(256)
     fi
@@ -2702,7 +2702,7 @@ lookup_active_neighbors_direct() {
     subnet_active=$(bgp_tools_active_count "$subnet_prefix" || true)
     if [[ "$subnet_active" =~ ^[0-9]+$ ]]; then
       ACTIVE_NEIGHBOR_LABELS+=("Subnet/24")
-      ACTIVE_NEIGHBOR_SEGMENTS+=("${subnet_active} / 256")
+      ACTIVE_NEIGHBOR_SEGMENTS+=("${subnet_active}/256")
       ACTIVE_NEIGHBOR_ACTIVE+=("$subnet_active")
       ACTIVE_NEIGHBOR_TOTAL+=(256)
     fi
@@ -2710,7 +2710,7 @@ lookup_active_neighbors_direct() {
 
   if [[ "$prefix_active" =~ ^[0-9]+$ ]]; then
     ACTIVE_NEIGHBOR_LABELS+=("Prefix/${prefix_length}")
-    ACTIVE_NEIGHBOR_SEGMENTS+=("${prefix_active} / ${prefix_total_display}")
+    ACTIVE_NEIGHBOR_SEGMENTS+=("${prefix_active}/${prefix_total_display}")
     ACTIVE_NEIGHBOR_ACTIVE+=("$prefix_active")
     ACTIVE_NEIGHBOR_TOTAL+=("$prefix_total")
   fi
@@ -2718,7 +2718,7 @@ lookup_active_neighbors_direct() {
     ACTIVE_NEIGHBOR_VALUE=""
     for index in "${!ACTIVE_NEIGHBOR_SEGMENTS[@]}"; do
       [ -n "$ACTIVE_NEIGHBOR_VALUE" ] && ACTIVE_NEIGHBOR_VALUE+='    '
-      ACTIVE_NEIGHBOR_VALUE+="${ACTIVE_NEIGHBOR_LABELS[$index]} ${ACTIVE_NEIGHBOR_SEGMENTS[$index]}"
+      ACTIVE_NEIGHBOR_VALUE+="${ACTIVE_NEIGHBOR_LABELS[$index]}: ${ACTIVE_NEIGHBOR_SEGMENTS[$index]}"
     done
   fi
 }
