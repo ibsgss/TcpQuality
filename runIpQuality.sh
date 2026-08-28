@@ -555,6 +555,18 @@ basic_preferred_get() {
   fi
 }
 
+basic_preferred_provider() {
+  local field value
+  for field in "${BASIC_FIELDS[@]}"; do
+    value=$(basic_get ip2location "$field")
+    if basic_value_available "$value"; then
+      printf '%s' 'IP2Location'
+      return 0
+    fi
+  done
+  printf '%s' 'MaxMind'
+}
+
 basic_mark_provider() {
   local provider="$1" value="$2" field
   for field in "${BASIC_FIELDS[@]}"; do
@@ -1080,6 +1092,28 @@ report_line() {
     report_measure "$@"
   else
     report_row "$@"
+  fi
+}
+
+report_basic_row() {
+  local values=("$@") total_width=0 index
+  for index in 0 1 2 3; do
+    total_width=$((total_width + REPORT_COLUMN_WIDTHS[$index]))
+    [ "$index" -gt 0 ] && total_width=$((total_width + 2))
+  done
+
+  printf '  '
+  report_label_cell "${values[0]}" "$REPORT_LABEL_WIDTH"
+  printf '  '
+  report_cell "${values[1]}" "$total_width"
+  printf '\n'
+}
+
+report_basic_line() {
+  if [ "$REPORT_MEASURE_ONLY" -eq 1 ]; then
+    report_measure "$@"
+  else
+    report_basic_row "$@"
   fi
 }
 
@@ -2670,29 +2704,29 @@ lookup_active_neighbors_direct() {
 }
 
 report_basic_rows() {
-  local ip="$1" basic_value basic_type maxmind_asn ip2location_asn
-  # 基础信息的最终值仍由 IP2Location 优先、MaxMind 离线库兜底；ASN
-  # 同时展示两个来源，并与下方表格的第 1/第 3 列对齐。
-  report_database_line '数据库' 'MaxMind' '' 'IP2Location' ''
-  maxmind_asn=$(basic_get maxmind asn)
-  ip2location_asn=$(basic_get ip2location asn)
-  report_line 'ASN' "$maxmind_asn" '' "$ip2location_asn" ''
+  local ip="$1" basic_value basic_type basic_source
+  # 基础信息只展示一套结果：优先 IP2Location，缺失字段由 MaxMind
+  # 离线库兜底；无论实际来源，都固定放在第一列。
+  basic_source=$(basic_preferred_provider)
+  report_database_line '数据库' "$basic_source" '' '' ''
+  basic_value=$(basic_preferred_get asn)
+  report_basic_line 'ASN' "$basic_value"
   basic_value=$(basic_preferred_get organization)
-  report_line '组织' "$basic_value" '' '' ''
+  report_basic_line '组织' "$basic_value"
   basic_value=$(basic_preferred_get coordinates)
-  report_line '坐标' "$basic_value" '' '' ''
+  report_basic_line '坐标' "$basic_value"
   basic_value=$(basic_preferred_get city)
-  report_line '城市' "$basic_value" '' '' ''
+  report_basic_line '城市' "$basic_value"
   basic_value=$(basic_preferred_get continent)
-  report_line '洲际' "$basic_value" '' '' ''
+  report_basic_line '洲际' "$basic_value"
   basic_value=$(basic_preferred_get timezone)
-  report_line '时区' "$basic_value" '' '' ''
+  report_basic_line '时区' "$basic_value"
   basic_value=$(basic_preferred_get registered)
-  report_line '注册地' "$basic_value" '' '' ''
+  report_basic_line '注册地' "$basic_value"
   basic_value=$(basic_preferred_get location)
-  report_line '使用地' "$basic_value" '' '' ''
+  report_basic_line '使用地' "$basic_value"
   basic_type=$(basic_preferred_ip_type)
-  report_type_line 'IP类型' "$basic_type" '' '' ''
+  report_basic_line 'IP类型' "$basic_type"
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
   fi
@@ -3093,14 +3127,14 @@ lookup_active_neighbors() {
 
 write_report_json() {
   local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
-  local basic_maxmind_asn basic_ip2location_asn basic_organization basic_coordinates basic_city basic_continent
+  local basic_source basic_asn basic_organization basic_coordinates basic_city basic_continent
   local basic_timezone basic_registered basic_location basic_ip_type
   [ -n "$file" ] || return 0
   family=4
   [[ "$ip" == *:* ]] && family=6
   active_json=$(active_neighbor_json)
-  basic_maxmind_asn=$(basic_get maxmind asn)
-  basic_ip2location_asn=$(basic_get ip2location asn)
+  basic_source=$(basic_preferred_provider)
+  basic_asn=$(basic_preferred_get asn)
   basic_organization=$(basic_preferred_get organization)
   basic_coordinates=$(basic_preferred_get coordinates)
   basic_city=$(basic_preferred_get city)
@@ -3114,8 +3148,8 @@ write_report_json() {
     --arg ip "$ip" \
     --arg maskedIp "$(mask_ip "$ip")" \
     --arg family "IPv${family}" \
-    --arg basicMaxmindAsn "$basic_maxmind_asn" \
-    --arg basicIp2LocationAsn "$basic_ip2location_asn" \
+    --arg basicSource "$basic_source" \
+    --arg basicAsn "$basic_asn" \
     --arg basicOrganization "$basic_organization" \
     --arg basicCoordinates "$basic_coordinates" \
     --arg basicCity "$basic_city" \
@@ -3163,19 +3197,19 @@ write_report_json() {
       maskedIp: $maskedIp,
       family: $family,
       basic: {
-        columns: ["MaxMind", "IP2Location"],
-        columnPositions: [0, 2],
+        columns: [$basicSource],
+        columnPositions: [0],
         rows: [
-          {"label": "ASN", "values": [$basicMaxmindAsn, $basicIp2LocationAsn]},
-          {"label": "组织", "values": [$basicOrganization, ""]},
-          {"label": "坐标", "values": [$basicCoordinates, ""]},
-          {"label": "城市", "values": [$basicCity, ""]},
-          {"label": "洲际", "values": [$basicContinent, ""]},
-          {"label": "时区", "values": [$basicTimezone, ""]},
-          {"label": "注册地", "values": [$basicRegistered, ""]},
-          {"label": "使用地", "values": [$basicLocation, ""]},
-          {"label": "IP类型", "values": [$basicIpType, ""]},
-          {"label": "活跃邻居", "values": [$activeNeighbor, ""]}
+          {"label": "ASN", "values": [$basicAsn]},
+          {"label": "组织", "values": [$basicOrganization]},
+          {"label": "坐标", "values": [$basicCoordinates]},
+          {"label": "城市", "values": [$basicCity]},
+          {"label": "洲际", "values": [$basicContinent]},
+          {"label": "时区", "values": [$basicTimezone]},
+          {"label": "注册地", "values": [$basicRegistered]},
+          {"label": "使用地", "values": [$basicLocation]},
+          {"label": "IP类型", "values": [$basicIpType]},
+          {"label": "活跃邻居", "values": [$activeNeighbor]}
         ]
       },
       type: {
