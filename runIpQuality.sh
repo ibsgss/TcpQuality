@@ -1646,14 +1646,22 @@ ai_region_fallback() {
   fi
 }
 
+ai_trace_region_host() {
+  local host="$1" trace region
+  trace=$(curl -fsSL --connect-timeout 5 --max-time 8 \
+    -A "$AI_USER_AGENT" "https://${host}/cdn-cgi/trace" 2>/dev/null || true)
+  region=$(printf '%s' "$trace" | sed -n 's/^loc=//p' | sed -n '1p')
+  if [[ "$region" =~ ^[A-Za-z]{2}$ ]]; then
+    normalize_country_location "[${region^^}]"
+    return 0
+  fi
+  return 1
+}
+
 ai_trace_region() {
-  local host trace region
+  local host
   for host in chatgpt.com chat.openai.com; do
-    trace=$(curl -fsSL --connect-timeout 5 --max-time 8 \
-      -A "$AI_USER_AGENT" "https://${host}/cdn-cgi/trace" 2>/dev/null || true)
-    region=$(printf '%s' "$trace" | sed -n 's/^loc=//p' | sed -n '1p')
-    if [[ "$region" =~ ^[A-Za-z]{2}$ ]]; then
-      normalize_country_location "[${region^^}]"
+    if ai_trace_region_host "$host"; then
       return 0
     fi
   done
@@ -1831,15 +1839,30 @@ check_ai_gemini() {
 }
 
 check_ai_grok() {
-  local response
+  local response session_status login_status favicon_status region
   response=$(fetch_ai_page 'https://grok.com/')
   AI_GROK_STATUS=$(ai_classify_page "$response")
+  if [ "$AI_GROK_STATUS" = "失败" ]; then
+    # grok.com 首页经常先返回 WAF/浏览器验证页；会话、登录页和 favicon
+    # 是同一官方入口的无凭据连通性探测，不需要也不会携带任何 API key。
+    session_status=$(ai_probe_http 'https://grok.com/api/auth/session')
+    login_status=$(ai_probe_http 'https://grok.com/login')
+    favicon_status=$(ai_probe_http 'https://grok.com/favicon.ico')
+    AI_GROK_STATUS=$(ai_classify_service_probes \
+      "$response" "$session_status" "$login_status" "$favicon_status")
+  fi
   if [ "$AI_GROK_STATUS" != "解锁" ]; then
     AI_GROK_REGION="-"
     AI_GROK_METHOD="-"
     return 0
   fi
-  AI_GROK_REGION=$(ai_region_fallback)
+
+  # 地区取实际命中的 Grok 边缘节点；数据库结果只作为 trace 不可用时的兜底。
+  region=$(ai_trace_region_host grok.com || true)
+  AI_GROK_REGION="${region:--}"
+  if [ "$AI_GROK_REGION" = "-" ]; then
+    AI_GROK_REGION=$(ai_region_fallback)
+  fi
   AI_GROK_METHOD=$(ai_method_for_domains grok.com)
 }
 
@@ -2647,12 +2670,13 @@ lookup_active_neighbors_direct() {
 }
 
 report_basic_rows() {
-  local ip="$1" basic_value basic_type
-  # 基础信息只展示 IP2Location；每个字段缺失时由本地 MaxMind 离线库兜底，
-  # 无论实际命中哪个数据源，都固定放在第一列。
-  report_database_line '数据库' 'IP2Location' '' '' ''
-  basic_value=$(basic_preferred_get asn)
-  report_line 'ASN' "$basic_value" '' '' ''
+  local ip="$1" basic_value basic_type maxmind_asn ip2location_asn
+  # 基础信息的最终值仍由 IP2Location 优先、MaxMind 离线库兜底；ASN
+  # 同时展示两个来源，并与下方表格的第 1/第 3 列对齐。
+  report_database_line '数据库' 'MaxMind' '' 'IP2Location' ''
+  maxmind_asn=$(basic_get maxmind asn)
+  ip2location_asn=$(basic_get ip2location asn)
+  report_line 'ASN' "$maxmind_asn" '' "$ip2location_asn" ''
   basic_value=$(basic_preferred_get organization)
   report_line '组织' "$basic_value" '' '' ''
   basic_value=$(basic_preferred_get coordinates)
@@ -3069,13 +3093,14 @@ lookup_active_neighbors() {
 
 write_report_json() {
   local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
-  local basic_asn basic_organization basic_coordinates basic_city basic_continent
+  local basic_maxmind_asn basic_ip2location_asn basic_organization basic_coordinates basic_city basic_continent
   local basic_timezone basic_registered basic_location basic_ip_type
   [ -n "$file" ] || return 0
   family=4
   [[ "$ip" == *:* ]] && family=6
   active_json=$(active_neighbor_json)
-  basic_asn=$(basic_preferred_get asn)
+  basic_maxmind_asn=$(basic_get maxmind asn)
+  basic_ip2location_asn=$(basic_get ip2location asn)
   basic_organization=$(basic_preferred_get organization)
   basic_coordinates=$(basic_preferred_get coordinates)
   basic_city=$(basic_preferred_get city)
@@ -3089,7 +3114,8 @@ write_report_json() {
     --arg ip "$ip" \
     --arg maskedIp "$(mask_ip "$ip")" \
     --arg family "IPv${family}" \
-    --arg basicAsn "$basic_asn" \
+    --arg basicMaxmindAsn "$basic_maxmind_asn" \
+    --arg basicIp2LocationAsn "$basic_ip2location_asn" \
     --arg basicOrganization "$basic_organization" \
     --arg basicCoordinates "$basic_coordinates" \
     --arg basicCity "$basic_city" \
@@ -3137,19 +3163,19 @@ write_report_json() {
       maskedIp: $maskedIp,
       family: $family,
       basic: {
-        columns: ["IP2Location"],
-        columnPositions: [0],
+        columns: ["MaxMind", "IP2Location"],
+        columnPositions: [0, 2],
         rows: [
-          {"label": "ASN", "values": [$basicAsn]},
-          {"label": "组织", "values": [$basicOrganization]},
-          {"label": "坐标", "values": [$basicCoordinates]},
-          {"label": "城市", "values": [$basicCity]},
-          {"label": "洲际", "values": [$basicContinent]},
-          {"label": "时区", "values": [$basicTimezone]},
-          {"label": "注册地", "values": [$basicRegistered]},
-          {"label": "使用地", "values": [$basicLocation]},
-          {"label": "IP类型", "values": [$basicIpType]},
-          {"label": "活跃邻居", "values": [$activeNeighbor]}
+          {"label": "ASN", "values": [$basicMaxmindAsn, $basicIp2LocationAsn]},
+          {"label": "组织", "values": [$basicOrganization, ""]},
+          {"label": "坐标", "values": [$basicCoordinates, ""]},
+          {"label": "城市", "values": [$basicCity, ""]},
+          {"label": "洲际", "values": [$basicContinent, ""]},
+          {"label": "时区", "values": [$basicTimezone, ""]},
+          {"label": "注册地", "values": [$basicRegistered, ""]},
+          {"label": "使用地", "values": [$basicLocation, ""]},
+          {"label": "IP类型", "values": [$basicIpType, ""]},
+          {"label": "活跃邻居", "values": [$activeNeighbor, ""]}
         ]
       },
       type: {
