@@ -915,7 +915,13 @@ display_width() {
     byte=$(LC_ALL=C printf '%s' "$string" | od -An -N1 -tx1 -j "$i" | tr -d ' ')
     [ -n "$byte" ] || break
     byte_value=$((16#$byte))
-    if [ "$byte_value" -lt 128 ]; then
+    # U+2026 (Unicode 省略号) 在常见终端中占 1 个显示单元，
+    # 不能按普通三字节中文字符计为 2，否则会导致后续列错位。
+    if [ "$byte" = "e2" ] &&
+       [ "$(LC_ALL=C printf '%s' "$string" | od -An -N2 -tx1 -j $((i + 1)) | tr -d ' ')" = "80a6" ]; then
+      length=$((length + 1))
+      i=$((i + 3))
+    elif [ "$byte_value" -lt 128 ]; then
       length=$((length + 1))
       i=$((i + 1))
     elif [ "$byte_value" -lt 224 ]; then
@@ -942,7 +948,8 @@ report_pad() {
 }
 
 report_truncate() {
-  local value="$1" max_width="$2" ellipsis='…' current i=0 char char_width used=0 result=""
+  local value="$1" max_width="$2" ellipsis='…' ellipsis_width current i=0 char char_width used=0 result=""
+  ellipsis_width=$(display_width "$ellipsis")
   current=$(display_width "$value")
   if [ "$current" -le "$max_width" ]; then
     printf '%s' "$value"
@@ -955,13 +962,15 @@ report_truncate() {
   while [ "$i" -lt "${#value}" ]; do
     char="${value:i:1}"
     char_width=$(display_width "$char")
-    if [ $((used + char_width + 2)) -gt "$max_width" ]; then
+    if [ $((used + char_width + ellipsis_width)) -gt "$max_width" ]; then
       break
     fi
     result+="$char"
     used=$((used + char_width))
     i=$((i + 1))
   done
+  # 省略号前不保留因宽度计算而留下的尾随空格。
+  result=$(printf '%s' "$result" | sed -E 's/[[:space:]]+$//')
   printf '%s%s' "$result" "$ellipsis"
 }
 
@@ -2825,27 +2834,33 @@ print_port_report() {
   REPORT_COLUMN_WIDTHS=(22 22 22)
   REPORT_MEASURE_ONLY=0
 
-  printf '\n%s端口出站检测（%s）%s\n' "$C_BOLD" "$family_name" "$C_NC"
+  printf '\n%s出站检测(%s)%s\n' "$C_BOLD" "$family_name" "$C_NC"
   report_port_rows
 }
 
 print_type_report() {
-  local ip="$1" masked_ip
+  local ip="$1" masked_ip family family_name
   masked_ip=$(mask_ip "$ip")
+  if [[ "$ip" == *:* ]]; then
+    family=6
+  else
+    family=4
+  fi
+  family_name="IPv${family}"
 
   # 固定列宽，避免第三方页面异常文本或超长 URL 把整张表撑开。
   REPORT_LABEL_WIDTH=8
   REPORT_COLUMN_WIDTHS=(22 22 22 22)
   REPORT_MEASURE_ONLY=0
 
-  printf '\n%sIP：%s%s%s\n' "$C_BOLD" "$C_CYAN" "$masked_ip" "$C_NC"
-  printf '\n%s基础信息%s\n' "$C_BOLD" "$C_NC"
+  printf '\n%s%s: %s%s%s\n' "$C_BOLD" "$family_name" "$C_CYAN" "$masked_ip" "$C_NC"
+  printf '\n%s基础信息(%s)%s\n' "$C_BOLD" "$family_name" "$C_NC"
   report_basic_rows "$ip"
-  printf '\n%sIP 属性%s\n' "$C_BOLD" "$C_NC"
+  printf '\n%sIP 属性(%s)%s\n' "$C_BOLD" "$family_name" "$C_NC"
   report_type_rows
-  printf '\n%s风险评分%s\n' "$C_BOLD" "$C_NC"
+  printf '\n%s风险评分(%s)%s\n' "$C_BOLD" "$family_name" "$C_NC"
   report_risk_rows
-  printf '\n%sAI解锁%s\n' "$C_BOLD" "$C_NC"
+  printf '\n%sAI解锁(%s)%s\n' "$C_BOLD" "$family_name" "$C_NC"
   report_ai_rows
 }
 
