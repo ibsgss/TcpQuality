@@ -1742,6 +1742,16 @@ ai_response_reachable() {
   [[ "$code" =~ ^[1-9][0-9][0-9]$ ]]
 }
 
+ai_grok_page_is_interstitial() {
+  local response="$1" visible_text
+  visible_text=$(ai_page_visible_text "$response")
+  # A 2xx response from a WAF/browser-check page is not evidence that the
+  # Grok web application is usable. Keep this list limited to unambiguous
+  # challenge markers; normal application HTML may mention JavaScript/cookies.
+  printf '%s' "$visible_text" \
+    | grep -Eiq 'just a moment|verify you are human|performing security verification|checking your browser|security challenge|attention required|cf-chl-'
+}
+
 ai_ipv4_special() {
   local ip="$1"
   awk -F. '
@@ -1893,17 +1903,66 @@ check_ai_gemini() {
 }
 
 check_ai_grok() {
-  local response session_status login_status favicon_status region
-  response=$(fetch_ai_page 'https://grok.com/')
-  AI_GROK_STATUS=$(ai_classify_page "$response")
-  if [ "$AI_GROK_STATUS" = "失败" ]; then
-    # grok.com 首页经常先返回 WAF/浏览器验证页；会话、登录页和 favicon
-    # 是同一官方入口的无凭据连通性探测，不需要也不会携带任何 API key。
-    session_status=$(ai_probe_http 'https://grok.com/api/auth/session')
-    login_status=$(ai_probe_http 'https://grok.com/login')
-    favicon_status=$(ai_probe_http 'https://grok.com/favicon.ico')
-    AI_GROK_STATUS=$(ai_classify_service_probes \
-      "$response" "$session_status" "$login_status" "$favicon_status")
+  local response api_status region method
+  local page_code api_code
+  local temp_dir page_file api_file trace_file method_file
+  local page_pid api_pid trace_pid method_pid
+
+  # Follow the public reachability pattern used by other VPS/IP checkers:
+  # probe the web entry point and the unauthenticated xAI models endpoint.
+  # xAI requires authentication for the API, so 401 means the API front door
+  # is reachable; it does not require or expose an API key.
+  temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tcpquality-grok.XXXXXX" 2>/dev/null || true)
+  if [ -n "$temp_dir" ]; then
+    page_file="$temp_dir/page"
+    api_file="$temp_dir/api"
+    trace_file="$temp_dir/trace"
+    method_file="$temp_dir/method"
+
+    # These probes are independent. Running them together avoids adding the
+    # three sequential fallback timeouts to the normal IPQuality run time.
+    (fetch_ai_page 'https://grok.com/' >"$page_file") &
+    page_pid=$!
+    (ai_probe_http 'https://api.x.ai/v1/models' >"$api_file") &
+    api_pid=$!
+    (ai_trace_region_host grok.com || true) >"$trace_file" &
+    trace_pid=$!
+    (ai_method_for_domains grok.com || true) >"$method_file" &
+    method_pid=$!
+
+    wait "$page_pid" || true
+    wait "$api_pid" || true
+    wait "$trace_pid" || true
+    wait "$method_pid" || true
+
+    response=$(<"$page_file")
+    api_status=$(<"$api_file")
+    region=$(<"$trace_file")
+    method=$(<"$method_file")
+    rm -f -- "$page_file" "$api_file" "$trace_file" "$method_file"
+    rmdir -- "$temp_dir" 2>/dev/null || true
+  else
+    # Keep a safe sequential path for unusual minimal hosts without mktemp.
+    response=$(fetch_ai_page 'https://grok.com/')
+    api_status=$(ai_probe_http 'https://api.x.ai/v1/models')
+    region=$(ai_trace_region_host grok.com || true)
+    method=$(ai_method_for_domains grok.com || true)
+  fi
+
+  page_code=$(ai_page_code "$response")
+  api_code="$api_status"
+  if [ "$page_code" = "403" ] || [ "$page_code" = "451" ] ||
+     [ "$api_code" = "403" ] || [ "$api_code" = "451" ] ||
+     ai_page_is_blocked "$response"; then
+    AI_GROK_STATUS="屏蔽"
+  elif [[ "$page_code" =~ ^[23][0-9][0-9]$ ]] &&
+       ! ai_grok_page_is_interstitial "$response"; then
+    # A normal Grok web response is the primary unlock signal. The API
+    # status is used to catch an explicit API restriction, not to require an
+    # API key: 401 is expected for an unauthenticated public probe.
+    AI_GROK_STATUS="解锁"
+  else
+    AI_GROK_STATUS="失败"
   fi
   if [ "$AI_GROK_STATUS" != "解锁" ]; then
     AI_GROK_REGION="-"
@@ -1912,12 +1971,11 @@ check_ai_grok() {
   fi
 
   # 地区取实际命中的 Grok 边缘节点；数据库结果只作为 trace 不可用时的兜底。
-  region=$(ai_trace_region_host grok.com || true)
   AI_GROK_REGION="${region:--}"
   if [ "$AI_GROK_REGION" = "-" ]; then
     AI_GROK_REGION=$(ai_region_fallback)
   fi
-  AI_GROK_METHOD=$(ai_method_for_domains grok.com)
+  AI_GROK_METHOD="${method:-原生}"
 }
 
 check_ai_claude() {
