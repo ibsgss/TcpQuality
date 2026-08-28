@@ -567,6 +567,17 @@ basic_preferred_provider() {
   printf '%s' 'MaxMind'
 }
 
+basic_provider_has_data() {
+  local provider="$1" field value
+  for field in "${BASIC_FIELDS[@]}"; do
+    value=$(basic_get "$provider" "$field")
+    if basic_value_available "$value"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 basic_mark_provider() {
   local provider="$1" value="$2" field
   for field in "${BASIC_FIELDS[@]}"; do
@@ -2704,29 +2715,50 @@ lookup_active_neighbors_direct() {
 }
 
 report_basic_rows() {
-  local ip="$1" basic_value basic_type basic_source
-  # 基础信息只展示一套结果：优先 IP2Location，缺失字段由 MaxMind
-  # 离线库兜底；无论实际来源，都固定放在第一列。
-  basic_source=$(basic_preferred_provider)
-  report_database_line '数据库' "$basic_source" '' '' ''
-  basic_value=$(basic_preferred_get asn)
-  report_basic_line 'ASN' "$basic_value"
-  basic_value=$(basic_preferred_get organization)
-  report_basic_line '组织' "$basic_value"
-  basic_value=$(basic_preferred_get coordinates)
-  report_basic_line '坐标' "$basic_value"
-  basic_value=$(basic_preferred_get city)
-  report_basic_line '城市' "$basic_value"
-  basic_value=$(basic_preferred_get continent)
-  report_basic_line '洲际' "$basic_value"
-  basic_value=$(basic_preferred_get timezone)
-  report_basic_line '时区' "$basic_value"
-  basic_value=$(basic_preferred_get registered)
-  report_basic_line '注册地' "$basic_value"
-  basic_value=$(basic_preferred_get location)
-  report_basic_line '使用地' "$basic_value"
-  basic_type=$(basic_preferred_ip_type)
-  report_basic_line 'IP类型' "$basic_type"
+  local ip="$1" maxmind_type ip2location_type
+  maxmind_type=$(basic_ip_type \
+    "$(basic_get maxmind registered)" \
+    "$(basic_get maxmind location)")
+  ip2location_type=$(ip2location_ip_type \
+    "$IP2LOCATION_IP_TYPE" \
+    "$(basic_get ip2location location)" \
+    "$(basic_get maxmind registered)")
+
+  if basic_provider_has_data ip2location; then
+    # IP2Location 有效时完整展示两套基础数据；MaxMind 在第一列，
+    # IP2Location 在第三列，与下方 IP 属性/风险评分的列锚点一致。
+    report_database_line '数据库' 'MaxMind' '' 'IP2Location' ''
+    report_line 'ASN' \
+      "$(basic_get maxmind asn)" '' "$(basic_get ip2location asn)" ''
+    report_line '组织' \
+      "$(basic_get maxmind organization)" '' "$(basic_get ip2location organization)" ''
+    report_line '坐标' \
+      "$(basic_get maxmind coordinates)" '' "$(basic_get ip2location coordinates)" ''
+    report_line '城市' \
+      "$(basic_get maxmind city)" '' "$(basic_get ip2location city)" ''
+    report_line '洲际' \
+      "$(basic_get maxmind continent)" '' "$(basic_get ip2location continent)" ''
+    report_line '时区' \
+      "$(basic_get maxmind timezone)" '' "$(basic_get ip2location timezone)" ''
+    report_line '注册地' \
+      "$(basic_get maxmind registered)" '' "$(basic_get ip2location registered)" ''
+    report_line '使用地' \
+      "$(basic_get maxmind location)" '' "$(basic_get ip2location location)" ''
+    report_type_line 'IP类型' "$maxmind_type" '' "$ip2location_type" ''
+  else
+    # IP2Location 完全没有基础数据时，只保留 MaxMind 离线库结果，
+    # 并使用整行宽度，避免无意义的空列或字段截断。
+    report_database_line '数据库' 'MaxMind' '' '' ''
+    report_basic_line 'ASN' "$(basic_get maxmind asn)"
+    report_basic_line '组织' "$(basic_get maxmind organization)"
+    report_basic_line '坐标' "$(basic_get maxmind coordinates)"
+    report_basic_line '城市' "$(basic_get maxmind city)"
+    report_basic_line '洲际' "$(basic_get maxmind continent)"
+    report_basic_line '时区' "$(basic_get maxmind timezone)"
+    report_basic_line '注册地' "$(basic_get maxmind registered)"
+    report_basic_line '使用地' "$(basic_get maxmind location)"
+    report_type_line 'IP类型' "$maxmind_type" '' '' ''
+  fi
   if [[ "$ip" != *:* ]]; then
     report_neighbor_line '活跃邻居'
   fi
@@ -3127,37 +3159,63 @@ lookup_active_neighbors() {
 
 write_report_json() {
   local ip="$1" file="${REPORT_JSON_FILE:-}" family active_json
-  local basic_source basic_asn basic_organization basic_coordinates basic_city basic_continent
-  local basic_timezone basic_registered basic_location basic_ip_type
+  local basic_has_ip2=0
+  local basic_maxmind_asn basic_ip2location_asn basic_maxmind_organization basic_ip2location_organization
+  local basic_maxmind_coordinates basic_ip2location_coordinates basic_maxmind_city basic_ip2location_city
+  local basic_maxmind_continent basic_ip2location_continent basic_maxmind_timezone basic_ip2location_timezone
+  local basic_maxmind_registered basic_ip2location_registered basic_maxmind_location basic_ip2location_location
+  local basic_maxmind_ip_type basic_ip2location_ip_type
   [ -n "$file" ] || return 0
   family=4
   [[ "$ip" == *:* ]] && family=6
   active_json=$(active_neighbor_json)
-  basic_source=$(basic_preferred_provider)
-  basic_asn=$(basic_preferred_get asn)
-  basic_organization=$(basic_preferred_get organization)
-  basic_coordinates=$(basic_preferred_get coordinates)
-  basic_city=$(basic_preferred_get city)
-  basic_continent=$(basic_preferred_get continent)
-  basic_timezone=$(basic_preferred_get timezone)
-  basic_registered=$(basic_preferred_get registered)
-  basic_location=$(basic_preferred_get location)
-  basic_ip_type=$(basic_preferred_ip_type)
+  if basic_provider_has_data ip2location; then
+    basic_has_ip2=1
+  fi
+  basic_maxmind_asn=$(basic_get maxmind asn)
+  basic_ip2location_asn=$(basic_get ip2location asn)
+  basic_maxmind_organization=$(basic_get maxmind organization)
+  basic_ip2location_organization=$(basic_get ip2location organization)
+  basic_maxmind_coordinates=$(basic_get maxmind coordinates)
+  basic_ip2location_coordinates=$(basic_get ip2location coordinates)
+  basic_maxmind_city=$(basic_get maxmind city)
+  basic_ip2location_city=$(basic_get ip2location city)
+  basic_maxmind_continent=$(basic_get maxmind continent)
+  basic_ip2location_continent=$(basic_get ip2location continent)
+  basic_maxmind_timezone=$(basic_get maxmind timezone)
+  basic_ip2location_timezone=$(basic_get ip2location timezone)
+  basic_maxmind_registered=$(basic_get maxmind registered)
+  basic_ip2location_registered=$(basic_get ip2location registered)
+  basic_maxmind_location=$(basic_get maxmind location)
+  basic_ip2location_location=$(basic_get ip2location location)
+  basic_maxmind_ip_type=$(basic_ip_type \
+    "$basic_maxmind_registered" "$basic_maxmind_location")
+  basic_ip2location_ip_type=$(ip2location_ip_type \
+    "$IP2LOCATION_IP_TYPE" "$basic_ip2location_location" "$basic_maxmind_registered")
 
   jq -cn \
     --arg ip "$ip" \
     --arg maskedIp "$(mask_ip "$ip")" \
     --arg family "IPv${family}" \
-    --arg basicSource "$basic_source" \
-    --arg basicAsn "$basic_asn" \
-    --arg basicOrganization "$basic_organization" \
-    --arg basicCoordinates "$basic_coordinates" \
-    --arg basicCity "$basic_city" \
-    --arg basicContinent "$basic_continent" \
-    --arg basicTimezone "$basic_timezone" \
-    --arg basicRegistered "$basic_registered" \
-    --arg basicLocation "$basic_location" \
-    --arg basicIpType "$basic_ip_type" \
+    --argjson basicHasIp2 "$basic_has_ip2" \
+    --arg basicMaxmindAsn "$basic_maxmind_asn" \
+    --arg basicIp2LocationAsn "$basic_ip2location_asn" \
+    --arg basicMaxmindOrganization "$basic_maxmind_organization" \
+    --arg basicIp2LocationOrganization "$basic_ip2location_organization" \
+    --arg basicMaxmindCoordinates "$basic_maxmind_coordinates" \
+    --arg basicIp2LocationCoordinates "$basic_ip2location_coordinates" \
+    --arg basicMaxmindCity "$basic_maxmind_city" \
+    --arg basicIp2LocationCity "$basic_ip2location_city" \
+    --arg basicMaxmindContinent "$basic_maxmind_continent" \
+    --arg basicIp2LocationContinent "$basic_ip2location_continent" \
+    --arg basicMaxmindTimezone "$basic_maxmind_timezone" \
+    --arg basicIp2LocationTimezone "$basic_ip2location_timezone" \
+    --arg basicMaxmindRegistered "$basic_maxmind_registered" \
+    --arg basicIp2LocationRegistered "$basic_ip2location_registered" \
+    --arg basicMaxmindLocation "$basic_maxmind_location" \
+    --arg basicIp2LocationLocation "$basic_ip2location_location" \
+    --arg basicMaxmindIpType "$basic_maxmind_ip_type" \
+    --arg basicIp2LocationIpType "$basic_ip2location_ip_type" \
     --arg maxmindUsage "$(display_type "$MAXMIND_USAGE_TYPE" "$MAXMIND_USAGE_RAW")" \
     --arg ip2Usage "$(display_type "$IP2LOCATION_USAGE_TYPE" "$IP2LOCATION_USAGE_RAW")" \
     --arg ipinfoUsage "$(display_type "$IPINFO_USAGE_TYPE" "$IPINFO_USAGE_RAW")" \
@@ -3197,19 +3255,19 @@ write_report_json() {
       maskedIp: $maskedIp,
       family: $family,
       basic: {
-        columns: [$basicSource],
-        columnPositions: [0],
+        columns: (if $basicHasIp2 == 1 then ["MaxMind", "IP2Location"] else ["MaxMind"] end),
+        columnPositions: (if $basicHasIp2 == 1 then [0, 2] else [0] end),
         rows: [
-          {"label": "ASN", "values": [$basicAsn]},
-          {"label": "组织", "values": [$basicOrganization]},
-          {"label": "坐标", "values": [$basicCoordinates]},
-          {"label": "城市", "values": [$basicCity]},
-          {"label": "洲际", "values": [$basicContinent]},
-          {"label": "时区", "values": [$basicTimezone]},
-          {"label": "注册地", "values": [$basicRegistered]},
-          {"label": "使用地", "values": [$basicLocation]},
-          {"label": "IP类型", "values": [$basicIpType]},
-          {"label": "活跃邻居", "values": [$activeNeighbor]}
+          {"label": "ASN", "values": (if $basicHasIp2 == 1 then [$basicMaxmindAsn, $basicIp2LocationAsn] else [$basicMaxmindAsn] end)},
+          {"label": "组织", "values": (if $basicHasIp2 == 1 then [$basicMaxmindOrganization, $basicIp2LocationOrganization] else [$basicMaxmindOrganization] end)},
+          {"label": "坐标", "values": (if $basicHasIp2 == 1 then [$basicMaxmindCoordinates, $basicIp2LocationCoordinates] else [$basicMaxmindCoordinates] end)},
+          {"label": "城市", "values": (if $basicHasIp2 == 1 then [$basicMaxmindCity, $basicIp2LocationCity] else [$basicMaxmindCity] end)},
+          {"label": "洲际", "values": (if $basicHasIp2 == 1 then [$basicMaxmindContinent, $basicIp2LocationContinent] else [$basicMaxmindContinent] end)},
+          {"label": "时区", "values": (if $basicHasIp2 == 1 then [$basicMaxmindTimezone, $basicIp2LocationTimezone] else [$basicMaxmindTimezone] end)},
+          {"label": "注册地", "values": (if $basicHasIp2 == 1 then [$basicMaxmindRegistered, $basicIp2LocationRegistered] else [$basicMaxmindRegistered] end)},
+          {"label": "使用地", "values": (if $basicHasIp2 == 1 then [$basicMaxmindLocation, $basicIp2LocationLocation] else [$basicMaxmindLocation] end)},
+          {"label": "IP类型", "values": (if $basicHasIp2 == 1 then [$basicMaxmindIpType, $basicIp2LocationIpType] else [$basicMaxmindIpType] end)},
+          {"label": "活跃邻居", "values": (if $basicHasIp2 == 1 then [$activeNeighbor, ""] else [$activeNeighbor] end)}
         ]
       },
       type: {
