@@ -4483,7 +4483,11 @@ load_remote_applecdn6_nodes() {
     [ "$family" = "6" ] || continue
     [ "$isp" = "移动" ] || continue
     is_valid_ipv6 "$ip" || continue
-    label="${prov}${isp}"
+    case "$prov" in
+      深圳) label="深圳移动" ;;
+      重庆) label="重庆移动" ;;
+      *) continue ;;
+    esac
     local_index=0
     for existing in "${SPEEDTEST_APPLECDN6_NODES[@]}"; do
       existing_label=${existing%%|*}
@@ -6161,6 +6165,17 @@ speedtest_metric_failed() {
   esac
 }
 
+speedtest_metric_unavailable() {
+  case "${1,,}" in
+    ""|-)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 speedtest_speed_text() {
   local value="$1"
   if speedtest_metric_failed "$value"; then
@@ -6272,6 +6287,15 @@ speedtest_retrans_color() {
   else
     printf '%s' "$GREEN"
   fi
+}
+
+speedtest_add_ipv6_unavailable_row() {
+  local row label
+  for row in "${SPEEDTEST_ROWS[@]}"; do
+    IFS=';' read -r label _ <<<"$row"
+    [ "$label" = "IPv6" ] && return 0
+  done
+  SPEEDTEST_ROWS+=("IPv6;-|-|-||深圳移动|-|-|-|-;-|-|-||重庆移动|-|-|-|-")
 }
 
 collect_speedtest_results() {
@@ -6401,6 +6425,8 @@ collect_speedtest_results() {
       speedtest_collect_applecdn6
       done=$((done + apple_ipv6_steps))
       speedtest_show_progress "$done" "$total"
+    elif speedtest_applecdn6_tests_enabled; then
+      speedtest_add_ipv6_unavailable_row
     fi
     speedtest_collect_applecdn
     done=$((done + apple_steps))
@@ -6452,7 +6478,11 @@ speedtest_set_failed_rows() {
         node_candidates="${node#*|}"
         ipv6_values+=("failed|failed|failed|${node_candidates%%|*}|$node_label|-|-|-|-")
       done
-      [ "${#ipv6_values[@]}" -gt 0 ] && SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
+      if [ "${#ipv6_values[@]}" -gt 0 ]; then
+        SPEEDTEST_ROWS+=("IPv6;${ipv6_values[0]};${ipv6_values[1]};")
+      else
+        speedtest_add_ipv6_unavailable_row
+      fi
     fi
     apple_row="AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-"
     if speedtest_applecdn6_tests_enabled; then
@@ -6498,6 +6528,7 @@ speedtest_load_background_state() {
   done < "$SPEEDTEST_STATE_FILE"
 
   [ "${#SPEEDTEST_ROWS[@]}" -gt 0 ] || speedtest_set_failed_rows
+  speedtest_applecdn6_tests_enabled && speedtest_add_ipv6_unavailable_row
 }
 
 start_speedtest_background() {
@@ -6646,7 +6677,7 @@ show_speedtest_results() {
       printf '  '
       printf '%b' "$CYAN"; speedtest_pad_left 12 "$region"; printf '%b' "$NC"
       printf '  '
-      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$retrans"; then
+      if [ "$label" = "IPv6" ] && speedtest_metric_unavailable "$retrans"; then
         retrans_text="-"
         retrans_color="$DIM"
       else
@@ -6655,7 +6686,7 @@ show_speedtest_results() {
       fi
       printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans_text"; printf '%b' "$NC"
       printf '  '
-      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$upload"; then
+      if [ "$label" = "IPv6" ] && speedtest_metric_unavailable "$upload"; then
         upload_text="-"
         speed_color="$DIM"
       else
@@ -6664,7 +6695,7 @@ show_speedtest_results() {
       fi
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
       printf '  '
-      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$download"; then
+      if [ "$label" = "IPv6" ] && speedtest_metric_unavailable "$download"; then
         download_text="-"
         speed_color="$DIM"
       else
@@ -6673,7 +6704,7 @@ show_speedtest_results() {
       fi
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
       printf '  '
-      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$upload"; then
+      if [ "$label" = "IPv6" ] && speedtest_metric_unavailable "$upload"; then
         upload_tls_text="-"
         tls_color="$DIM"
       else
@@ -6686,7 +6717,7 @@ show_speedtest_results() {
       fi
       printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
       printf '  '
-      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$download"; then
+      if [ "$label" = "IPv6" ] && speedtest_metric_unavailable "$download"; then
         download_tls_text="-"
         tls_color="$DIM"
       else
@@ -6715,7 +6746,11 @@ append_speedtest_csv() {
         [ -n "$result" ] || continue
         IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
         city="${city:-IPv6}"
-        if [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
+        if [ "$upload" = "-" ] && [ "$download" = "-" ]; then
+          printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
+            "$label" "$city" "$city" "SKIP" "$upload" "$retrans" "$download" \
+            "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
+        elif [ "$upload" = "failed" ] || [ "$download" = "failed" ]; then
           printf '三网单线程速度,%s,%s,%s,,,%s,%s,%s,%s,,,%s,%s,%s,%s\n' \
             "$label" "$city" "$city" "FAIL" "$upload" "$retrans" "$download" \
             "${upload_connect:--}" "${upload_tls:--}" "${download_connect:--}" "${download_tls:--}" >> "$csv"
