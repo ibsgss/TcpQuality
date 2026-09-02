@@ -6538,7 +6538,7 @@ wait_speedtest_background() {
 }
 
 show_speedtest_results() {
-  local row label result1 result2 result3 result upload retrans download server_id city upload_connect upload_tls download_connect download_tls index carrier region upload_text download_text upload_tls_text download_tls_text
+  local row label result1 result2 result3 result upload retrans download server_id city upload_connect upload_tls download_connect download_tls index carrier region retrans_text upload_text download_text upload_tls_text download_tls_text
   local speed_color retrans_color tls_color
   local carriers=(电信 联通 移动)
   local results=()
@@ -6638,7 +6638,7 @@ show_speedtest_results() {
       carrier="${carriers[$index]}"
       IFS='|' read -r upload retrans download server_id city upload_connect upload_tls download_connect download_tls <<<"$result"
       if [ "$label" = "IPv6" ]; then
-        region="${city:-$carrier}"
+        region="$carrier"
       else
         region="${city:-$(speedtest_selected_city "$carrier")}${carrier}"
         [ -n "${city:-$(speedtest_selected_city "$carrier")}" ] || region="${carrier}失败"
@@ -6646,30 +6646,56 @@ show_speedtest_results() {
       printf '  '
       printf '%b' "$CYAN"; speedtest_pad_left 12 "$region"; printf '%b' "$NC"
       printf '  '
-      retrans_color=$(speedtest_retrans_color "$retrans")
-      printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans"; printf '%b' "$NC"
+      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$retrans"; then
+        retrans_text="-"
+        retrans_color="$DIM"
+      else
+        retrans_text="$retrans"
+        retrans_color=$(speedtest_retrans_color "$retrans")
+      fi
+      printf '%b' "$retrans_color"; speedtest_pad_left 10 "$retrans_text"; printf '%b' "$NC"
       printf '  '
-      upload_text=$(speedtest_speed_text "$upload")
-      speed_color=$(speedtest_speed_color "$upload" "$label")
+      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$upload"; then
+        upload_text="-"
+        speed_color="$DIM"
+      else
+        upload_text=$(speedtest_speed_text "$upload")
+        speed_color=$(speedtest_speed_color "$upload" "$label")
+      fi
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$upload_text"; printf '%b' "$NC"
       printf '  '
-      download_text=$(speedtest_speed_text "$download")
-      speed_color=$(speedtest_speed_color "$download" "$label")
+      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$download"; then
+        download_text="-"
+        speed_color="$DIM"
+      else
+        download_text=$(speedtest_speed_text "$download")
+        speed_color=$(speedtest_speed_color "$download" "$label")
+      fi
       printf '%b' "$speed_color"; speedtest_pad_left 12 "$download_text"; printf '%b' "$NC"
       printf '  '
-      upload_tls_text=$(speedtest_direction_latency_text "$upload_tls" "$upload")
-      if speedtest_metric_failed "$upload"; then
-        tls_color="$RED"
+      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$upload"; then
+        upload_tls_text="-"
+        tls_color="$DIM"
       else
-        tls_color=$(speedtest_latency_color "$upload_tls")
+        upload_tls_text=$(speedtest_direction_latency_text "$upload_tls" "$upload")
+        if speedtest_metric_failed "$upload"; then
+          tls_color="$RED"
+        else
+          tls_color=$(speedtest_latency_color "$upload_tls")
+        fi
       fi
       printf '%b' "$tls_color"; speedtest_pad_left 10 "$upload_tls_text"; printf '%b' "$NC"
       printf '  '
-      download_tls_text=$(speedtest_direction_latency_text "$download_tls" "$download")
-      if speedtest_metric_failed "$download"; then
-        tls_color="$RED"
+      if [ "$label" = "IPv6" ] && speedtest_metric_failed "$download"; then
+        download_tls_text="-"
+        tls_color="$DIM"
       else
-        tls_color=$(speedtest_latency_color "$download_tls")
+        download_tls_text=$(speedtest_direction_latency_text "$download_tls" "$download")
+        if speedtest_metric_failed "$download"; then
+          tls_color="$RED"
+        else
+          tls_color=$(speedtest_latency_color "$download_tls")
+        fi
       fi
       printf '%b' "$tls_color"; speedtest_pad_left 10 "$download_tls_text"; printf '%b' "$NC"
       printf '\n'
