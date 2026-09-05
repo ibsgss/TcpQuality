@@ -216,7 +216,7 @@ jobs:
             dist/tcpquality-rootfs-arm64.tar.xz \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
-            --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest."
+            --notes "Prebuilt Debian bookworm-slim rootfs for TcpQuality. Downloads are verified using the attached manifest. Each rootfs includes the NextTrace/nexttrace-tiny GPLv3 text and a NOTICE containing the packaged version and matching source links."
 
       - name: Update channel alias
         env:
@@ -235,7 +235,7 @@ jobs:
             gh release upload "$ALIAS_TAG" --clobber dist/rootfs-manifest.json
             gh release edit "$ALIAS_TAG" \
               --title "$ALIAS_TAG" \
-              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
+              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest. Each rootfs includes the NextTrace/nexttrace-tiny GPLv3 text and a NOTICE containing the packaged version and matching source links."
           else
             gh release create "$ALIAS_TAG" \
               dist/tcpquality-rootfs-amd64.tar.gz \
@@ -244,5 +244,5 @@ jobs:
               dist/tcpquality-rootfs-arm64.tar.xz \
               dist/rootfs-manifest.json \
               --title "$ALIAS_TAG" \
-              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest."
+              --notes "Stable alias for $RELEASE_TAG from $GITHUB_REF_NAME. Verify downloads with the attached manifest. Each rootfs includes the NextTrace/nexttrace-tiny GPLv3 text and a NOTICE containing the packaged version and matching source links."
           fi

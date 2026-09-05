@@ -71,6 +71,7 @@ runs:
           -H "Accept: application/vnd.github+json" \
           "$nexttrace_api")
         nexttrace_tag=$(jq -er '.tag_name' <<<"$nexttrace_json")
+        [[ "$nexttrace_tag" =~ ^[[:alnum:]][[:alnum:]._/-]*$ ]]
         nexttrace_url=$(jq -er --arg name "$nexttrace_asset" \
           '.assets[] | select(.name == $name) | .browser_download_url' <<<"$nexttrace_json")
         nexttrace_digest=$(jq -er --arg name "$nexttrace_asset" \
@@ -82,6 +83,29 @@ runs:
         printf '%s  %s\n' "${nexttrace_digest#sha256:}" "$nexttrace_asset" | sha256sum -c -
         install -m 0755 "$nexttrace_asset" rootfs/usr/local/bin/nexttrace-tiny
         printf '%s\n' "$nexttrace_tag" > rootfs/etc/tcpquality-nexttrace-release
+        nexttrace_source_url="https://github.com/nxtrace/NTrace-core/tree/${nexttrace_tag}"
+        nexttrace_source_archive="https://github.com/nxtrace/NTrace-core/archive/refs/tags/${nexttrace_tag}.tar.gz"
+        nexttrace_license_url="https://raw.githubusercontent.com/nxtrace/NTrace-core/${nexttrace_tag}/LICENSE"
+        curl -fL --retry 3 --retry-all-errors \
+          --connect-timeout 15 --max-time 120 \
+          "$nexttrace_license_url" -o nexttrace-tiny-COPYING
+        grep -Eq 'GNU GENERAL PUBLIC LICENSE' nexttrace-tiny-COPYING
+        grep -Eq 'Version 3,' nexttrace-tiny-COPYING
+        install -D -m 0644 nexttrace-tiny-COPYING \
+          rootfs/usr/share/doc/nexttrace-tiny/COPYING
+        cat > rootfs/usr/share/doc/nexttrace-tiny/NOTICE <<EOF
+NextTrace / nexttrace-tiny
+
+Version: ${nexttrace_tag}
+License: GNU General Public License, version 3 (GPLv3)
+License text: /usr/share/doc/nexttrace-tiny/COPYING
+
+Source repository: ${nexttrace_source_url}
+Source archive: ${nexttrace_source_archive}
+Release binary: ${nexttrace_url}
+Release binary SHA256: ${nexttrace_digest#sha256:}
+EOF
+        printf '%s\n' "$nexttrace_source_url" > rootfs/etc/tcpquality-nexttrace-source
         tar --numeric-owner --xattrs --acls \
           -C rootfs -cJf "dist/tcpquality-rootfs-${TARGET_ARCH}.tar.xz" .
         tar --numeric-owner --xattrs --acls \
@@ -105,9 +129,28 @@ runs:
           grep -qx './etc/os-release' /tmp/rootfs-files.txt
           grep -qx './etc/tcpquality-rootfs-release' /tmp/rootfs-files.txt
           grep -qx './etc/tcpquality-nexttrace-release' /tmp/rootfs-files.txt
+          grep -qx './etc/tcpquality-nexttrace-source' /tmp/rootfs-files.txt
           grep -qx './usr/local/bin/nexttrace-tiny' /tmp/rootfs-files.txt
+          grep -qx './usr/share/doc/nexttrace-tiny/COPYING' /tmp/rootfs-files.txt
+          grep -qx './usr/share/doc/nexttrace-tiny/NOTICE' /tmp/rootfs-files.txt
         done
         test "$(cat rootfs/etc/tcpquality-rootfs-release)" = "$RELEASE_MARKER"
+        nexttrace_tag=$(cat rootfs/etc/tcpquality-nexttrace-release)
+        test -s rootfs/usr/share/doc/nexttrace-tiny/COPYING
+        grep -Eq 'GNU GENERAL PUBLIC LICENSE' rootfs/usr/share/doc/nexttrace-tiny/COPYING
+        grep -Eq 'Version 3,' rootfs/usr/share/doc/nexttrace-tiny/COPYING
+        grep -Fqx "https://github.com/nxtrace/NTrace-core/tree/${nexttrace_tag}" \
+          rootfs/etc/tcpquality-nexttrace-source
+        grep -Fqx "Version: ${nexttrace_tag}" \
+          rootfs/usr/share/doc/nexttrace-tiny/NOTICE
+        grep -Fqx 'License: GNU General Public License, version 3 (GPLv3)' \
+          rootfs/usr/share/doc/nexttrace-tiny/NOTICE
+        grep -Fqx 'License text: /usr/share/doc/nexttrace-tiny/COPYING' \
+          rootfs/usr/share/doc/nexttrace-tiny/NOTICE
+        grep -Fqx "Source repository: https://github.com/nxtrace/NTrace-core/tree/${nexttrace_tag}" \
+          rootfs/usr/share/doc/nexttrace-tiny/NOTICE
+        grep -Fqx "Source archive: https://github.com/nxtrace/NTrace-core/archive/refs/tags/${nexttrace_tag}.tar.gz" \
+          rootfs/usr/share/doc/nexttrace-tiny/NOTICE
         sudo chroot rootfs /bin/bash -lc '
           set -Eeuo pipefail
           for command_name in bash curl dig ip iptables nping ping sed tar traceroute; do
