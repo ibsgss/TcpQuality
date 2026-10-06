@@ -55,6 +55,10 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
+## 许可证
+
+本项目原创代码采用 GPL-3.0-only，详见 [LICENSE](LICENSE)。预构建 rootfs 中的 Debian 软件包、NextTrace/nexttrace-tiny 等第三方组件仍按各自许可证授权；再分发时须遵守其许可条款。
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=ibsgss%2FTcpQuality&type=date&legend=top-left">
