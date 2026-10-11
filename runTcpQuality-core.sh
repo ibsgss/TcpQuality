@@ -3595,6 +3595,7 @@ international_test_one() {
 international_telegram_dc_test_one() {
   local idx="$1" family="$2" dc_id="$3" target_ip="$4"
   local outfile="${RESULT_DIR}/internet_${idx}" result status _prov _isp _host ip sent rcv loss lat family_name
+  local PACKETS="$INTERNATIONAL_PACKETS"
   local name="Telegram DC${dc_id}"
   family_name="IPv${family}"
 
