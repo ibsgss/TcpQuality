@@ -412,6 +412,16 @@ INTERNATIONAL_SITE_TARGETS=(
   'Zoom API|api.zoom.us'
 )
 
+# Telegram 常用 MTProto DC TCP/443 接入点；DC 地址可能由 Telegram 更新。
+# 格式：DC 编号|IPv4|IPv6。
+INTERNATIONAL_TELEGRAM_DC_TARGETS=(
+  '1|149.154.175.50|2001:b28:f23d:f001::a'
+  '2|149.154.167.51|2001:67c:4e8:f002::a'
+  '3|149.154.175.100|2001:b28:f23d:f003::a'
+  '4|149.154.167.91|2001:67c:4e8:f004::a'
+  '5|149.154.171.5|2001:b28:f23f:f005::a'
+)
+
 INTERNATIONAL_CDN_TARGETS=(
   'Akamai Edge|Akamai|www.akamai.com|'
   'AWS CloudFront|CloudFront|d1.awsstatic.com|'
@@ -673,6 +683,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
+  同时探测 Telegram DC1-DC5 的 TCP/443 延迟；使用脚本内置的常用 IPv4/IPv6 接入点，地址变更时需更新脚本。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
   国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
@@ -3325,7 +3336,7 @@ export RESULT_DIR PACKETS PACKET_SIZES PACKET_SIZE_OVERRIDE LARGE_PACKET_SIZES I
 
 # ===================== 国际互联 TCP ping =====================
 international_task_count() {
-  printf '%s' "$((${#INTERNATIONAL_SITE_TARGETS[@]} + ${#INTERNATIONAL_CDN_TARGETS[@]}))"
+  printf '%s' "$((${#INTERNATIONAL_SITE_TARGETS[@]} + ${#INTERNATIONAL_CDN_TARGETS[@]} + ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]} * $(international_latency_family_count)))"
 }
 
 international_latency_families() {
@@ -3581,6 +3592,19 @@ international_test_one() {
     > "$outfile"
 }
 
+international_telegram_dc_test_one() {
+  local idx="$1" family="$2" dc_id="$3" target_ip="$4"
+  local outfile="${RESULT_DIR}/internet_${idx}" result status _prov _isp _host ip sent rcv loss lat family_name
+  local name="Telegram DC${dc_id}"
+  family_name="IPv${family}"
+
+  result=$(probe_target "internet" "$family" "$name" "网站" "$target_ip" "$target_ip" 443 "$idx" "telegram-dc${dc_id}-ipv${family}")
+  IFS='|' read -r status _prov _isp _host ip sent rcv loss lat <<< "$result"
+  printf '%s|网站|%s-%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$status" "$name" "$family_name" "$target_ip" "$ip" "$sent" "$rcv" "$loss" "$lat" "$family" \
+    > "$outfile"
+}
+
 international_latency_test_one() {
   local idx="$1" family="$2" direction="$3" row_key="$4" region="$5" label="$6" host="$7" base_port="${8:-5201}" v6_base_port="${9:-}"
   local fallback_host="${10:-}" fallback_base_port="${11:-}"
@@ -3730,7 +3754,7 @@ international_latency_test_one() {
 }
 
 run_international_tests() {
-  local idx=0 launched=0 entry name provider domain path category total latency_expected=0
+  local idx=0 launched=0 entry name provider domain path category total latency_expected=0 dc_id dc_ipv4 dc_ipv6 target_ip
   local row_key region label host port v6_port fallback_host fallback_port fallback_v6_host fallback_v6_port family direction
   local -a latency_families=()
   mapfile -t latency_families < <(international_latency_families)
@@ -3791,6 +3815,25 @@ run_international_tests() {
       show_progress
   done
 
+  for family in "${latency_families[@]}"; do
+    for entry in "${INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}"; do
+      IFS='|' read -r dc_id dc_ipv4 dc_ipv6 <<< "$entry"
+      if [ "$family" = "4" ]; then
+        target_ip="$dc_ipv4"
+      else
+        target_ip="$dc_ipv6"
+      fi
+      idx=$((idx + 1))
+      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
+        show_progress
+        sleep 0.2
+      done
+      international_telegram_dc_test_one "$idx" "$family" "$dc_id" "$target_ip" &
+      launched=$((launched + 1))
+      show_progress
+    done
+  done
+
   while [ "$(count_international_progress)" -lt "$total" ]; do
     show_progress
     sleep 0.2
@@ -3800,13 +3843,14 @@ run_international_tests() {
 }
 
 append_international_csv() {
-  local csv="$1" f status category name domain ip sent rcv loss lat total i
+  local csv="$1" f status category name domain ip sent rcv loss lat family total i
   total=$(international_task_count)
   for ((i = 1; i <= total; i++)); do
     f="${RESULT_DIR}/internet_${i}"
     [ -f "$f" ] || continue
-    IFS='|' read -r status category name domain ip sent rcv loss lat < "$f"
-    echo "国际互联,IPv4,$name,$category,$domain,$ip,$status,$sent,$rcv,$loss,$lat,TCP443" >> "$csv"
+    IFS='|' read -r status category name domain ip sent rcv loss lat family < "$f"
+    family=${family:-4}
+    echo "国际互联,IPv${family},$name,$category,$domain,$ip,$status,$sent,$rcv,$loss,$lat,TCP443" >> "$csv"
   done
 }
 
@@ -4070,7 +4114,7 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
-  echo -e "${DIM}  国际互联网站/CDN: $(international_task_count)  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
+  echo -e "${DIM}  国际互联网站/CDN及 Telegram DC: $(international_task_count)  DC1-DC5: ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}×$(international_latency_family_count) 个地址族  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1
   TOTAL=0
