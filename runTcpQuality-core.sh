@@ -412,7 +412,8 @@ INTERNATIONAL_SITE_TARGETS=(
   'Zoom API|api.zoom.us'
 )
 
-# Telegram 常用 MTProto DC TCP/443 接入点；DC 地址可能由 Telegram 更新。
+# Telegram 客户端内置的 MTProto DC 启动接入点；不是按本机实时获取的 help.getConfig 列表。
+# Telegram 可按负载和用户位置更新 DC 接入点，因此此列表需要维护。
 # 格式：DC 编号|IPv4|IPv6。
 INTERNATIONAL_TELEGRAM_DC_TARGETS=(
   '1|149.154.175.50|2001:b28:f23d:f001::a'
@@ -683,7 +684,7 @@ NixOS:
 
 国际互联：
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
-  同时探测 Telegram DC1-DC5 的 TCP/443 延迟；使用脚本内置的常用 IPv4/IPv6 接入点，地址变更时需更新脚本。
+  同时探测 Telegram DC1-DC5 的 TCP/443 延迟；使用内置 IPv4/IPv6 启动接入点，自动检测可用地址族并跳过不可用地址族。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
   国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
@@ -3341,22 +3342,23 @@ international_task_count() {
 
 international_latency_families() {
   if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
-    printf '4\n'
+    ipv4_available && printf '4\n'
   elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
-    printf '6\n'
+    ipv6_available && printf '6\n'
   else
-    printf '4\n6\n'
+    ipv4_available && printf '4\n'
+    ipv6_available && printf '6\n'
   fi
 }
 
 international_latency_family_count() {
-  if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 0 ]; then
-    printf '1'
-  elif [ "$ONLY_IPV6" -eq 1 ] && [ "$ONLY_IPV4" -eq 0 ]; then
-    printf '1'
-  else
-    printf '2'
-  fi
+  local family count=0
+  while read -r family; do
+    if [ -n "$family" ]; then
+      count=$((count + 1))
+    fi
+  done < <(international_latency_families)
+  printf '%s' "$count"
 }
 
 international_latency_direction_count() {
@@ -4115,6 +4117,17 @@ run_international_mode() {
   require_raw_socket_privilege
   check_curl
   check_nping
+  detect_ip_stack
+  if ipv4_available; then
+    echo -e "$GREEN[√] 国际互联检测到可用 IPv4$NC"
+  else
+    echo -e "$YELLOW[!] 国际互联未检测到可用 IPv4，跳过 DC IPv4 探测$NC"
+  fi
+  if ipv6_available; then
+    echo -e "$GREEN[√] 国际互联检测到可用 IPv6$NC"
+  else
+    echo -e "$YELLOW[!] 国际互联未检测到可用 IPv6，跳过 IPv6 探测$NC"
+  fi
   echo -e "${DIM}  国际互联网站/CDN及 Telegram DC: $(international_task_count)  DC1-DC5: ${#INTERNATIONAL_TELEGRAM_DC_TARGETS[@]}×$(international_latency_family_count) 个地址族  延迟方向: ${#INTERNATIONAL_IPERF_TARGETS[@]}×$(international_latency_family_count)×2（上传/下载）  并行: $PARALLEL  端口: 443/tcp、iPerf3 ${INTERNATIONAL_IPERF_RATE}/${INTERNATIONAL_IPERF_SECONDS}s，失败最多重试 ${INTERNATIONAL_IPERF_MAX_ATTEMPTS} 次（目标可单独指定）${NC}"
   echo
   MULTI_PROGRESS_MODE=1

@@ -52,7 +52,7 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--speedtest`：完成 TCP 质量探测后，追加单线程测速。
 - `--only-speedtest`：仅运行单线程测速。
 - `--intl`：单独使用时仅运行国际互联；与 `-v4`、`-v6`、`--all` 等组合时追加国际互联。
-- 国际互联探测包含 Telegram DC1–DC5 的 TCP/443 延迟，默认检测 IPv4 和 IPv6；可用 `-v4` 或 `-v6` 限定 DC 探测地址族。地址采用脚本内置列表，Telegram 更新接入点时需同步更新。
+- 国际互联探测包含 Telegram DC1–DC5 的 TCP/443 延迟，自动检测可用 IPv4/IPv6 并跳过不可用地址族；可用 `-v4` 或 `-v6` 限定 DC 探测地址族。地址来自 Telegram 客户端内置启动接入点，不是实时配置；[官方文档](https://core.telegram.org/api/datacenter)说明当前接入点可通过 help.getConfig 获取，IP 和端口可能随负载与用户位置变化。
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
