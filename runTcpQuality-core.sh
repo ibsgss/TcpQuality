@@ -328,8 +328,10 @@ RANK_SESSION_TOKEN=""
 RANK_SESSION_STARTED_AT=""
 RANK_SESSION_EXPIRES_AT=""
 RANK_SESSION_IP4=""
-RESULT_DIR=$(mktemp -d)
+RESULTS_INCOMPLETE=0
+RESULT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tcpquality-results.XXXXXX")
 cleanup_result_dir() {
+  local exit_status=$?
   printf '%b' "${NC:-\033[0m}"
   if [ "${DEBUG_MODE:-0}" -eq 1 ]; then
     local archive="${RESULT_DIR}.tar.gz"
@@ -339,6 +341,8 @@ cleanup_result_dir() {
     else
       echo -e "${YELLOW}[!] Debug 打包失败：$RESULT_DIR${NC}"
     fi
+  elif [ "$exit_status" -ne 0 ] || [ "${RESULTS_INCOMPLETE:-0}" -eq 1 ]; then
+    echo -e "${YELLOW}[!] 测试未完成，中间结果已保留：$RESULT_DIR${NC}" >&2
   else
     rm -rf "$RESULT_DIR"
   fi
@@ -696,7 +700,8 @@ NixOS:
   -s, --size NUM    指定 IP 包总长度（单位 B），0 为标准无负载 SYN；默认 0
                      小于协议头部的数值按最小头部长度发送
   -p, --parallel NUM
-                     设置并行节点数，范围 1-31，默认按内存自动选择
+                     设置并行节点数上限，范围 1-31，默认按可用内存自动选择
+                     低内存时也会调低手动设置的上限
   -v4, --v4         仅探测 IPv4
   -v6, --v6         仅探测 IPv6
   --only-large      仅探测 IPv4大包回程
@@ -892,35 +897,139 @@ parse_args() {
   fi
 }
 
+# /proc/meminfo may describe the host rather than this container. Resolve the
+# process's memory cgroup from mountinfo (including bind mounts/chroots), then
+# apply every visible ancestor limit. Swap is deliberately not a worker budget.
+detect_memory_mb() {
+  local proc_dir="${1:-/proc}" total_kb available_kb
+  local root mount_point version cgroup_path relative dir limit usage values
+  read -r total_kb available_kb < <(awk '
+    /^MemTotal:/ {total=$2}
+    /^MemAvailable:/ {available=$2; found=1}
+    END {if (total > 0) print total, (found ? available : total)}
+  ' "$proc_dir/meminfo" 2>/dev/null || true)
+  if ! [[ "$total_kb" =~ ^[0-9]+$ ]] || [ "$total_kb" -le 0 ]; then
+    total_kb=524288
+  fi
+  [[ "$available_kb" =~ ^[0-9]+$ ]] || available_kb="$total_kb"
+  [ "$available_kb" -le "$total_kb" ] || available_kb="$total_kb"
+
+  if [ -r "$proc_dir/self/cgroup" ] && [ -r "$proc_dir/self/mountinfo" ]; then
+    while IFS=$'\t' read -r root mount_point version; do
+      root=$(printf '%b' "$root")
+      mount_point=$(printf '%b' "$mount_point")
+      cgroup_path=$(awk -F: -v version="$version" '
+        version == "cgroup2" && $1 == "0" {print $3; exit}
+        version == "cgroup" && ("," $2 ",") ~ /,memory,/ {print $3; exit}
+      ' "$proc_dir/self/cgroup")
+      [ -n "$cgroup_path" ] || continue
+      if [ "$cgroup_path" = / ] || [ "$cgroup_path" = "$root" ]; then
+        relative=""
+      elif [ "$root" = / ]; then
+        relative="$cgroup_path"
+      elif [[ "$cgroup_path" == "$root/"* ]]; then
+        relative=${cgroup_path#"$root"}
+      else
+        continue
+      fi
+      dir="${mount_point%/}$relative"
+      while :; do
+        limit=""; usage=""
+        if [ "$version" = cgroup2 ]; then
+          [ ! -r "$dir/memory.max" ] || read -r limit < "$dir/memory.max" || true
+          [ ! -r "$dir/memory.current" ] || read -r usage < "$dir/memory.current" || true
+        else
+          [ ! -r "$dir/memory.limit_in_bytes" ] || read -r limit < "$dir/memory.limit_in_bytes" || true
+          [ ! -r "$dir/memory.usage_in_bytes" ] || read -r usage < "$dir/memory.usage_in_bytes" || true
+        fi
+        # Use awk for byte values: v1's unlimited sentinel can exceed signed
+        # shell arithmetic. Ignore 'max', malformed and unlimited values.
+        if [[ "$limit" =~ ^[0-9]+$ ]]; then
+          values=$(awk -v total="$total_kb" -v available="$available_kb" \
+            -v limit="$limit" -v usage="$usage" 'BEGIN {
+              limit=int(limit/1024)
+              if (limit < total) total=limit
+              if (usage ~ /^[0-9]+$/) {
+                headroom=limit-int(usage/1024)
+                if (headroom < 0) headroom=0
+                if (headroom < available) available=headroom
+              }
+              if (total < available) available=total
+              printf "%.0f %.0f\n", total, available
+            }')
+          read -r total_kb available_kb <<< "$values"
+        fi
+        [ "$dir" != "$mount_point" ] && [ "$dir" != / ] || break
+        dir=${dir%/*}
+        [ -n "$dir" ] || dir=/
+      done
+    done < <(awk '
+      {for (i=7; i<=NF; i++) if ($i == "-") {
+        if ($(i+1) == "cgroup2" ||
+            ($(i+1) == "cgroup" && ("," $(i+3) ",") ~ /,memory,/))
+          printf "%s\t%s\t%s\n", $4, $5, $(i+1)
+        break
+      }}
+    ' "$proc_dir/self/mountinfo")
+  fi
+  printf '%s %s\n' "$((total_kb / 1024))" "$((available_kb / 1024))"
+}
+
 detect_total_memory_mb() {
-  local mem_kb=""
-  if [ -r /proc/meminfo ]; then
-    mem_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
-    if [[ "$mem_kb" =~ ^[0-9]+$ ]] && [ "$mem_kb" -gt 0 ]; then
-      echo $((mem_kb / 1024))
-      return
-    fi
-  fi
-  if command -v free >/dev/null 2>&1; then
-    free -m 2>/dev/null | awk '/^Mem:/ {print $2; exit}'
-    return
-  fi
-  echo 512
+  local total available
+  read -r total available < <(detect_memory_mb)
+  echo "$total"
 }
 
 auto_parallel_by_memory() {
-  local mem_mb parallel
-  mem_mb=$(detect_total_memory_mb)
-  [[ "$mem_mb" =~ ^[0-9]+$ ]] || mem_mb=512
-  parallel=$(((mem_mb + 47) / 48))
-  [ "$parallel" -lt 1 ] && parallel=1
-  [ "$parallel" -gt 93 ] && parallel=93
+  local total available parallel
+  read -r total available < <(detect_memory_mb)
+  # Keep 64 MiB for the shell, progress/reporting, SSH and other services;
+  # budget 48 MiB per node, rounding down rather than overcommitting.
+  parallel=$(((available - 64) / 48))
+  [ "$parallel" -ge 1 ] || parallel=1
+  [ "$parallel" -le 31 ] || parallel=31
   echo "$parallel"
 }
 
 apply_auto_parallel() {
-  [ "$PARALLEL_EXPLICIT" -eq 1 ] && return
-  PARALLEL=$(auto_parallel_by_memory)
+  local safe_parallel
+  safe_parallel=$(auto_parallel_by_memory)
+  if [ "$PARALLEL_EXPLICIT" -eq 1 ]; then
+    if [ "$PARALLEL" -gt "$safe_parallel" ]; then
+      echo -e "${YELLOW}[!] 可用内存较低，并行节点数从 $PARALLEL 调整为 $safe_parallel${NC}" >&2
+      PARALLEL="$safe_parallel"
+    fi
+  else
+    PARALLEL="$safe_parallel"
+  fi
+  return 0
+}
+
+# A worker can exit without producing a result (e.g. OOM/signal). Count live
+# processes instead of result files so that failure cannot stall the scheduler.
+wait_for_worker_slot() {
+  while [ "$(jobs -pr | wc -l)" -ge "$PARALLEL" ]; do
+    show_progress
+    sleep 0.2
+  done
+}
+
+wait_for_workers() {
+  while [ "$(jobs -pr | wc -l)" -gt 0 ]; do
+    show_progress
+    sleep 0.2
+  done
+  wait
+}
+
+check_worker_results() {
+  local actual="$1" expected="$2" section="$3"
+  if [ "$actual" -lt "$expected" ]; then
+    RESULTS_INCOMPLETE=1
+    echo -e "${YELLOW}[!] $section 部分任务异常退出（结果 $actual/$expected），将保留中间结果${NC}" >&2
+  fi
+  return 0
 }
 
 # ===================== 工具函数 =====================
@@ -985,7 +1094,7 @@ show_single_progress() {
 }
 
 count_route_progress() {
-  find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'summary_route[46]_[0-9]*' -o -name 'summary_large_route4_[0-9]*' \) ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
+  find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'summary_route[46]_[0-9]*' -o -name 'summary_large_route4_[0-9]*' -o -name 'edu_route[46]_[0-9]*' \) ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_international_progress() {
@@ -2976,6 +3085,7 @@ wait_route_background() {
     sleep 0.2
   done
   wait "$ROUTE_BACKGROUND_PID" 2>/dev/null || true
+  check_worker_results "$(count_route_progress)" "$ROUTE_PROGRESS_TOTAL" 回程识别
 }
 
 export -f route_trace_one
@@ -3762,7 +3872,7 @@ international_latency_test_one() {
 }
 
 run_international_tests() {
-  local idx=0 launched=0 entry name provider domain path category total latency_expected=0 dc_id dc_ipv4 dc_ipv6 dc_port4 dc_port6 target_ip target_port
+  local idx=0 entry name provider domain path category total dc_id dc_ipv4 dc_ipv6 dc_port4 dc_port6 target_ip target_port
   local row_key region label host port v6_port fallback_host fallback_port fallback_v6_host fallback_v6_port family direction
   local -a latency_families=()
   refresh_international_telegram_targets || true
@@ -3779,19 +3889,11 @@ run_international_tests() {
       for entry in "${INTERNATIONAL_IPERF_TARGETS[@]}"; do
         IFS='|' read -r row_key region label host port v6_port fallback_host fallback_port fallback_v6_host fallback_v6_port <<< "$entry"
         idx=$((idx + 1))
-        while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
-          show_progress
-          sleep 0.2
-        done
+        wait_for_worker_slot
         international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$host" "$port" "$v6_port" "$fallback_host" "$fallback_port" "$fallback_v6_host" "$fallback_v6_port" &
-        launched=$((launched + 1))
         show_progress
       done
-      latency_expected=$((latency_expected + ${#INTERNATIONAL_IPERF_TARGETS[@]}))
-      while [ "$(count_international_progress)" -lt "$latency_expected" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_workers
     done
   done
 
@@ -3802,12 +3904,8 @@ run_international_tests() {
   for entry in "${INTERNATIONAL_SITE_TARGETS[@]}"; do
     IFS='|' read -r name domain path <<< "$entry"
     idx=$((idx + 1))
-    while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
-      show_progress
-      sleep 0.2
-    done
+    wait_for_worker_slot
     international_test_one "$idx" "$category" "$name" "Website" "$domain" "${path:-}" &
-    launched=$((launched + 1))
     show_progress
   done
 
@@ -3815,12 +3913,8 @@ run_international_tests() {
   for entry in "${INTERNATIONAL_CDN_TARGETS[@]}"; do
       IFS='|' read -r name provider domain path <<< "$entry"
       idx=$((idx + 1))
-      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot
       international_test_one "$idx" "$category" "$name" "$provider" "$domain" "${path:-}" &
-      launched=$((launched + 1))
       show_progress
   done
 
@@ -3835,21 +3929,14 @@ run_international_tests() {
         target_port="$dc_port6"
       fi
       idx=$((idx + 1))
-      while [ $((launched - $(count_international_progress))) -ge "$PARALLEL" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot
       international_telegram_dc_test_one "$idx" "$family" "$dc_id" "$target_ip" "$target_port" &
-      launched=$((launched + 1))
       show_progress
     done
   done
 
-  while [ "$(count_international_progress)" -lt "$total" ]; do
-    show_progress
-    sleep 0.2
-  done
-  wait
+  wait_for_workers
+  check_worker_results "$(count_international_progress)" "$total" 国际互联
   show_progress
 }
 
@@ -4853,6 +4940,11 @@ speedtest_retrans_trace_start() {
   [ "${SPEEDTEST_RETRANS_TRACE_ENABLED:-1}" = "1" ] || return 1
   [ "${SPEEDTEST_RETRANS_TRACE_DISABLED:-0}" -eq 0 ] || return 1
   command -v bpftrace >/dev/null 2>&1 || return 1
+  # LLVM/BTF compilation can exhaust a small VPS even with only one worker.
+  # TCP_INFO/ss remains available for retransmission measurement.
+  local total available
+  read -r total available < <(detect_memory_mb)
+  [ "$available" -ge 256 ] || return 1
   program=$(speedtest_retrans_trace_program "$SPEEDTEST_RETRANS_TRACE_SCRIPT" 2>/dev/null || true)
   if [ -n "$program" ] && speedtest_retrans_trace_launch "$output_file" "$program" 1; then
     SPEEDTEST_RETRANS_TRACE_KEY="seq"
@@ -6966,10 +7058,7 @@ main() {
         port=${port:-80}
         province_selected "$prov" || continue
         idx=$((idx + 1))
-        while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
-          show_progress
-          sleep 0.2
-        done
+        wait_for_worker_slot
         test_one "cdn${family}" "$family" "$prov" "$isp" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-80}" &
         show_progress
       done < <(print_cdn_entries "$family")
@@ -6980,10 +7069,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot
       test_large_one "large4" 4 "$prov" "$isp" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-80}" &
       show_progress
     done < <(print_cdn_entries 4)
@@ -6993,10 +7079,7 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot
       test_one "cernet" 4 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-443}" &
       show_progress
     done < <(print_cernet_entries)
@@ -7006,18 +7089,13 @@ main() {
       port=${port:-80}
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ $((idx - $(count_results))) -gt "$PARALLEL" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot
       test_one "cernet2" 6 "$prov" "教育网" "$host" "$idx" "$fixed_ip" "$port" "$backup_host" "$backup_ip" "${backup_port:-443}" &
       show_progress
     done < <(print_cernet2_entries)
   fi
-  while [ $((idx - $(count_results))) -gt 0 ]; do
-    show_progress
-    sleep 0.2
-  done
+  wait_for_workers
+  check_worker_results "$(count_results)" "$idx" 延迟重传
   show_progress
 
   if [ "$large_packet_enabled" -eq 1 ] && [ "$large_packet_probe_enabled" -eq 0 ]; then

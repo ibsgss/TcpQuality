@@ -1,0 +1,5 @@
+FROM alpine:3.22
+RUN apk add --no-cache bash ca-certificates coreutils curl gawk iperf3 iproute2 \
+    iptables jq nmap-nping ncurses python3 traceroute
+WORKDIR /work
+ENTRYPOINT ["bash"]

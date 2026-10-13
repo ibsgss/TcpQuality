@@ -328,8 +328,8 @@ persist_guest_outputs() {
   [ -n "${GUEST_TMP_HOST:-}" ] && [ -d "$GUEST_TMP_HOST" ] || return 0
   mkdir -p "$OUTPUT_DIR" || return 0
 
-  for artifact in "$GUEST_TMP_HOST"/*.csv "$GUEST_TMP_HOST"/*.tar.gz "$GUEST_TMP_HOST"/*.log; do
-    [ -f "$artifact" ] || continue
+  for artifact in "$GUEST_TMP_HOST"/*.csv "$GUEST_TMP_HOST"/*.tar.gz "$GUEST_TMP_HOST"/*.log "$GUEST_TMP_HOST"/tcpquality-results.*; do
+    [ -f "$artifact" ] || [ -d "$artifact" ] || continue
     base=$(basename -- "$artifact")
     destination="$OUTPUT_DIR/$base"
     if [ -e "$destination" ]; then

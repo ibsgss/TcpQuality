@@ -43,7 +43,7 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `-h`、`--help`：显示帮助信息并退出。
 - `-c NUM`、`--count NUM`：设置每个节点的发包数量，范围 1-600，默认 30。
 - `-s NUM`、`--size NUM`：指定 IP 包总长度，单位为 B；`0` 表示标准无负载 SYN，未指定时随机使用内置包长，过小的数值按协议最小头部发送。
-- `-p NUM`、`--parallel NUM`：设置并行节点数，范围 1-31，默认 16。
+- `-p NUM`、`--parallel NUM`：设置并行节点数上限，范围 1-31，默认根据可用内存自动选择；内存不足时会调低手动指定的上限。
 - `-v4`、`--v4`：仅探测 IPv4。
 - `-v6`、`--v6`：仅探测 IPv6。
 - `--only-large`：仅探测 IPv4大包回程。
@@ -55,6 +55,14 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - 国际互联探测包含 Telegram DC1–DC5；地址和端口从中央 `getNodes` 服务获取，中央服务每 5 分钟刷新一次，自动检测可用 IPv4/IPv6 并跳过不可用地址族。服务不可用时使用内置引导地址兜底。
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
+
+## 低内存机器
+
+并发预算同时考虑物理可用内存和当前进程的 cgroup v1/v2 内存限制（包括可见的父级限制），不使用 swap 扩大并发。预留 64 MiB 后，每个节点预算 48 MiB，向下取整，范围为 1–31；128 MiB 环境通常串行运行。`-p 1` 可进一步指定串行测试。可用内存不足 256 MiB 时跳过 bpftrace 编译，继续使用 TCP_INFO/ss 测量重传。
+
+普通异常退出会保留 `/tmp/tcpquality-results.*` 中的原始中间结果；rootfs 模式会将其移到输出目录（默认宿主机 `/tmp`）。这些文件用于排查，不支持断点续测。SSH 连接不稳定时，可在 `tmux` 或 `nohup` 中运行。
+
+可复现的 128 MiB Docker 回归测试见 [tests/low-memory/README.md](tests/low-memory/README.md)。
 
 ## Star History
 
