@@ -1637,6 +1637,9 @@ print_header() {
   terminal_link "ibsgss" "https://t.me/ibsgss"
   printf " | 感谢 Zstatic CDN 节点%b\n" "$NC"
   echo -e "${DIM}------------------------------------------------------------${NC}"
+  local node_parallel="$PARALLEL"
+  [ "$SPEEDTEST_ONLY" -ne 1 ] || node_parallel=1
+  echo -e "${DIM}当前并行节点数：${node_parallel}${NC}"
 }
 
 # 返回“出口网卡|源IPv6|源MAC|下一跳MAC”。
