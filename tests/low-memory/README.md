@@ -10,7 +10,7 @@ bash tests/low-memory/run.sh
 
 需要 Docker 和支持 `memory.events` / `memory.peak` 的 Linux cgroup v2。测试镜像先在不限内存的构建环境安装依赖，运行容器统一使用 `--memory 128m --memory-swap 128m --network none`，避免 swap 掩盖 OOM。每次创建新的容器，检查退出码、`OOMKilled` 和 `oom_kill`，日志、峰值和 CSV 保存到脚本打印的 `/tmp/tcpquality-low-memory.*` 路径。
 
-- `memory-policy.sh`：覆盖 cgroup v1/v2、无限制哨兵、父级限制、命名空间/子树挂载、物理可用内存、24 MiB 每节点预算和并发上下限、低内存 bpftrace 跳过，以及子进程退出但未写结果时继续调度。
+- `memory-policy.sh`：覆盖 cgroup v1/v2、无限制哨兵、父级限制、命名空间/子树挂载、物理可用内存、16 MiB 每节点预算和并发上下限、低内存 bpftrace 跳过，以及子进程退出但未写结果时继续调度。
 - `results-preservation.sh`：异常退出或任务缺失时保留原始结果，rootfs 将结果移出，正常成功时清理。
 - `workload.sh`：使用真实 `main`、路由/探测/国际互联/测速调度和 CSV 写入流程，将网络边界替换为确定性的 24 MiB 工作负载。包含 IPv4/IPv6、教育网、大包、国际互联和测速，验证 92 条 CSV 数据（含 TCP 配置）。传入 `-p 31`，检查 128 MiB 下并发会被内存策略自动压低。该测试验证资源调度，不验证公网线路的准确性。
 
