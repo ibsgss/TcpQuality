@@ -60,7 +60,7 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 
 启动和最终报告会显示实际采用的并行节点数；仅运行单线程测速时显示 1。
 
-并发预算同时考虑物理可用内存和当前进程的 cgroup v1/v2 内存限制（包括可见的父级限制），不使用 swap 扩大并发。预留 32 MiB 后，每个节点预算 32 MiB，向下取整，范围为 1–31；128 MiB 环境通常运行 1–2 个并行节点。`-p 1` 可指定串行测试。可用内存不足 256 MiB 时跳过 bpftrace 编译，继续使用 TCP_INFO/ss 测量重传。
+并发预算同时考虑物理可用内存和当前进程的 cgroup v1/v2 内存限制（包括可见的父级限制），不使用 swap 扩大并发。预留 48 MiB 后，每个节点预算 24 MiB，向下取整，范围为 1–31；128 MiB 环境通常运行 2–3 个并行节点。`-p 1` 可指定串行测试。可用内存不足 256 MiB 时跳过 bpftrace 编译，继续使用 TCP_INFO/ss 测量重传。
 
 普通异常退出会保留 `/tmp/tcpquality-results.*` 中的原始中间结果；rootfs 模式会将其移到输出目录（默认宿主机 `/tmp`）。这些文件用于排查，不支持断点续测。SSH 连接不稳定时，可在 `tmux` 或 `nohup` 中运行。
 

@@ -984,9 +984,9 @@ detect_total_memory_mb() {
 auto_parallel_by_memory() {
   local total available parallel
   read -r total available < <(detect_memory_mb)
-  # Keep 32 MiB for the shell, progress/reporting, SSH and other services;
-  # budget 32 MiB per node, rounding down rather than overcommitting.
-  parallel=$(((available - 32) / 32))
+  # Keep 48 MiB for the shell, progress/reporting, SSH and other services;
+  # budget 24 MiB per node, rounding down rather than overcommitting.
+  parallel=$(((available - 48) / 24))
   [ "$parallel" -ge 1 ] || parallel=1
   [ "$parallel" -le 31 ] || parallel=31
   echo "$parallel"
