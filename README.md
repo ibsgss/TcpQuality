@@ -58,11 +58,17 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 
 ## 低内存机器
 
+启动和最终报告会显示实际采用的并行节点数；仅运行单线程测速时显示 1。
+
 并发预算同时考虑物理可用内存和当前进程的 cgroup v1/v2 内存限制（包括可见的父级限制），不使用 swap 扩大并发。预留 64 MiB 后，每个节点预算 48 MiB，向下取整，范围为 1–31；128 MiB 环境通常串行运行。`-p 1` 可进一步指定串行测试。可用内存不足 256 MiB 时跳过 bpftrace 编译，继续使用 TCP_INFO/ss 测量重传。
 
 普通异常退出会保留 `/tmp/tcpquality-results.*` 中的原始中间结果；rootfs 模式会将其移到输出目录（默认宿主机 `/tmp`）。这些文件用于排查，不支持断点续测。SSH 连接不稳定时，可在 `tmux` 或 `nohup` 中运行。
 
 可复现的 128 MiB Docker 回归测试见 [tests/low-memory/README.md](tests/low-memory/README.md)。
+
+## 报告上传排查
+
+报告上传失败时会显示 curl 退出码或 HTTP 状态码、可用的错误原因及本地 CSV 路径。上传失败不会删除已生成的 CSV。`--debug` 还会保存接口响应和 curl 错误，便于区分连接超时、TLS 问题和服务端错误。
 
 ## Star History
 

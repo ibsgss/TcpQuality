@@ -14,6 +14,7 @@ on:
       - runTcpQuality-core.sh
       - runTcpQuality.sh
       - tests/low-memory/**
+      - tests/report-upload/**
   workflow_dispatch:
 
 permissions:
@@ -36,5 +37,7 @@ jobs:
         run: |
           timeout 30 bash tests/low-memory/memory-policy.sh
           timeout 30 bash tests/low-memory/results-preservation.sh
+      - name: Test report upload diagnostics
+        run: timeout 30 bash tests/report-upload/diagnostics.sh
       - name: Test Debian and Alpine with 128 MiB and no swap
         run: bash tests/low-memory/run.sh

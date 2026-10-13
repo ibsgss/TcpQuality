@@ -1937,12 +1937,42 @@ upload_probe_debug_bundle() {
   rm -f "$bundle" "$list_file" "$response_file"
 }
 
+report_upload_error_text() {
+  # Remote messages must not emit terminal controls or flood the TUI.
+  LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' |
+    tr '\r\n' '  ' | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-240
+}
+
+show_report_upload_failure() {
+  local csv="$1" http_code="${2:-000}" curl_status="$3" curl_err="$4" response_file="$5" reason=""
+  if [ "$curl_status" -ne 0 ]; then
+    echo -e "  ${YELLOW}[!] SVG 报告上传失败（curl $curl_status），本地 CSV 已保留${NC}"
+    reason=$(report_upload_error_text < "$curl_err")
+  else
+    echo -e "  ${YELLOW}[!] SVG 报告上传失败（HTTP $http_code），本地 CSV 已保留${NC}"
+    reason=$(sed -nE 's/.*"(error|message)"[[:space:]]*:[[:space:]]*"([^"]+)".*/\2/p' "$response_file" |
+      head -1 | report_upload_error_text)
+    if [ -z "$reason" ] && [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+      reason="接口响应未包含有效报告链接"
+    fi
+  fi
+  printf '    上传接口：%s\n' "$REPORT_API"
+  [ -z "$reason" ] || printf '    原因：%s\n' "$reason"
+  printf '    本地 CSV：%s\n' "$csv"
+  return 0
+}
+
 upload_report() {
-  local csv="$1" report_time="${2:-}" response_file curl_err http_code report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
+  local csv="$1" report_time="${2:-}" response_file curl_err http_code curl_status=0 report_id report_url today_uses total_uses rank_updated rank_reject_reason rank_finished_at
   local rank_headers=()
   if ! command -v curl &>/dev/null; then
     echo -e "  ${YELLOW}[!] 依赖不完整，已跳过 SVG 报告上传${NC}"
     return
+  fi
+  if [ ! -f "$csv" ] || [ ! -r "$csv" ]; then
+    echo -e "  ${YELLOW}[!] 本地 CSV 文件无法读取，已跳过 SVG 报告上传${NC}"
+    printf '    本地 CSV：%s\n' "$csv"
+    return 0
   fi
   if grep -qE '^(Speedtest|三网单线程速度),' "$csv" 2>/dev/null; then
     ensure_public_ips_for_rank
@@ -1964,7 +1994,7 @@ upload_report() {
     cp "$csv" "$RESULT_DIR/report_upload.csv" 2>/dev/null || true
   fi
   rank_finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-  if ! http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
+  if http_code=$(curl -4 -sS --connect-timeout 10 --max-time 30 --retry 2 \
     -o "$response_file" -w '%{http_code}' \
     -H 'Content-Type: text/csv; charset=utf-8' \
     -H "X-Report-Time: $report_time" \
@@ -1973,16 +2003,19 @@ upload_report() {
     -H "X-TcpQuality-Rank-Finished-At: $rank_finished_at" \
     "${rank_headers[@]}" \
     --data-binary "@$csv" "$REPORT_API" 2>"$curl_err"); then
-    echo -e "  ${YELLOW}[!] SVG 报告上传失败，本地 CSV 已保留${NC}"
+    curl_status=0
+  else
+    curl_status=$?
+    show_report_upload_failure "$csv" "$http_code" "$curl_status" "$curl_err" "$response_file"
     if [ "$DEBUG_MODE" -eq 1 ]; then
       cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
       cp "$curl_err" "$RESULT_DIR/report_upload_curl.err" 2>/dev/null || true
-      printf '%s\n' "curl_failed" > "$RESULT_DIR/report_upload_http_code.txt"
+      printf '%s\n' "${http_code:-000}" > "$RESULT_DIR/report_upload_http_code.txt"
+      printf '%s\n' "$curl_status" > "$RESULT_DIR/report_upload_curl_status.txt"
     fi
     rm -f "$response_file" "$curl_err"
     return
   fi
-  rm -f "$curl_err"
   if [ "$DEBUG_MODE" -eq 1 ]; then
     cp "$response_file" "$RESULT_DIR/report_upload_response.json" 2>/dev/null || true
     printf '%s\n' "$http_code" > "$RESULT_DIR/report_upload_http_code.txt"
@@ -2010,9 +2043,9 @@ upload_report() {
       echo -e "  ${YELLOW}[!] 排名未更新：${rank_reject_reason}${NC}"
     fi
   else
-    echo -e "  ${YELLOW}[!] SVG 报告上传失败（HTTP $http_code），本地 CSV 已保留${NC}"
+    show_report_upload_failure "$csv" "$http_code" 0 "$curl_err" "$response_file"
   fi
-  rm -f "$response_file"
+  rm -f "$response_file" "$curl_err"
 }
 
 # ===================== 三网回程线路识别 =====================
