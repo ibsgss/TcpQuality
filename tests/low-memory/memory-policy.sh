@@ -65,14 +65,14 @@ assert_equal "$(detect_memory_mb "$proc_dir")" '512 512' 'unknown memory fallbac
 # Exercise policy independently of the test machine's RAM.
 eval "$(declare -f detect_memory_mb | sed '1s/detect_memory_mb/real_detect_memory_mb/')"
 detect_memory_mb() { printf '%s %s\n' "$policy_total" "$policy_available"; }
-for values in '128 112 1' '256 256 4' '512 512 9' '8192 8192 31' '128 0 1' '512 96 1'; do
+for values in '128 112 2' '256 256 7' '512 512 15' '973 413 11' '8192 8192 31' '128 0 1' '512 96 2'; do
   read -r policy_total policy_available expected <<< "$values"
   assert_equal "$(auto_parallel_by_memory)" "$expected" "policy $values"
 done
 policy_total=128 policy_available=112
 PARALLEL=31 PARALLEL_EXPLICIT=1
 apply_auto_parallel
-assert_equal "$PARALLEL" 1 'manual high parallel is reduced'
+assert_equal "$PARALLEL" 2 'manual high parallel is reduced'
 policy_total=8192 policy_available=8192
 PARALLEL=3 PARALLEL_EXPLICIT=1
 apply_auto_parallel
