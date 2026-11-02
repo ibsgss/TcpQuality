@@ -1,0 +1,6 @@
+FROM debian:bookworm-slim
+RUN export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+    bash ca-certificates curl gawk iperf3 iproute2 iptables jq nmap ncurses-bin \
+    python3 traceroute && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+ENTRYPOINT ["bash"]
