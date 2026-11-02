@@ -3140,8 +3140,8 @@ export -f nping_random_source_port
 export -f nping_random_seq
 
 nping_matching_min_rtt() {
-  local raw="$1"
-  printf "%s\n" "$raw" | awk '
+  local raw="$1" expected_seq="${2:-}" payload_size="${3:-0}"
+  printf "%s\n" "$raw" | awk -v expected_seq="$expected_seq" -v payload_size="$payload_size" '
     function ep_ip(ep) {
       sub(/:[0-9]+$/, "", ep)
       return tolower(ep)
@@ -3152,14 +3152,24 @@ nping_matching_min_rtt() {
       }
       return ""
     }
-    function parse_tcp_line(line, prefix, time_s, body, parts, left, right) {
+    function parse_tcp_line(line, prefix, time_s, body, parts, left, right, fields, ack) {
       time_s = line
       sub(/^[^(]*\(/, "", time_s)
       sub(/s\).*/, "", time_s)
       body = line
       sub(/^.* TCP /, "", body)
+      sub(/^\[/, "", body)
       split(body, parts, " > ")
       if (!parts[1] || !parts[2]) return 0
+      # Verbose Nping includes ACK; validate it when the caller knows the SYN
+      # sequence, so a late reply to an earlier probe cannot be counted.
+      if (prefix == "rcvd" && expected_seq != "" && line ~ / TCP \[/) {
+        split(parts[2], fields, /[[:space:]]+/)
+        if (index(fields[2], "A") == 0 || !match(line, / ack=[0-9]+/)) return 0
+        ack = substr(line, RSTART + 5, RLENGTH - 5) + 0
+        if (ack != (expected_seq + 1) % 4294967296 &&
+            ack != (expected_seq + 1 + payload_size) % 4294967296) return 0
+      }
       left = parts[1]
       right = parts[2]
       sub(/ .*/, "", right)
@@ -3205,6 +3215,47 @@ nping_matching_min_rtt() {
 }
 
 export -f nping_matching_min_rtt
+
+# Keep nping's normal timeout unless both the TCP tuple and ACK match. Without
+# stdbuf retain the original path; ambiguous replies also wait normally.
+nping_early_probe() {
+  if ! command -v stdbuf >/dev/null 2>&1; then
+    nping "$@"
+    return $?
+  fi
+  local line sent_line="" sent_seq="" ack="" flags="" pid fd stopped=0 rc=0
+  coproc NPING_EARLY { exec stdbuf -oL nping -v2 "$@" 2>&1; }
+  pid=$NPING_EARLY_PID
+  fd=${NPING_EARLY[0]}
+  while IFS= read -r line <&"$fd"; do
+    printf '%s\n' "$line"
+    case "$line" in
+      SENT*' TCP '*)
+        if [ -z "$sent_line" ]; then
+          sent_line="$line"
+          if [[ "$line" =~ [[:space:]]seq=([0-9]+) ]]; then sent_seq=${BASH_REMATCH[1]}; fi
+        fi
+        ;;
+      RCVD*' TCP '*)
+        ack=""
+        flags=""
+        if [[ "$line" =~ [[:space:]]([A-Z]+)[[:space:]]seq= ]]; then flags=${BASH_REMATCH[1]}; fi
+        if [[ "$line" =~ [[:space:]]ack=([0-9]+) ]]; then ack=${BASH_REMATCH[1]}; fi
+        if [ "$stopped" -eq 0 ] && [[ "$flags" == *A* ]] && [ -n "$sent_seq" ] && [ -n "$ack" ] &&
+           [ "$ack" -eq $(((sent_seq + 1) & 0xffffffff)) ] &&
+           nping_matching_min_rtt "$sent_line
+$line" "$sent_seq" 0 >/dev/null; then
+          if kill -INT "$pid" 2>/dev/null; then stopped=1; fi
+        fi
+        ;;
+    esac
+  done
+  wait "$pid" || rc=$?
+  [ "$stopped" -eq 0 ] || return 0
+  return "$rc"
+}
+
+export -f nping_early_probe
 
 # ===================== 单节点测试 =====================
 probe_target() {
@@ -3273,12 +3324,12 @@ probe_target() {
     tcp_seq=$(nping_random_seq)
     current_nping_args+=(-g "$source_port" --seq "$tcp_seq")
     if [ "$packet_size" -eq 0 ]; then
-      if raw=$(nping "${current_nping_args[@]}" -c 1 "$ip" 2>&1); then
+      if raw=$(nping_early_probe "${current_nping_args[@]}" -c 1 "$ip" 2>&1); then
         nping_rc=0
       else
         nping_rc=$?
       fi
-    elif raw=$(nping "${current_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+    elif raw=$(nping_early_probe "${current_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
       nping_rc=0
     else
       nping_rc=$?
@@ -3286,7 +3337,7 @@ probe_target() {
 
     one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
     one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-    if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw"); then
+    if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw" "$tcp_seq" "$payload_size"); then
       one_rcvd=1
     elif [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ]; then
       if [ "$DEBUG_MODE" -eq 1 ]; then
@@ -3313,19 +3364,19 @@ probe_target() {
         tcp_seq=$(nping_random_seq)
         local -a current_l2_nping_args=("${nping_l2_args[@]}" -g "$source_port" --seq "$tcp_seq")
         if [ "$packet_size" -eq 0 ]; then
-          if raw=$(nping "${current_l2_nping_args[@]}" -c 1 "$ip" 2>&1); then
+          if raw=$(nping_early_probe "${current_l2_nping_args[@]}" -c 1 "$ip" 2>&1); then
             nping_rc=0
           else
             nping_rc=$?
           fi
-        elif raw=$(nping "${current_l2_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
+        elif raw=$(nping_early_probe "${current_l2_nping_args[@]}" --data-length "$payload_size" -c 1 "$ip" 2>&1); then
           nping_rc=0
         else
           nping_rc=$?
         fi
         one_sent=$(printf "%s\n" "$raw" | sed -nE 's/.*sent:[[:space:]]*([0-9]+).*/\1/p' | head -1)
         one_rcvd=$(printf "%s\n" "$raw" | sed -nE 's/.*Rcvd:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-        if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw"); then
+        if [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ] && one_rtt=$(nping_matching_min_rtt "$raw" "$tcp_seq" "$payload_size"); then
           one_rcvd=1
         elif [[ "$one_rcvd" =~ ^[0-9]+$ ]] && [ "$one_rcvd" -gt 0 ]; then
           if [ "$DEBUG_MODE" -eq 1 ]; then
