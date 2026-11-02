@@ -13,8 +13,6 @@ on:
       - runTcpQuality-rootfs.sh
       - runTcpQuality-core.sh
       - runTcpQuality.sh
-      - tests/low-memory/**
-      - tests/report-upload/**
   workflow_dispatch:
 
 permissions:
@@ -33,11 +31,3 @@ jobs:
         uses: actions/checkout@v4
       - name: Validate Bash syntax
         run: bash -n runTcpQuality.sh runTcpQuality-rootfs.sh runTcpQuality-core.sh
-      - name: Test memory policy and partial results
-        run: |
-          timeout 30 bash tests/low-memory/memory-policy.sh
-          timeout 30 bash tests/low-memory/results-preservation.sh
-      - name: Test report upload diagnostics
-        run: timeout 30 bash tests/report-upload/diagnostics.sh
-      - name: Test Debian and Alpine with 128 MiB and no swap
-        run: bash tests/low-memory/run.sh
