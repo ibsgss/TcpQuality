@@ -56,6 +56,8 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
+国际节点的每个 iPerf 测试默认最多重试 10 次，主节点和备用节点共用 45 秒尝试预算；连续 5 个端口拒绝连接或网络不可达时提前结束当前节点。可通过 `TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS` 设置 1–600 秒。DNS 解析耗时可能额外超出预算；没有 `timeout` 命令时，单次 iPerf 运行可能超过剩余预算。缩短预算可能使较慢或临时繁忙的节点显示失败。
+
 ## 低内存机器
 
 启动和最终报告会显示实际采用的并行节点数；仅运行单线程测速时显示 1。

@@ -87,6 +87,7 @@ bootstrap_nixos_environment() {
           "LANG=${LANG:-C.UTF-8}" \
           "GET_NODES_URL=${GET_NODES_URL:-}" \
           "TCPQUALITY_REPORT_API=${TCPQUALITY_REPORT_API:-}" \
+          "TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS=${TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS:-}" \
           TCPQUALITY_NIX_BOOTSTRAPPED=1 \
           "TCPQUALITY_NIX_TEMP_SCRIPT=$1" \
           NIXPKGS_ALLOW_UNFREE=1 \
@@ -309,6 +310,13 @@ INTERNATIONAL_IPERF_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_SECONDS:-5}"
 INTERNATIONAL_IPERF_RATE="${TCPQUALITY_INTERNATIONAL_IPERF_RATE:-1M}"
 INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS="${TCPQUALITY_INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS:-5000}"
 INTERNATIONAL_IPERF_MAX_ATTEMPTS=10
+INTERNATIONAL_IPERF_BUDGET_SECONDS="${TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS:-45}"
+if [[ "$INTERNATIONAL_IPERF_BUDGET_SECONDS" =~ ^[0-9]{1,3}$ ]] &&
+   (( 10#$INTERNATIONAL_IPERF_BUDGET_SECONDS >= 1 && 10#$INTERNATIONAL_IPERF_BUDGET_SECONDS <= 600 )); then
+  INTERNATIONAL_IPERF_BUDGET_SECONDS=$((10#$INTERNATIONAL_IPERF_BUDGET_SECONDS))
+else
+  INTERNATIONAL_IPERF_BUDGET_SECONDS=45
+fi
 SPEEDTEST_STATE_FILE=""
 SPEEDTEST_PROGRESS_FILE=""
 SPEEDTEST_BACKGROUND=0
@@ -320,6 +328,7 @@ PROGRESS_LINES_PRINTED=0
 PROGRESS_LAST_STATE=""
 PROGRESS_LAST_TS=0
 PROGRESS_MIN_INTERVAL=1
+PROGRESS_LAST_SCAN_SECOND=-1
 REPORT_API=${TCPQUALITY_REPORT_API:-https://tcpquality.ibsgss.uk/generate}
 ROUTE_ASN_API=${TCPQUALITY_ROUTE_ASN_API:-${REPORT_API%/generate}/route/asn?format=tsv}
 RANK_SESSION_API=${TCPQUALITY_RANK_SESSION_API:-${REPORT_API%/generate}/rank/session}
@@ -722,7 +731,7 @@ NixOS:
   CDN 目标优先使用静态资源入口；每个域名最多探测 2 个公网 IPv4，结果合并统计。
   同时探测 Telegram DC1-DC5；地址和端口从中央 getNodes 服务拉取，自动检测可用地址族并跳过不可用地址族，服务不可用时使用内置引导地址。
   国际节点分别执行 iPerf3 上传和下载（-R）；每个方向显示 TCP RTT 与重传次数，每行最多三个节点。
-  国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS 覆盖。
+  国际节点 iPerf3 默认限速 1M、测试 5 秒；每个节点/协议/方向最多尝试 10 次，默认尝试预算 45 秒（含备用节点），成功即停止；可用 TCPQUALITY_INTERNATIONAL_IPERF_RATE/TCPQUALITY_INTERNATIONAL_IPERF_SECONDS/TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS 覆盖。
   设置 TCPQUALITY_INTERNATIONAL_MAX_IPS=1 可恢复每个域名只探测一个地址。
   --debug 还会保存国际互联目标的候选 IP、HTTP 状态、边缘和缓存信息。
 
@@ -1007,18 +1016,35 @@ apply_auto_parallel() {
 }
 
 # A worker can exit without producing a result (e.g. OOM/signal). Count live
-# processes instead of result files so that failure cannot stall the scheduler.
-wait_for_worker_slot() {
-  while [ "$(jobs -pr | wc -l)" -ge "$PARALLEL" ]; do
-    show_progress
+# jobs rather than result files, and wake as soon as any worker finishes.
+wait_for_one_worker() {
+  if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )); then
+    wait -n || true
+  else
     sleep 0.2
+  fi
+}
+
+wait_for_worker_slot() {
+  local limit="${1:-$PARALLEL}" show="${2:-1}" running
+  local -a workers=()
+  while :; do
+    running=$(jobs -pr)
+    [ -n "$running" ] || return 0
+    read -r -a workers <<< "${running//$'\n'/ }"
+    [ "${#workers[@]}" -ge "$limit" ] || return 0
+    [ "$show" -eq 0 ] || show_progress
+    wait_for_one_worker
   done
 }
 
 wait_for_workers() {
-  while [ "$(jobs -pr | wc -l)" -gt 0 ]; do
-    show_progress
-    sleep 0.2
+  local show="${1:-1}" running
+  while :; do
+    running=$(jobs -pr)
+    [ -n "$running" ] || break
+    [ "$show" -eq 0 ] || show_progress
+    wait_for_one_worker
   done
   wait
 }
@@ -1182,6 +1208,10 @@ show_all_progress() {
 
 show_progress() {
   local force=${1:-0}
+  if [ "$force" -ne 1 ] && [ "$PROGRESS_LAST_SCAN_SECOND" -eq "$SECONDS" ]; then
+    return 0
+  fi
+  PROGRESS_LAST_SCAN_SECOND=$SECONDS
   if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
     show_all_progress "$force"
   else
@@ -2867,21 +2897,14 @@ run_route_mode() {
     while IFS='|' read -r prov isp host fixed_ip port backup_host backup_ip backup_port; do
       province_selected "$prov" || continue
       idx=$((idx + 1))
-      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
-        show_progress
-        sleep 0.2
-      done
+      wait_for_worker_slot "$route_parallel"
       port=${port:-80}
       route_trace_one "$family" "$protocol" "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
       show_progress
     done < <(print_cdn_entries "$family")
   done
-  while [ "$(jobs -pr | wc -l | tr -d ' ')" -gt 0 ]; do
-    show_progress
-    sleep 0.2
-  done
-  wait
-  show_progress
+  wait_for_workers
+  show_progress 1
   echo ""
 
   route_raw_file=$(mktemp)
@@ -2947,12 +2970,10 @@ collect_route_labels() {
     province_selected "$prov" || continue
     port=${port:-80}
     idx=$((idx + 1))
-    while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
-      sleep 0.2
-    done
+    wait_for_worker_slot "$route_parallel" 0
     route_trace_one "$family" "$route_protocol" "$prov" "$isp" "$host" "$idx" "$port" "$fixed_ip" "$prefix" "$packet_length" &
   done < <(print_cdn_entries "$family")
-  wait
+  wait_for_workers 0
 
   route_raw_file=$(mktemp)
   ip_file=$(mktemp)
@@ -3012,9 +3033,7 @@ collect_education_route_labels() {
       province_selected "$prov" || continue
       port=${port:-80}
       idx=$((idx + 1))
-      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
-        sleep 0.2
-      done
+      wait_for_worker_slot "$route_parallel" 0
       route_trace_one "$family" tcp "$prov" "教育网" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
     done < <(print_cernet2_entries)
   else
@@ -3022,13 +3041,11 @@ collect_education_route_labels() {
       province_selected "$prov" || continue
       port=${port:-80}
       idx=$((idx + 1))
-      while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$route_parallel" ]; do
-        sleep 0.2
-      done
+      wait_for_worker_slot "$route_parallel" 0
       route_trace_one "$family" tcp "$prov" "教育网" "$host" "$idx" "$port" "$fixed_ip" "$prefix" &
     done < <(print_cernet_entries)
   fi
-  wait
+  wait_for_workers 0
 
   route_raw_file=$(mktemp)
   ip_file=$(mktemp)
@@ -3116,7 +3133,7 @@ wait_route_background() {
   [ -n "${ROUTE_BACKGROUND_PID:-}" ] || return 0
   while kill -0 "$ROUTE_BACKGROUND_PID" 2>/dev/null; do
     if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
-      show_all_progress
+      show_progress
     fi
     sleep 0.2
   done
@@ -3226,7 +3243,9 @@ nping_early_probe() {
   local line sent_line="" sent_seq="" ack="" flags="" pid fd stopped=0 rc=0
   coproc NPING_EARLY { exec stdbuf -oL nping -v2 "$@" 2>&1; }
   pid=$NPING_EARLY_PID
-  fd=${NPING_EARLY[0]}
+  # Bash closes the coprocess descriptor when it reaps a fast child. Keep a
+  # duplicate open so buffered response and summary lines remain readable.
+  exec {fd}<&"${NPING_EARLY[0]}"
   while IFS= read -r line <&"$fd"; do
     printf '%s\n' "$line"
     case "$line" in
@@ -3250,6 +3269,7 @@ $line" "$sent_seq" 0 >/dev/null; then
         ;;
     esac
   done
+  exec {fd}<&-
   wait "$pid" || rc=$?
   [ "$stopped" -eq 0 ] || return 0
   return "$rc"
@@ -3814,10 +3834,19 @@ international_latency_test_one() {
   local idx="$1" family="$2" direction="$3" row_key="$4" region="$5" label="$6" host="$7" base_port="${8:-5201}" v6_base_port="${9:-}"
   local fallback_host="${10:-}" fallback_base_port="${11:-}"
   local fallback_v6_host="${12:-}" fallback_v6_base_port="${13:-}"
+  local deadline="${14:-}" primary_deadline remaining attempt_timeout refused_count=0 error_lower
   local outfile="${RESULT_DIR}/international_latency_${family}_${direction}_${idx}"
   local ip="" port="" json err_file rtt_us tcp_rtt_ms latency="-" retransmits="-" candidate_retransmits="" status="FAIL"
   local first_port last_port attempt=0 error_reason="" iperf_pid
   local -a iperf_direction_args=()
+
+  [[ "$deadline" =~ ^[0-9]+$ ]] || deadline=$((SECONDS + INTERNATIONAL_IPERF_BUDGET_SECONDS))
+  primary_deadline="$deadline"
+  # Reserve part of the shared budget for a configured fallback host.
+  if { [ "$family" = "4" ] && [ -n "$fallback_host" ]; } ||
+     { [ "$family" = "6" ] && [ -n "$fallback_v6_host" ]; }; then
+    primary_deadline=$((deadline - INTERNATIONAL_IPERF_BUDGET_SECONDS / 3))
+  fi
 
   [[ "$base_port" =~ ^[0-9]+$ ]] || base_port=5201
   if [ "$direction" = "download" ]; then
@@ -3836,12 +3865,12 @@ international_latency_test_one() {
     ip=$(resolve_first_public_ipv6 "$host" || true)
   fi
   if [ -z "$ip" ]; then
-    if [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
-      international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+    if [ "$family" = "4" ] && [ -n "$fallback_host" ] && [ "$SECONDS" -lt "$deadline" ]; then
+      international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}" "" "" "" "" "" "$deadline"
       return
     fi
-    if [ "$family" = "6" ] && [ -n "$fallback_v6_host" ]; then
-      international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_v6_host" "$base_port" "$fallback_v6_base_port"
+    if [ "$family" = "6" ] && [ -n "$fallback_v6_host" ] && [ "$SECONDS" -lt "$deadline" ]; then
+      international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_v6_host" "$base_port" "$fallback_v6_base_port" "" "" "" "" "$deadline"
       return
     fi
     printf 'SKIP|%s|%s|%s|%s|%s|%s||-|-\n' "$family" "$direction" "$row_key" "$region" "$label" "$host" > "$outfile"
@@ -3865,6 +3894,10 @@ international_latency_test_one() {
   last_port=$((first_port + 4))
   attempt=0
   while [ "$attempt" -lt "$INTERNATIONAL_IPERF_MAX_ATTEMPTS" ]; do
+    remaining=$((primary_deadline - SECONDS))
+    if [ "$remaining" -le 0 ]; then error_reason="time-budget-exhausted"; break; fi
+    attempt_timeout=15
+    [ "$remaining" -ge "$attempt_timeout" ] || attempt_timeout="$remaining"
     attempt=$((attempt + 1))
     port=$((first_port + ( (attempt - 1) % 5 )))
     json=$(mktemp "${RESULT_DIR}/iperf3.XXXXXX.json")
@@ -3873,7 +3906,7 @@ international_latency_test_one() {
     candidate_retransmits=""
     if [ "${direction}" = "download" ] && command -v ss >/dev/null 2>&1; then
       if command -v timeout >/dev/null 2>&1; then
-        timeout 15 iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+        timeout -k 1 "$attempt_timeout" iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
           -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
           -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
           > "$json" 2> "$err_file" &
@@ -3892,7 +3925,7 @@ international_latency_test_one() {
       wait "${iperf_pid}" || true
     else
       if command -v timeout >/dev/null 2>&1; then
-        timeout 15 iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
+        timeout -k 1 "$attempt_timeout" iperf3 "-${family}" "${iperf_direction_args[@]}" -c "$ip" -p "$port" \
           -t "$INTERNATIONAL_IPERF_SECONDS" -b "$INTERNATIONAL_IPERF_RATE" \
           -J --connect-timeout "$INTERNATIONAL_IPERF_CONNECT_TIMEOUT_MS" \
           > "$json" 2> "$err_file" || true
@@ -3939,14 +3972,22 @@ international_latency_test_one() {
       error_reason="${error_reason:-no-rtt}"
     fi
     rm -f -- "$json" "$err_file"
+    error_lower=${error_reason,,}
+    case "$error_lower" in
+      *"network is unreachable"*|*"no route to host"*|*"cannot assign requested address"*) break ;;
+      *"connection refused"*) refused_count=$((refused_count + 1)) ;;
+      *) refused_count=0 ;;
+    esac
+    # Try each of the five ports once before stopping on repeated refusal.
+    [ "$refused_count" -lt 5 ] || break
     [ "$attempt" -lt "$INTERNATIONAL_IPERF_MAX_ATTEMPTS" ] || break
   done
-  if [ "$status" != "OK" ] && [ "$family" = "4" ] && [ -n "$fallback_host" ]; then
-    international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}"
+  if [ "$status" != "OK" ] && [ "$family" = "4" ] && [ -n "$fallback_host" ] && [ "$SECONDS" -lt "$deadline" ]; then
+    international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_host" "${fallback_base_port:-5201}" "" "" "" "" "" "$deadline"
     return
   fi
-  if [ "$status" != "OK" ] && [ "$family" = "6" ] && [ -n "$fallback_v6_host" ]; then
-    international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_v6_host" "$base_port" "$fallback_v6_base_port"
+  if [ "$status" != "OK" ] && [ "$family" = "6" ] && [ -n "$fallback_v6_host" ] && [ "$SECONDS" -lt "$deadline" ]; then
+    international_latency_test_one "$idx" "$family" "$direction" "$row_key" "$region" "$label" "$fallback_v6_host" "$base_port" "$fallback_v6_base_port" "" "" "" "" "$deadline"
     return
   fi
   if [ "$DEBUG_MODE" -eq 1 ]; then
@@ -4024,7 +4065,7 @@ run_international_tests() {
 
   wait_for_workers
   check_worker_results "$(count_international_progress)" "$total" 国际互联
-  show_progress
+  show_progress 1
 }
 
 append_international_csv() {
@@ -6670,7 +6711,7 @@ wait_speedtest_background() {
   [ -n "${SPEEDTEST_BACKGROUND_PID:-}" ] || return 0
   while kill -0 "$SPEEDTEST_BACKGROUND_PID" 2>/dev/null; do
     if [ "${MULTI_PROGRESS_MODE:-0}" -eq 1 ]; then
-      show_all_progress
+      show_progress
     else
       progress=$(cat "$SPEEDTEST_PROGRESS_FILE" 2>/dev/null || true)
       done=${progress%%/*}
@@ -7201,7 +7242,7 @@ main() {
     start_speedtest_background 0 0
     wait_speedtest_background
   fi
-  show_progress
+  show_progress 1
   printf '\n'
 
   # 收集结果并写入 CSV
