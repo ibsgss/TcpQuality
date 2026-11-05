@@ -268,6 +268,7 @@ COUNT_EXPLICIT=0
 PACKET_SIZES=(40 80 160 320 640 1200)
 # 默认使用标准 TCP SYN，不携带数据；仅在显式指定 -s/--size 时构造指定长度报文。
 PACKET_SIZE_OVERRIDE="0"
+PACKET_SIZE_EXPLICIT=0
 LARGE_PACKET_SIZES=(120 240 480 900 950 1000 1050 1100 1150 1200 1200 900)
 LARGE_PACKET_SMALL_SIZES=(120 240 480)
 LARGE_PACKET_BIG_SIZES=(900 950 1000 1050 1100 1150 1200 1200 900)
@@ -292,6 +293,11 @@ ONLY_LARGE=0
 ROUTE_MODE=0
 ROUTE_PROTOCOL="tcp"
 ROUTE_ACTIVE_PREFIX=""
+UDP_TARGET=""
+UDP_PORT=5201
+UDP_SECONDS=5
+UDP_RATE="1000000"
+UDP_OPTION_USED=0
 SELECTED_PROVINCES=""
 DEBUG_MODE=0
 SPEEDTEST_ENABLED=0
@@ -719,6 +725,10 @@ NixOS:
   --route           仅做三网回程线路识别，不执行 nping 丢包探测、不上传报告
   --route-protocol PROTO
                     设置 --route 的 traceroute 协议: tcp、udp、both，默认 tcp
+  --udp HOST         仅对指定 iperf3 服务端测试 UDP 双向丢包、抖动和去程线路
+  --udp-port PORT    iperf3 TCP 控制及 UDP 测试端口，默认 5201
+  --udp-seconds SEC  每个方向的测试时长，1-60 秒，默认 5 秒
+  --udp-rate RATE    每个方向目标速率，范围 1K-100M，默认 1M
   --speedtest       追加单线程测速（默认北京/上海/广东三地三网）
   --only-speedtest  仅运行单线程测速（默认北京/上海/广东三地三网）
   --intl            单独使用时仅运行国际互联；与 -v4/-v6/--all 等组合时追加国际互联
@@ -759,6 +769,8 @@ NixOS:
   - macOS:         brew install curl nmap iperf3 jq traceroute
 
 说明:
+  UDP 模式需要目标运行 iperf3 服务，且 TCP 控制端口和同端口 UDP 均可访问；结果仅显示在终端，不上传报告。
+  UDP 线路为本机到目标的去程 traceroute，不代表目标到本机的回程；路由器可能不响应探测。
   发送裸 TCP SYN 包通常需要 root 权限；请切换到 root 用户后运行。
 EOF
 }
@@ -785,6 +797,7 @@ parse_args() {
           exit 1
         fi
         PACKET_SIZE_OVERRIDE="$2"
+        PACKET_SIZE_EXPLICIT=1
         shift 2
         ;;
       -p|--parallel)
@@ -829,6 +842,45 @@ parse_args() {
           exit 1
         fi
         ROUTE_PROTOCOL="$2"
+        shift 2
+        ;;
+      --udp)
+        if [ -z "${2:-}" ] || [ "${#2}" -gt 253 ] || ! [[ "$2" =~ ^[A-Za-z0-9:][A-Za-z0-9._:%-]*$ ]]; then
+          echo -e "${RED}[X] --udp 需要有效的 iperf3 目标域名或 IP${NC}" >&2
+          exit 1
+        fi
+        UDP_TARGET="$2"
+        shift 2
+        ;;
+      --udp-port)
+        if ! [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || (( 10#${2:-0} < 1 || 10#${2:-0} > 65535 )); then
+          echo -e "${RED}[X] --udp-port 必须是 1-65535 之间的整数${NC}" >&2
+          exit 1
+        fi
+        UDP_PORT=$((10#$2)); UDP_OPTION_USED=1
+        shift 2
+        ;;
+      --udp-seconds)
+        if ! [[ "${2:-}" =~ ^[0-9]{1,2}$ ]] || (( 10#${2:-0} < 1 || 10#${2:-0} > 60 )); then
+          echo -e "${RED}[X] --udp-seconds 必须是 1-60 之间的整数${NC}" >&2
+          exit 1
+        fi
+        UDP_SECONDS=$((10#$2)); UDP_OPTION_USED=1
+        shift 2
+        ;;
+      --udp-rate)
+        if ! [[ "${2:-}" =~ ^[0-9]{1,8}[KkMm]?$ ]]; then
+          echo -e "${RED}[X] --udp-rate 必须是 1K-100M 的整数速率，例如 1M${NC}" >&2
+          exit 1
+        fi
+        local udp_rate_number="${2%[KkMm]}" udp_rate_suffix="${2##*[0-9]}" udp_rate_bps
+        udp_rate_bps=$((10#$udp_rate_number))
+        case "$udp_rate_suffix" in [Kk]) udp_rate_bps=$((udp_rate_bps * 1000)) ;; [Mm]) udp_rate_bps=$((udp_rate_bps * 1000000)) ;; esac
+        if (( udp_rate_bps < 1000 || udp_rate_bps > 100000000 )); then
+          echo -e "${RED}[X] --udp-rate 范围为 1K-100M${NC}" >&2
+          exit 1
+        fi
+        UDP_RATE="$udp_rate_bps"; UDP_OPTION_USED=1
         shift 2
         ;;
       --speedtest)
@@ -878,6 +930,21 @@ parse_args() {
         ;;
     esac
   done
+
+  if [ -z "$UDP_TARGET" ] && [ "$UDP_OPTION_USED" -eq 1 ]; then
+    echo -e "${RED}[X] --udp-port、--udp-seconds 和 --udp-rate 必须与 --udp HOST 一起使用${NC}" >&2
+    exit 1
+  fi
+  if [ -n "$UDP_TARGET" ]; then
+    if [ "$ONLY_IPV4" -eq 1 ] && [ "$ONLY_IPV6" -eq 1 ]; then
+      echo -e "${RED}[X] UDP 模式不能同时指定 -v4 和 -v6${NC}" >&2
+      exit 1
+    fi
+    if [ "$ONLY_LARGE" -eq 1 ] || [ "$TEST_CERNET" -eq 1 ] || [ "$TEST_ALL" -eq 1 ] || [ "$ROUTE_MODE" -eq 1 ] || [ "$SPEEDTEST_ENABLED" -eq 1 ] || [ "$INTERNATIONAL_ENABLED" -eq 1 ] || [ -n "$SELECTED_PROVINCES" ] || [ "$COUNT_EXPLICIT" -eq 1 ] || [ "$PARALLEL_EXPLICIT" -eq 1 ] || [ "$PACKET_SIZE_EXPLICIT" -eq 1 ]; then
+      echo -e "${RED}[X] --udp 是独立测试模式，不能与其他探测模式或节点参数组合${NC}" >&2
+      exit 1
+    fi
+  fi
 
   if [ "$ONLY_LARGE" -eq 1 ]; then
     ONLY_IPV4=1
@@ -6997,12 +7064,88 @@ run_speedtest_mode() {
   echo
 }
 
+# ===================== UDP 初版：指定 iperf3 服务端 =====================
+UDP_RESOLVED_TARGET=""
+udp_run_direction() {
+  local direction="$1" target="$2" json_file="$RESULT_DIR/udp-${direction}.json"
+  local error_file="$RESULT_DIR/udp-${direction}.err" status=0 values remote reason label="上行（本机 → 服务端）"
+  [ "$direction" = "download" ] && label="下行（服务端 → 本机）"
+  local -a args=(-c "$target" -p "$UDP_PORT" -u -b "$UDP_RATE" -l 1200 -t "$UDP_SECONDS" -J --connect-timeout 5000)
+  [ "$ONLY_IPV4" -eq 1 ] && args+=(-4)
+  [ "$ONLY_IPV6" -eq 1 ] && args+=(-6)
+  [ "$direction" = "download" ] && args+=(-R)
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 "$((UDP_SECONDS + 15))" iperf3 "${args[@]}" > "$json_file" 2> "$error_file" || status=$?
+  else
+    iperf3 "${args[@]}" > "$json_file" 2> "$error_file" || status=$?
+  fi
+  values=$(jq -er '
+    select((.error // "") == "") |
+    (.end.sum_received // .end.sum // empty) as $s |
+    select(($s.packets | type) == "number" and $s.packets > 0 and
+           ($s.lost_packets | type) == "number" and $s.lost_packets >= 0 and $s.lost_packets <= $s.packets and
+           ($s.lost_percent | type) == "number" and $s.lost_percent >= 0 and $s.lost_percent <= 100 and
+           ($s.jitter_ms | type) == "number" and $s.jitter_ms >= 0) |
+    [$s.lost_packets, $s.packets, $s.lost_percent, $s.jitter_ms, ($s.bits_per_second // 0), (.end.streams[0].udp.out_of_order // "-")] | @tsv
+  ' "$json_file" 2>/dev/null || true)
+  if [ "$status" -ne 0 ] || [ -z "$values" ]; then
+    reason=$(jq -r '.error // empty' "$json_file" 2>/dev/null || true)
+    [ -n "$reason" ] || reason=$(tr '\n\r' '  ' < "$error_file" | cut -c1-200)
+    [ -n "$reason" ] || reason="无有效接收端统计（退出码 $status）"
+    printf '  %s：不可用（%s）\n' "$label" "$reason"
+    return 1
+  fi
+  remote=$(jq -r '.start.connected[0].remote_host // empty' "$json_file" 2>/dev/null || true)
+  if [ -z "$UDP_RESOLVED_TARGET" ] && [[ "$remote" =~ ^[A-Za-z0-9:][A-Za-z0-9._:%-]*$ ]]; then
+    UDP_RESOLVED_TARGET="$remote"
+  fi
+  local lost packets percent jitter bps reorder
+  IFS=$'\t' read -r lost packets percent jitter bps reorder <<< "$values"
+  LC_NUMERIC=C printf '  %s：丢包 %s/%s（%.2f%%），抖动 %.3f ms，接收速率 %.2f Mbps，乱序 %s\n' \
+    "$label" "$lost" "$packets" "$percent" "$jitter" "$(LC_NUMERIC=C awk -v b="$bps" 'BEGIN {print b / 1000000}')" "$reorder"
+}
+
+run_udp_mode() {
+  local target="$UDP_TARGET" failed=0 trace_status=0
+  local -a trace_args=(-n -U -p "$UDP_PORT" -q 1 -w 1 -m 20)
+  check_command iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3 iperf3
+  check_command jq jq jq jq jq jq jq jq
+  echo -e "${BOLD}UDP 质量检测（实验版）${NC}"
+  printf '  服务端：%s；端口：%s；每方向 %s 秒；目标速率 %s bit/s；UDP 负载 1200 字节\n' "$UDP_TARGET" "$UDP_PORT" "$UDP_SECONDS" "$UDP_RATE"
+  echo '  丢包和抖动由接收端统计；iperf3 同时需要 TCP 控制连接。'
+  udp_run_direction upload "$target" || failed=1
+  [ -n "$UDP_RESOLVED_TARGET" ] && target="$UDP_RESOLVED_TARGET"
+  udp_run_direction download "$target" || failed=1
+  [ -n "$UDP_RESOLVED_TARGET" ] && target="$UDP_RESOLVED_TARGET"
+  printf '\n  UDP 去程路由（本机 → %s，目标端口 %s；* 表示该跳未响应）：\n' "$target" "$UDP_PORT"
+  if command -v traceroute >/dev/null 2>&1; then
+    [ "$ONLY_IPV4" -eq 1 ] && trace_args+=(-4)
+    [ "$ONLY_IPV6" -eq 1 ] && trace_args+=(-6)
+    if command -v timeout >/dev/null 2>&1; then
+      timeout -k 1 30 traceroute "${trace_args[@]}" "$target" > "$RESULT_DIR/udp-route.txt" 2>&1 || trace_status=$?
+    else
+      traceroute "${trace_args[@]}" "$target" > "$RESULT_DIR/udp-route.txt" 2>&1 || trace_status=$?
+    fi
+    cat "$RESULT_DIR/udp-route.txt"
+    [ "$trace_status" -eq 0 ] || echo "  [!] UDP 路由未完成（退出码 $trace_status）；不代表端到端丢包率。"
+  else
+    echo '  [!] 未安装 traceroute，跳过线路探测；请安装 traceroute 后重试。'
+  fi
+  echo '  [i] 此路由仅为本机到目标的去程；不代表回程。结果不上传在线报告。'
+  [ "$failed" -eq 0 ] || return 1
+}
+
 # ===================== 主流程 =====================
 main() {
   clear
-  print_header
-
   init_privilege
+
+  if [ -n "$UDP_TARGET" ]; then
+    run_udp_mode
+    return $?
+  fi
+
+  print_header
 
   if [ "$INTERNATIONAL_ONLY" -eq 1 ]; then
     [ "$COUNT_EXPLICIT" -eq 1 ] && INTERNATIONAL_PACKETS="$PACKETS"
