@@ -56,18 +56,6 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
-### UDP 质量检测（v1beta 实验版）
-
-UDP 模式是独立测试，需要自行准备可访问的 iperf3 服务端（例如在目标机器运行 `iperf3 -s -p 5201`，并放行该端口的 TCP 和 UDP）。使用 beta 入口：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta/runTcpQuality-beta.sh) --udp YOUR_SERVER_IP_OR_HOSTNAME --udp-port 5201
-```
-
-结果分别显示本机到服务端、服务端到本机的 UDP 丢包率、接收端抖动和接收速率；`-v4` 或 `-v6` 可限定地址族。默认每方向 5 秒、1 Mbps、1200 字节 UDP 负载；可用 `--udp-seconds 10`（1–60 秒）和 `--udp-rate 2M`（1K–100M）调整。线路使用 UDP traceroute，只显示本机到服务端的**去程**，不代表回程；被过滤或不响应的跳数显示 `*`，不能当作端到端 UDP 丢包率。测试失败显示不可用，不会当成 100% 丢包。
-
-此版本只在终端显示，暂不上传在线报告，也不自动测试默认三网节点。UDP 收发需要远端 iperf3 配合；TCP 控制连接失败、远端不允许 UDP 或 UDP 被防火墙丢弃都会使结果不可用。
-
 国际节点的每个 iPerf 测试默认最多重试 10 次，主节点和备用节点共用 45 秒尝试预算；连续 5 个端口拒绝连接或网络不可达时提前结束当前节点。可通过 `TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS` 设置 1–600 秒。DNS 解析耗时可能额外超出预算；没有 `timeout` 命令时，单次 iPerf 运行可能超过剩余预算。缩短预算可能使较慢或临时繁忙的节点显示失败。
 
 ## 低内存机器
