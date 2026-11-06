@@ -110,7 +110,7 @@ configure_interactive_args() {
 
   print_interactive_intro
 
-  answer=$(prompt_answer "运行三网回程测试？（包含 IPv4/IPv6 和 IPv4大包，回车默认 'y'）[y/n]：" "y")
+  answer=$(prompt_answer "运行三网回程测试？（包含 IPv4/IPv6、UDP回程和 IPv4大包，回车默认 'y'）[y/n]：" "y")
   answer_is_no "$answer" || run_route=1
 
   answer=$(prompt_answer "运行教育网回程测试？（CERNET/CERNET2，回车默认 'y'）[y/n]：" "y")
