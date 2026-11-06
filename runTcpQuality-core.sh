@@ -3178,7 +3178,7 @@ show_udp_route_summary() {
       return pad_left(value == "" ? "-" : value, 11)
     }
     END {
-      printf "  %s%sUDP线路识别%s\n", bold, cyan, nc
+      printf "  %s%sUDP回程%s\n", bold, cyan, nc
       printf "  %-10s", ""
       if (has4) printf "%-37s", "IPv4"
       if (has6) printf "%-37s", "IPv6"
@@ -7394,6 +7394,8 @@ main() {
       show_family_results "IPv6回程" "$sorted_v6" "$route_labels_v6"
     fi
   fi
+  show_udp_route_summary "$udp_route_labels_v4" "$udp_route_labels_v6"
+
   if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet" ] && [ -s "$sorted_cernet2" ]; then
     show_education_combined "$sorted_cernet" "$sorted_cernet2"
   else
@@ -7404,8 +7406,6 @@ main() {
       show_education_results "CERNET2-IPv6" "$sorted_cernet2"
     fi
   fi
-
-  show_udp_route_summary "$udp_route_labels_v4" "$udp_route_labels_v6"
 
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
     show_international_results
