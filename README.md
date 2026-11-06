@@ -56,6 +56,14 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
+普通三网测试会使用同一批节点额外识别 UDP 回程线路，并在终端和在线报告的“UDP回程”中显示 IPv4/IPv6 线路；不探测 UDP 延迟或丢包率。UDP 线路识别会增加测试时间，中间节点不响应时线路可能显示 `Hidden`。
+
+运行 v1beta：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/v1beta/runTcpQuality.sh)
+```
+
 国际节点的每个 iPerf 测试默认最多重试 10 次，主节点和备用节点共用 45 秒尝试预算；连续 5 个端口拒绝连接或网络不可达时提前结束当前节点。可通过 `TCPQUALITY_INTERNATIONAL_IPERF_BUDGET_SECONDS` 设置 1–600 秒。DNS 解析耗时可能额外超出预算；没有 `timeout` 命令时，单次 iPerf 运行可能超过剩余预算。缩短预算可能使较慢或临时繁忙的节点显示失败。
 
 ## 低内存机器

@@ -1120,7 +1120,7 @@ show_single_progress() {
 }
 
 count_route_progress() {
-  find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'summary_route[46]_[0-9]*' -o -name 'summary_large_route4_[0-9]*' -o -name 'edu_route[46]_[0-9]*' \) ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
+  find "$RESULT_DIR" -maxdepth 1 -type f \( -name 'summary_route[46]_[0-9]*' -o -name 'summary_udp_route[46]_[0-9]*' -o -name 'summary_large_route4_[0-9]*' -o -name 'edu_route[46]_[0-9]*' \) ! -name '*.ips' 2>/dev/null | wc -l | tr -d ' '
 }
 
 count_international_progress() {
@@ -3002,11 +3002,13 @@ collect_route_labels() {
   done < "$route_raw_file"
 
   if [ "$DEBUG_MODE" -eq 1 ]; then
-    cp "$route_raw_file" "${RESULT_DIR}/route_raw_summary_v${family}.txt"
-    cp "$ip_file" "${RESULT_DIR}/route_ips_summary_v${family}.txt"
-    cp "$cymru_file" "${RESULT_DIR}/route_cymru_summary_v${family}.txt"
-    cp "$asn_map_file" "${RESULT_DIR}/route_asn_map_summary_v${family}.txt"
-    cp "$out_file" "${RESULT_DIR}/route_final_summary_v${family}.txt"
+    local debug_kind=""
+    [ "$route_protocol" = udp ] && debug_kind="udp_"
+    cp "$route_raw_file" "${RESULT_DIR}/${debug_kind}route_raw_summary_v${family}.txt"
+    cp "$ip_file" "${RESULT_DIR}/${debug_kind}route_ips_summary_v${family}.txt"
+    cp "$cymru_file" "${RESULT_DIR}/${debug_kind}route_cymru_summary_v${family}.txt"
+    cp "$asn_map_file" "${RESULT_DIR}/${debug_kind}route_asn_map_summary_v${family}.txt"
+    cp "$out_file" "${RESULT_DIR}/${debug_kind}route_final_summary_v${family}.txt"
   fi
 
   rm -f "$route_raw_file" "$ip_file" "$cymru_file" "$asn_map_file"
@@ -3089,13 +3091,13 @@ set_route_progress_total() {
   local has_v4="$1" has_v6="$2" include_cdn="${3:-1}" include_edu="${4:-0}" include_large="${5:-0}"
   ROUTE_PROGRESS_TOTAL=0
   if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
-    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + 2 * $(count_selected_cdn_nodes 4)))
   fi
   if [ "$include_large" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
     ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 4)))
   fi
   if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
-    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_selected_cdn_nodes 6)))
+    ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + 2 * $(count_selected_cdn_nodes 6)))
   fi
   if [ "$include_edu" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
     ROUTE_PROGRESS_TOTAL=$((ROUTE_PROGRESS_TOTAL + $(count_cernet_nodes)))
@@ -3108,6 +3110,7 @@ set_route_progress_total() {
 
 start_route_background() {
   local route_labels_v4="$1" route_labels_v6="$2" has_v4="$3" has_v6="$4" include_cdn="${5:-1}" include_edu="${6:-0}" edu_route_labels_v4="${7:-}" edu_route_labels_v6="${8:-}" large_route_labels_v4="${9:-}" include_large="${10:-0}"
+  local udp_route_labels_v4="${11:-}" udp_route_labels_v6="${12:-}"
   [ "$ROUTE_PROGRESS_TOTAL" -gt 0 ] || return 0
   (
     if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ]; then
@@ -3118,6 +3121,12 @@ start_route_background() {
     fi
     if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ]; then
       collect_route_labels 6 "$route_labels_v6"
+    fi
+    if [ "$include_cdn" -eq 1 ] && [ "$has_v4" -eq 1 ] && [ -n "$udp_route_labels_v4" ]; then
+      collect_route_labels 4 "$udp_route_labels_v4" "summary_udp_route4" 44 udp
+    fi
+    if [ "$include_cdn" -eq 1 ] && [ "$has_v6" -eq 1 ] && [ -n "$udp_route_labels_v6" ]; then
+      collect_route_labels 6 "$udp_route_labels_v6" "summary_udp_route6" 44 udp
     fi
     if [ "$include_edu" -eq 1 ] && [ "$has_v4" -eq 1 ] && [ -n "$edu_route_labels_v4" ]; then
       collect_education_route_labels 4 "$edu_route_labels_v4"
@@ -3139,6 +3148,67 @@ wait_route_background() {
   done
   wait "$ROUTE_BACKGROUND_PID" 2>/dev/null || true
   check_worker_results "$(count_route_progress)" "$ROUTE_PROGRESS_TOTAL" 回程识别
+}
+
+append_udp_routes_csv() {
+  local file="$1" family="$2" csv="$3"
+  awk -F'|' -v family="$family" '
+    NF >= 6 {
+      status = ($1 == "OK" ? "OK" : "FAIL")
+      label = ($1 == "OK" && $6 != "" ? $6 : "Hidden")
+      printf "UDP线路,IPv%s,%s,%s,%s,,%s,,,,,%s\n", family, $2, $3, $5, status, label
+    }
+  ' "$file" >> "$csv"
+}
+
+show_udp_route_summary() {
+  local file4="$1" file6="$2" has4=0 has6=0
+  [ -s "$file4" ] && has4=1
+  [ -s "$file6" ] && has6=1
+  [ "$has4" -eq 1 ] || [ "$has6" -eq 1 ] || return 0
+  awk -F'|' -v has4="$has4" -v has6="$has6" -v cyan="$CYAN" -v white="$WHITE" -v yellow="$YELLOW" -v red="$RED" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" "$(awk_table_helpers)"'
+    FILENAME == ARGV[1] { family = "IPv4" }
+    FILENAME == ARGV[2] { family = "IPv6" }
+    NF >= 6 {
+      if (!($2 in seen)) { seen[$2] = 1; order[++n] = $2 }
+      data[family SUBSEP $2 SUBSEP $3] = ($1 == "OK" ? ($6 == "" ? "Hidden" : $6) : "failed")
+      statuses[family SUBSEP $2 SUBSEP $3] = $1
+    }
+    function cell(family, province, carrier, value, status, color) {
+      value = data[family SUBSEP province SUBSEP carrier]
+      status = statuses[family SUBSEP province SUBSEP carrier]
+      color = (value == "" ? dim : status != "OK" ? red : value == "Hidden" || value == "NoData" ? yellow : white)
+      return color pad_left(value == "" ? "-" : value, 11) nc
+    }
+    function province_cell(province, width) {
+      width = (province == "黑龙江" || province == "内蒙古") ? 6 : 4
+      return cyan province nc spaces(10 - width)
+    }
+    function carrier_header() {
+      return cyan spaces(7) "电信" nc white " / " nc cyan spaces(7) "联通" nc white " / " nc cyan spaces(7) "移动" nc
+    }
+    END {
+      printf "  %s%sUDP回程%s\n", bold, cyan, nc
+      printf "  %s%s", spaces(10), cyan
+      if (has4) printf "%s", center("IPv4", 39)
+      if (has4 && has6) printf "%s / %s", white, cyan
+      if (has6) printf "%s", center("IPv6", 39)
+      printf "%s\n  %s三网概览%s%s%s", nc, cyan, spaces(2), nc, cyan
+      if (has4) printf "%s", carrier_header()
+      if (has4 && has6) printf "%s / %s", white, cyan
+      if (has6) printf "%s", carrier_header()
+      printf "%s", nc
+      printf "\n"
+      for (i=1; i<=n; i++) {
+        p=order[i]; printf "  %s", province_cell(p)
+        if (has4) printf "%s%s / %s%s%s / %s%s", cell("IPv4",p,"电信"), white, nc, cell("IPv4",p,"联通"), white, nc, cell("IPv4",p,"移动")
+        if (has4 && has6) printf "%s / %s", white, nc
+        if (has6) printf "%s%s / %s%s%s / %s%s", cell("IPv6",p,"电信"), white, nc, cell("IPv6",p,"联通"), white, nc, cell("IPv6",p,"移动")
+        printf "\n"
+      }
+      printf "\n"
+    }
+  ' "$file4" "$file6"
 }
 
 export -f route_trace_one
@@ -7131,7 +7201,7 @@ main() {
     check_traceroute
   fi
 
-  local sorted_v4 sorted_v6 sorted_large_v4 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 route_labels_large_v4 edu_route_labels_v4 edu_route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
+  local sorted_v4 sorted_v6 sorted_large_v4 sorted_cernet sorted_cernet2 route_labels_v4 route_labels_v6 route_labels_large_v4 edu_route_labels_v4 edu_route_labels_v6 udp_route_labels_v4 udp_route_labels_v6 sorted_file f i status ip snd rcv loss lat route_label route_file
   sorted_v4=$(mktemp)
   sorted_v6=$(mktemp)
   sorted_large_v4=$(mktemp)
@@ -7142,6 +7212,8 @@ main() {
   route_labels_large_v4=$(mktemp)
   edu_route_labels_v4=$(mktemp)
   edu_route_labels_v6=$(mktemp)
+  udp_route_labels_v4=$(mktemp)
+  udp_route_labels_v6=$(mktemp)
 
   # 回程识别先执行；完成后再做延迟/丢包、国际互联和测速，避免前置探测流量影响路由响应。
   SPEEDTEST_PROGRESS_TOTAL=0
@@ -7167,7 +7239,7 @@ main() {
 
   # 第一阶段：只做回程路由识别。所有 nping 延迟/丢包探测都在此阶段结束后执行。
   if [ "$normal_cdn_enabled" -eq 1 ] || [ "$test_edu" -eq 1 ] || [ "$large_packet_route_enabled" -eq 1 ]; then
-    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_route_enabled"
+    start_route_background "$route_labels_v4" "$route_labels_v6" "$ipv4_enabled" "$ipv6_enabled" "$normal_cdn_enabled" "$test_edu" "$edu_route_labels_v4" "$edu_route_labels_v6" "$route_labels_large_v4" "$large_packet_route_enabled" "$udp_route_labels_v4" "$udp_route_labels_v6"
     wait_route_background
   fi
 
@@ -7313,6 +7385,8 @@ main() {
     append_international_csv "$CSV"
     append_international_latency_csv "$CSV"
   fi
+  append_udp_routes_csv "$udp_route_labels_v4" 4 "$CSV"
+  append_udp_routes_csv "$udp_route_labels_v6" 6 "$CSV"
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     append_speedtest_csv "$CSV"
   fi
@@ -7334,6 +7408,8 @@ main() {
       show_family_results "IPv6回程" "$sorted_v6" "$route_labels_v6"
     fi
   fi
+  show_udp_route_summary "$udp_route_labels_v4" "$udp_route_labels_v6"
+
   if [ "$test_edu" -eq 1 ] && [ -s "$sorted_cernet" ] && [ -s "$sorted_cernet2" ]; then
     show_education_combined "$sorted_cernet" "$sorted_cernet2"
   else
@@ -7359,7 +7435,7 @@ main() {
   fi
   echo ""
 
-  rm -f "$sorted_v4" "$sorted_v6" "$sorted_large_v4" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6" "$route_labels_large_v4" "$edu_route_labels_v4" "$edu_route_labels_v6"
+  rm -f "$sorted_v4" "$sorted_v6" "$sorted_large_v4" "$sorted_cernet" "$sorted_cernet2" "$route_labels_v4" "$route_labels_v6" "$route_labels_large_v4" "$edu_route_labels_v4" "$edu_route_labels_v6" "$udp_route_labels_v4" "$udp_route_labels_v6"
 }
 
 parse_args "$@"
