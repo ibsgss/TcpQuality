@@ -3166,33 +3166,47 @@ show_udp_route_summary() {
   [ -s "$file4" ] && has4=1
   [ -s "$file6" ] && has6=1
   [ "$has4" -eq 1 ] || [ "$has6" -eq 1 ] || return 0
-  awk -F'|' -v has4="$has4" -v has6="$has6" -v cyan="$CYAN" -v bold="$BOLD" -v nc="$NC" "$(awk_table_helpers)"'
+  awk -F'|' -v has4="$has4" -v has6="$has6" -v cyan="$CYAN" -v white="$WHITE" -v yellow="$YELLOW" -v red="$RED" -v dim="$DIM" -v bold="$BOLD" -v nc="$NC" "$(awk_table_helpers)"'
     FILENAME == ARGV[1] { family = "IPv4" }
     FILENAME == ARGV[2] { family = "IPv6" }
     NF >= 6 {
       if (!($2 in seen)) { seen[$2] = 1; order[++n] = $2 }
       data[family SUBSEP $2 SUBSEP $3] = ($1 == "OK" ? ($6 == "" ? "Hidden" : $6) : "failed")
+      statuses[family SUBSEP $2 SUBSEP $3] = $1
     }
-    function cell(family, province, carrier, value) {
+    function cell(family, province, carrier, value, status, color) {
       value = data[family SUBSEP province SUBSEP carrier]
-      return pad_left(value == "" ? "-" : value, 11)
+      status = statuses[family SUBSEP province SUBSEP carrier]
+      color = (value == "" ? dim : status != "OK" ? red : value == "Hidden" || value == "NoData" ? yellow : white)
+      return color pad_left(value == "" ? "-" : value, 11) nc
+    }
+    function province_cell(province, width) {
+      width = (province == "黑龙江" || province == "内蒙古") ? 6 : 4
+      return cyan province nc spaces(10 - width)
+    }
+    function carrier_header() {
+      return cyan spaces(7) "电信" nc white " / " nc cyan spaces(7) "联通" nc white " / " nc cyan spaces(7) "移动" nc
     }
     END {
       printf "  %s%sUDP回程%s\n", bold, cyan, nc
-      printf "  %-10s", ""
-      if (has4) printf "%-37s", "IPv4"
-      if (has6) printf "%-37s", "IPv6"
-      printf "\n  %-10s", "省份"
-      if (has4) printf "%11s / %11s / %11s", "电信", "联通", "移动"
-      if (has6) printf "  %11s / %11s / %11s", "电信", "联通", "移动"
+      printf "  %s%s", spaces(10), cyan
+      if (has4) printf "%s", center("IPv4", 39)
+      if (has4 && has6) printf "%s / %s", white, cyan
+      if (has6) printf "%s", center("IPv6", 39)
+      printf "%s\n  %s三网概览%s%s%s", nc, cyan, spaces(2), nc, cyan
+      if (has4) printf "%s", carrier_header()
+      if (has4 && has6) printf "%s / %s", white, cyan
+      if (has6) printf "%s", carrier_header()
+      printf "%s", nc
       printf "\n"
       for (i=1; i<=n; i++) {
-        p=order[i]; printf "  %s", pad_right(p, 10)
-        if (has4) printf "%s / %s / %s", cell("IPv4",p,"电信"), cell("IPv4",p,"联通"), cell("IPv4",p,"移动")
-        if (has6) printf "  %s / %s / %s", cell("IPv6",p,"电信"), cell("IPv6",p,"联通"), cell("IPv6",p,"移动")
+        p=order[i]; printf "  %s", province_cell(p)
+        if (has4) printf "%s%s / %s%s%s / %s%s", cell("IPv4",p,"电信"), white, nc, cell("IPv4",p,"联通"), white, nc, cell("IPv4",p,"移动")
+        if (has4 && has6) printf "%s / %s", white, nc
+        if (has6) printf "%s%s / %s%s%s / %s%s", cell("IPv6",p,"电信"), white, nc, cell("IPv6",p,"联通"), white, nc, cell("IPv6",p,"移动")
         printf "\n"
       }
-      printf "  Hidden 表示无法识别；仅识别线路，不统计 UDP 延迟或丢包。\n\n"
+      printf "\n"
     }
   ' "$file4" "$file6"
 }
