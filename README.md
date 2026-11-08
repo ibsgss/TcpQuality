@@ -56,6 +56,20 @@ curl -fsSL https://tcpquality.ibsgss.uk/run | env TERM=xterm bash
 - `--province CODE`：仅检测指定省份，可重复；也支持 `-bj`、`-sh`、`-gd` 等省份简写。
 - `--debug`：保留临时文件并输出调试信息。
 
+## IPv6 补充工具: 大包回程 + 单线程测速
+
+主流程的大包回程(`--only-large`)与单线程测速目前仅覆盖 IPv4; `runTcpQuality-v6.sh` 补齐对应的两项 IPv6 能力, 方法论与 IPv4 实现一致:
+
+- `--large`: `nping -6 --tcp --flags syn --data-length`(on-wire ≤1200B)按尺寸统计丢包率与平均 RTT; v6 裸 SYN 源地址为 `::` 必丢, 自动切换 L2 模式(`-S/-e/--source-mac/--dest-mac`, 与核心脚本 `IPV6_NPING_FORCE_L2` 处理一致); 逐目标先做 TCP 预检, 不可达目标标记跳过, 避免与"大包"问题混淆
+- `--route`: nexttrace-tiny TCP 1200B 回程路由识别(同 IPv4 大包回程)
+- `--speed`: `curl -6` 单线程下行/上行测速, 固定目标 `speed.cloudflare.com` 的 `__down`/`__up` 端点, 每次仅一个连接, 输出均值/峰值与连接/TLS/首包耗时拆解
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality-v6.sh) --all
+```
+
+依赖: `nmap`(nping)、`curl`; `nexttrace-tiny` 可选(仅 `--route`)。环境变量 `DOWN_BYTES`/`UP_BYTES`/`COUNT` 可调测试强度。
+
 ## 许可证
 
 本项目原创代码采用 GPL-3.0-only，详见 [LICENSE](LICENSE)。预构建 rootfs 中的 Debian 软件包、NextTrace/nexttrace-tiny 等第三方组件仍按各自许可证授权；再分发时须遵守其许可条款。
