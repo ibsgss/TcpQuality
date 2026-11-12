@@ -4517,7 +4517,16 @@ speedtest_candidates() {
   esac
 }
 
+speedtest_ipv4_selected() {
+  [ "$TEST_ALL" -eq 1 ] || [ "$ONLY_IPV6" -eq 0 ] || [ "$ONLY_IPV4" -eq 1 ]
+}
+
+speedtest_ipv6_selected() {
+  [ "$TEST_ALL" -eq 1 ] || [ "$ONLY_IPV4" -eq 0 ] || [ "$ONLY_IPV6" -eq 1 ]
+}
+
 speedtest_group_specs() {
+  speedtest_ipv4_selected || return 0
   local selected_supported=0
   if [ -n "$SELECTED_PROVINCES" ]; then
     [[ "$SELECTED_PROVINCES" == *"|北京|"* ]] && {
@@ -4556,6 +4565,7 @@ speedtest_applecdn_tests_enabled() {
 
 speedtest_applecdn6_tests_enabled() {
   speedtest_applecdn_tests_enabled || return 1
+  speedtest_ipv6_selected || return 1
   speedtest_ipv6_available
 }
 
@@ -6217,11 +6227,13 @@ speedtest_applecdn_curl_upload() {
 speedtest_collect_applecdn() {
   local workdir result_file family_name ip_flag download download_retrans download_connect download_tls upload upload_retrans upload_connect upload_tls
   local apple_values=()
-  local apple_families=("Apple IPv4:-4")
+  local apple_families=()
   speedtest_applecdn_tests_enabled || return 0
+  speedtest_ipv4_selected && apple_families+=("Apple IPv4:-4")
   if speedtest_applecdn6_tests_enabled; then
     apple_families+=("Apple IPv6:-6")
   fi
+  [ "${#apple_families[@]}" -gt 0 ] || return 0
   for family_name in "${apple_families[@]}"; do
     ip_flag="${family_name##*:}"
     family_name="${family_name%%:*}"
@@ -6542,12 +6554,16 @@ collect_speedtest_results() {
   apple_steps=0
   apple_ipv6_steps=0
   if speedtest_applecdn_tests_enabled; then
-    apple_steps=1
+    speedtest_ipv4_selected && apple_steps=1
     if speedtest_applecdn6_tests_enabled; then
-      apple_steps=2
+      apple_steps=$((apple_steps + 1))
       load_remote_applecdn6_nodes || true
       apple_ipv6_steps=${#SPEEDTEST_APPLECDN6_NODES[@]}
     fi
+  fi
+  if [ "$(($(speedtest_group_count) * ${#carriers[@]} + apple_steps + apple_ipv6_steps))" -eq 0 ]; then
+    echo -e "${YELLOW}[!] 所选 IP 版本没有可用测速项目，请检查 IPv6 连通性和省份筛选${NC}" >&2
+    return 1
   fi
   [ "$total" -gt 0 ] 2>/dev/null || total=$((offset + $(speedtest_group_count) * ${#carriers[@]} + apple_steps + apple_ipv6_steps))
 
@@ -6595,13 +6611,20 @@ collect_speedtest_results() {
       echo -e "${DIM}[debug] 重传去重: eBPF 不可用，使用 TCP_INFO/nstat 原始重传事件${NC}" >&2
     fi
   fi
-  if request_rank_session; then
+  if ! speedtest_ipv4_selected; then
+    SPEEDTEST_RANK_ELIGIBLE=0
+    SPEEDTEST_RANK_DISABLED_REASON="ipv6_only_speedtest"
+  elif request_rank_session; then
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 已获取${NC}" >&2
   else
     [ -n "$SPEEDTEST_RANK_DISABLED_REASON" ] || SPEEDTEST_RANK_DISABLED_REASON="rank_session_request_failed"
     [ "$DEBUG_MODE" -eq 1 ] && echo -e "${DIM}[debug] rank session 获取失败：$SPEEDTEST_RANK_DISABLED_REASON，本次报告不会进入排名${NC}" >&2
   fi
-  SPEEDTEST_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+  if speedtest_ipv4_selected; then
+    SPEEDTEST_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+  else
+    SPEEDTEST_IFACE=$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i == "dev") {print $(i+1); exit}}')
+  fi
   [ -n "$SPEEDTEST_IFACE" ] || {
     echo -e "${RED}[X] 无法识别默认网络接口${NC}"
     exit 1
@@ -6717,11 +6740,14 @@ speedtest_set_failed_rows() {
         speedtest_add_ipv6_unavailable_row
       fi
     fi
-    apple_row="AppleCDN;failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-"
+    apple_row="AppleCDN"
+    if speedtest_ipv4_selected; then
+      apple_row+=";failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv4|-|-|-|-"
+    fi
     if speedtest_applecdn6_tests_enabled; then
       apple_row+=";failed|failed|failed|$SPEEDTEST_APPLECDN_HOST|Apple IPv6|-|-|-|-"
     fi
-    SPEEDTEST_ROWS+=("$apple_row;")
+    [ "$apple_row" = "AppleCDN" ] || SPEEDTEST_ROWS+=("$apple_row;")
   fi
 }
 
@@ -7044,7 +7070,9 @@ run_speedtest_mode() {
   local report_time csv
   check_curl
   detect_ip_stack
-  if ipv6_available; then
+  if ! speedtest_ipv6_selected; then
+    echo -e "${DIM}[i] 已按参数跳过 IPv6 测速${NC}"
+  elif ipv6_available; then
     echo -e "${GREEN}[√] 单线程测速检测到可用 IPv6${NC}"
   else
     echo -e "${YELLOW}[!] 单线程测速未检测到可用 IPv6，跳过 IPv6 测速${NC}"
@@ -7220,9 +7248,12 @@ main() {
   if [ "$SPEEDTEST_ENABLED" -eq 1 ]; then
     SPEEDTEST_PROGRESS_TOTAL=$(($(speedtest_group_count) * 3))
     if speedtest_applecdn_tests_enabled; then
-      speedtest_applecdn6_tests_enabled || true
-      SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
-      [ "$SPEEDTEST_IPV6_AVAILABLE" -eq 1 ] && SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + 1))
+      if speedtest_ipv4_selected; then
+        SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + 1))
+      fi
+      if speedtest_applecdn6_tests_enabled; then
+        SPEEDTEST_PROGRESS_TOTAL=$((SPEEDTEST_PROGRESS_TOTAL + $(speedtest_applecdn6_count) + 1))
+      fi
     fi
   fi
   if [ "$INTERNATIONAL_ENABLED" -eq 1 ]; then
